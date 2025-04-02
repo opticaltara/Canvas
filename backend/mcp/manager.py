@@ -86,6 +86,10 @@ class MCPServerManager:
         """Stop all running MCP servers"""
         for connection_id, process in self.processes.items():
             try:
+                if process is None:
+                    # Skip Docker-based processes - they're managed separately
+                    continue
+                
                 # Send SIGTERM to the process
                 process.terminate()
                 
@@ -134,7 +138,7 @@ class MCPServerManager:
         # Start the MCP server
         try:
             cmd = [
-                "npx", "@anthropic-ai/mcp-grafana", 
+                "mcp-grafana", 
                 "--port", str(port)
             ]
             
@@ -194,32 +198,34 @@ class MCPServerManager:
         env = os.environ.copy()
         env["PG_CONNECTION_STRING"] = connection_string
         
-        # Start the MCP server
+        # Use the Docker container instead of launching a new process
         try:
-            cmd = [
-                "npx", "pg-mcp", 
-                "--port", str(port)
-            ]
+            # The PostgreSQL MCP server is already running in Docker
+            # We don't need to start a new process, just return the address
+            # Using port 9201 for the Docker container
+            port = 9201
             
-            process = subprocess.Popen(
-                cmd,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
+            # We don't need to start a process as it's running in Docker
+            # Just record a placeholder in the processes dict for cleanup tracking
+            self.processes[connection.id] = None
             
-            self.processes[connection.id] = process
+            # Wait a moment to ensure Docker container is ready
+            await asyncio.sleep(1)
             
-            # Wait for server to start
-            await asyncio.sleep(2)
-            
-            # Check if process is still running
-            if process.poll() is not None:
-                stderr = ""
-                if process.stderr:
-                    stderr = process.stderr.read() or ""
-                print(f"Postgres MCP server failed to start: {stderr}")
+            # Check if the Docker container is running
+            try:
+                docker_check = subprocess.run(
+                    ["docker", "ps", "--filter", "name=pg-mcp", "--format", "{{.Names}}"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                
+                if "pg-mcp" not in docker_check.stdout:
+                    print("PostgreSQL MCP Docker container is not running")
+                    return None
+            except Exception as e:
+                print(f"Error checking PostgreSQL MCP Docker container: {e}")
                 return None
             
             address = f"localhost:{port}"

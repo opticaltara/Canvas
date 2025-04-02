@@ -84,10 +84,10 @@ Sherlog Canvas uses Machine-Callable Package (MCP) servers for data source integ
 
 ### Supported MCP Servers
 
-| Data Source | MCP Package          | Purpose                                 |
+| Data Source | MCP Implementation | Purpose                                 |
 |-------------|----------------------|-----------------------------------------|
-| Grafana     | @anthropic-ai/mcp-grafana | Query Grafana dashboards, metrics, logs |
-| PostgreSQL  | pg-mcp              | Query PostgreSQL databases              |
+| Grafana     | mcp-grafana (Go)    | Query Grafana dashboards, metrics, logs |
+| PostgreSQL  | pg-mcp (Docker)     | Query PostgreSQL databases              |
 | Prometheus  | *(coming soon)*     | Query Prometheus metrics                |
 | Loki        | *(coming soon)*     | Query Loki logs                         |
 | S3          | *(coming soon)*     | Interact with S3 storage                |
@@ -114,19 +114,30 @@ Sherlog Canvas will:
 
 You can also install and run MCP servers manually:
 
+#### Grafana MCP Server (Go-based)
+
 ```bash
-# Install MCP packages globally
-npm install -g @anthropic-ai/mcp-grafana pg-mcp
+# Install mcp-grafana using Go
+GOBIN="$HOME/go/bin" go install github.com/grafana/mcp-grafana/cmd/mcp-grafana@latest
 
 # Start Grafana MCP server
 export GRAFANA_URL=https://your-grafana-url
 export GRAFANA_API_KEY=your-api-key
-npx @anthropic-ai/mcp-grafana --port 9100
-
-# Start PostgreSQL MCP server
-export PG_CONNECTION_STRING=postgresql://user:pass@localhost/dbname
-npx pg-mcp --port 9200
+mcp-grafana --port 9100
 ```
+
+#### PostgreSQL MCP Server (Docker-based)
+
+```bash
+# Clone the repository
+git clone https://github.com/stuzero/pg-mcp.git
+cd pg-mcp
+
+# Start PostgreSQL MCP server with Docker Compose
+export PG_CONNECTION_STRING=postgresql://user:pass@localhost/dbname
+docker-compose up -d
+```
+The server will be available at http://localhost:9201 by default.
 
 ## Manual Setup
 
@@ -135,7 +146,9 @@ If you prefer to start components individually:
 ### Prerequisites
 - Python 3.9+
 - Node.js 16+
-- Docker (for Qdrant)
+- Go 1.18+ (for mcp-grafana)
+- Git (for cloning repositories)
+- Docker and Docker Compose (for Qdrant and pg-mcp)
 - Access to data sources (PostgreSQL, Grafana, etc.)
 
 ### Backend Setup
