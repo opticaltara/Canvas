@@ -153,7 +153,9 @@ class MCPServerManager:
             
             # Check if process is still running
             if process.poll() is not None:
-                stderr = process.stderr.read()
+                stderr = ""
+                if process.stderr:
+                    stderr = process.stderr.read() or ""
                 print(f"Grafana MCP server failed to start: {stderr}")
                 return None
             
@@ -214,7 +216,9 @@ class MCPServerManager:
             
             # Check if process is still running
             if process.poll() is not None:
-                stderr = process.stderr.read()
+                stderr = ""
+                if process.stderr:
+                    stderr = process.stderr.read() or ""
                 print(f"Postgres MCP server failed to start: {stderr}")
                 return None
             
