@@ -19,7 +19,8 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple, Union, Literal
 from uuid import UUID
 
-import logfire
+# import logfire
+import logging
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent as PydanticAgent, RunContext, Tool
 
@@ -29,9 +30,11 @@ from backend.core.cell import AIQueryCell, Cell, CellStatus, CellType, create_ce
 from backend.core.execution import ExecutionContext
 from backend.core.notebook import Notebook
 from backend.ai.planning import InvestigationPlan, InvestigationStep, PlanAdapter
+from backend.services.connection_manager import ConnectionConfig
 
 # Get logger for AI operations
-ai_logger = logfire.getLogger("ai")
+# ai_logger = logfire.getLogger("ai")
+ai_logger = logging.getLogger("ai")
 
 # Get settings for API keys
 settings = get_settings()
@@ -175,10 +178,7 @@ async def get_data_source_context(ctx: RunContext[InvestigationDependencies], pa
         String containing relevant context information from data sources
     """
     ai_logger.info(
-        "Retrieving data source context",
-        query=params.query,
-        source_type=params.source_type,
-        limit=params.limit
+        f"Retrieving data source context query={params.query} source_type={params.source_type} limit={params.limit}"
     )
     
     # Get the context engine
@@ -196,20 +196,14 @@ async def get_data_source_context(ctx: RunContext[InvestigationDependencies], pa
         context_str = context_engine.build_context_for_ai(context_items)
         
         ai_logger.info(
-            "Data source context retrieved",
-            query=params.query,
-            context_items_count=len(context_items),
-            has_context=bool(context_str)
+            f"Data source context retrieved query={params.query} context_items_count={len(context_items)} has_context={bool(context_str)}"
         )
         
         return context_str if context_str else "No relevant context found for the query."
     
     except Exception as e:
         ai_logger.error(
-            "Error retrieving context",
-            query=params.query,
-            error=str(e),
-            error_type=type(e).__name__
+            f"Error retrieving context query={params.query} error={str(e)} error_type={type(e).__name__}"
         )
         return f"Error retrieving context: {str(e)}"
 
@@ -412,8 +406,12 @@ async def query_metrics(ctx: RunContext[InvestigationDependencies], params: Metr
                     "instant": params.instant
                 }
                 if params.time_range:
-                    query_params["from"] = params.time_range.get("start")
-                    query_params["to"] = params.time_range.get("end")
+                    start = params.time_range.get("start")
+                    end = params.time_range.get("end")
+                    if start is not None:
+                        query_params["from"] = bool(start)
+                    if end is not None:
+                        query_params["to"] = bool(end)
                 
                 # Execute the query differently based on the source
                 if connection_type == "grafana":
@@ -585,7 +583,7 @@ class AIAgent:
         self.model = self.settings.anthropic_model
         self.context_engine = get_context_engine()
     
-    async def generate_investigation_plan(self, query: str, available_data_sources: List[str] = None, mcp_clients: Dict[str, Any] = None) -> InvestigationPlanModel:
+    async def generate_investigation_plan(self, query: str, available_data_sources: Optional[List[str]] = None, mcp_clients: Optional[Dict[str, Any]] = None) -> InvestigationPlanModel:
         """
         Generate an investigation plan for a query using Pydantic AI
         
@@ -748,9 +746,13 @@ async def execute_ai_query_cell(cell: AIQueryCell, context: ExecutionContext) ->
             connections = connection_manager.get_all_connections()
             
             # Start MCP servers for all connections
-            server_addresses = await mcp_manager.start_mcp_servers(
-                [conn for conn in connections if isinstance(conn, dict) and "id" in conn]
-            )
+            connection_configs = []
+            for conn in connections:
+                if isinstance(conn, dict) and "id" in conn:
+                    # Convert dictionary to ConnectionConfig object
+                    connection_configs.append(ConnectionConfig(**conn))
+            
+            server_addresses = await mcp_manager.start_mcp_servers(connection_configs)
             
             # Create basic client objects for each connection/server
             mcp_clients = {}

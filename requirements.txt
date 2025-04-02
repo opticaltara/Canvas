@@ -44,3 +44,5 @@ python-multipart>=0.0.6
 
 # Logfire for logging and observability
 logfire>=3.12.0
+opentelemetry-instrumentation-asgi==0.52b1
+logfire[fastapi]
