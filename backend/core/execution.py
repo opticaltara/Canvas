@@ -1,9 +1,9 @@
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Union
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import logfire
 
@@ -16,14 +16,8 @@ class ExecutionContext:
     """Context for cell execution with access to notebook state"""
     notebook: Notebook
     cell_id: UUID
-    variables: Dict[str, Any] = None
-    mcp_clients: Dict[str, Any] = None
-    
-    def __post_init__(self):
-        if self.variables is None:
-            self.variables = {}
-        if self.mcp_clients is None:
-            self.mcp_clients = {}
+    variables: Dict[str, Any] = field(default_factory=dict)
+    mcp_clients: Dict[str, Any] = field(default_factory=dict)
 
 
 class ExecutionQueue:
@@ -158,7 +152,7 @@ class CellExecutor:
         result = None
         error = None
         
-        execution_id = str(UUID.uuid4())
+        execution_id = str(uuid4())
         self.logger.info("Executing cell", 
                         notebook_id=str(notebook_id), 
                         cell_id=str(cell_id),

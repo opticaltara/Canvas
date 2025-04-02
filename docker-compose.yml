@@ -20,7 +20,7 @@ services:
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
       - AWS_REGION=${AWS_REGION:-us-east-1}
       # Logfire configuration
-      - LOGFIRE_DSN=${LOGFIRE_DSN:-}
+      - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
       - SHERLOG_ENV=${SHERLOG_ENV:-development}
       - PYTHONUNBUFFERED=1
     ports:

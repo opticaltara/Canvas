@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field("", env="ANTHROPIC_API_KEY")
     anthropic_model: str = "claude-3-7-sonnet-20250219"
     
+    # Logging settings
+    logfire_token: str = Field("", env="LOGFIRE_TOKEN")
+    environment: str = Field("development", env="SHERLOG_ENV")
+    
     # Storage settings
     notebook_storage_type: str = "file"  # Options: file, s3, none
     notebook_file_storage_dir: str = "./data/notebooks"

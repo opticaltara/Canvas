@@ -14,10 +14,12 @@ with tools that connect to various data sources like SQL, Prometheus, Loki, and 
 
 import asyncio
 import json
+import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple, Union, Literal
 from uuid import UUID
 
+import logfire
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent as PydanticAgent, RunContext, Tool
 
@@ -28,6 +30,12 @@ from backend.core.execution import ExecutionContext
 from backend.core.notebook import Notebook
 from backend.ai.planning import InvestigationPlan, InvestigationStep, PlanAdapter
 
+# Get logger for AI operations
+ai_logger = logfire.getLogger("ai")
+
+# Get settings for API keys
+settings = get_settings()
+anthropic_model = settings.anthropic_model
 
 class InvestigationDependencies(BaseModel):
     """Dependencies for the investigation agent"""
@@ -123,7 +131,7 @@ class InvestigationPlanModel(BaseModel):
 
 # Create the pydantic-ai agent for investigation planning
 investigation_planner = PydanticAgent(
-    "anthropic:claude-3-7-sonnet-20250219",
+    f"anthropic:{anthropic_model}",
     deps_type=InvestigationDependencies,
     result_type=InvestigationPlanModel,
     system_prompt="""
@@ -166,6 +174,13 @@ async def get_data_source_context(ctx: RunContext[InvestigationDependencies], pa
     Returns:
         String containing relevant context information from data sources
     """
+    ai_logger.info(
+        "Retrieving data source context",
+        query=params.query,
+        source_type=params.source_type,
+        limit=params.limit
+    )
+    
     # Get the context engine
     context_engine = get_context_engine()
     
@@ -180,9 +195,22 @@ async def get_data_source_context(ctx: RunContext[InvestigationDependencies], pa
         # Build formatted context string
         context_str = context_engine.build_context_for_ai(context_items)
         
+        ai_logger.info(
+            "Data source context retrieved",
+            query=params.query,
+            context_items_count=len(context_items),
+            has_context=bool(context_str)
+        )
+        
         return context_str if context_str else "No relevant context found for the query."
     
     except Exception as e:
+        ai_logger.error(
+            "Error retrieving context",
+            query=params.query,
+            error=str(e),
+            error_type=type(e).__name__
+        )
         return f"Error retrieving context: {str(e)}"
 
 
@@ -512,34 +540,34 @@ async def query_s3(ctx: RunContext[InvestigationDependencies], params: S3QueryPa
 
 # Create cell-specific content generation agents with tools
 sql_generator = PydanticAgent(
-    "anthropic:claude-3-7-sonnet-20250219",
+    f"anthropic:{anthropic_model}",
     result_type=str,
     system_prompt="You are an expert SQL query writer. Generate a SQL query that addresses the user's request. Return ONLY the SQL query with no explanations.",
     tools=[query_sql, get_data_source_context]
 )
 
 log_generator = PydanticAgent(
-    "anthropic:claude-3-7-sonnet-20250219",
+    f"anthropic:{anthropic_model}",
     result_type=str,
     system_prompt="You are an expert in log analysis. Generate a log query that addresses the user's request. Return ONLY the log query with no explanations.",
     tools=[query_logs, get_data_source_context]
 )
 
 metric_generator = PydanticAgent(
-    "anthropic:claude-3-7-sonnet-20250219",
+    f"anthropic:{anthropic_model}",
     result_type=str,
     system_prompt="You are an expert in metric analysis. Generate a PromQL query that addresses the user's request. Return ONLY the PromQL query with no explanations.",
     tools=[query_metrics, get_data_source_context]
 )
 
 python_generator = PydanticAgent(
-    "anthropic:claude-3-7-sonnet-20250219",
+    f"anthropic:{anthropic_model}",
     result_type=str,
     system_prompt="You are an expert Python programmer. Generate Python code that addresses the user's request. Return ONLY the Python code with no explanations."
 )
 
 markdown_generator = PydanticAgent(
-    "anthropic:claude-3-7-sonnet-20250219",
+    f"anthropic:{anthropic_model}",
     result_type=str,
     system_prompt="You are an expert at technical documentation. Create clear markdown to address the user's request. Return ONLY the markdown with no meta-commentary."
 )

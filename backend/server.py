@@ -22,10 +22,10 @@ from backend.services.notebook_manager import NotebookManager
 # Initialize Logfire
 settings = get_settings()
 logfire.configure(
-    token=os.getenv("LOGFIRE_TOKEN", ""),
+    token=settings.logfire_token,
     service_name="sherlog-canvas-backend",
     service_version="0.1.0",
-    environment=os.getenv("SHERLOG_ENV", "development"),
+    environment=settings.environment,
     enable_console_logging=True,
 )
 
