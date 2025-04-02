@@ -20,7 +20,7 @@ services:
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
       - AWS_REGION=${AWS_REGION:-us-east-1}
     ports:
-      - "8000:8000"
+      - "8080:8000"
     depends_on:
       - qdrant
       - pg-mcp
@@ -38,9 +38,11 @@ services:
       dockerfile: Dockerfile.frontend
     container_name: sherlog-canvas-frontend
     ports:
-      - "5173:80"
+      - "3000:3000"
     depends_on:
       - backend
+    environment:
+      - WDS_SOCKET_PORT=3000
     restart: unless-stopped
 
   qdrant:
@@ -49,8 +51,8 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "6343:6333"
+      - "6344:6334"
     restart: unless-stopped
     
   pg-mcp:
@@ -59,7 +61,7 @@ services:
       dockerfile: Dockerfile
     container_name: sherlog-canvas-pg-mcp
     ports:
-      - "9201:8000"
+      - "9211:8000"
     environment:
       - LOG_LEVEL=DEBUG
       - PYTHONUNBUFFERED=1
@@ -73,7 +75,7 @@ services:
       dockerfile: Dockerfile.mcp-grafana
     container_name: sherlog-canvas-mcp-grafana
     ports:
-      - "9100:8000"
+      - "9110:8000"
     environment:
       - GRAFANA_URL=${GRAFANA_URL:-http://localhost:3000}
       - GRAFANA_API_KEY=${GRAFANA_API_KEY:-}

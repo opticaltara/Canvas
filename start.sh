@@ -67,15 +67,34 @@ else
     echo "PostgreSQL MCP server repo already present."
 fi
 
-# Start all containers with Docker Compose
-echo "Starting all services with Docker Compose..."
-docker-compose up -d
+# Print steps as they execute
+set -x
+
+# Stop any running containers
+echo "Stopping running containers..."
+docker-compose down
+
+# Remove any old images to ensure clean build
+echo "Removing old Docker images..."
+docker-compose rm -f
+
+# Build all services with no cache to ensure latest changes
+echo "Building Docker images..."
+docker-compose build --no-cache
+
+# Start services in detached mode, force recreate
+echo "Starting containers..."
+docker-compose up -d --force-recreate
+
+# Show running containers
+echo "Services started. Status:"
+docker-compose ps
 
 echo "Sherlog Canvas is now running!"
-echo "Frontend: http://localhost:5173"
-echo "Backend API: http://localhost:8000"
-echo "PostgreSQL MCP: http://localhost:9201"
-echo "Grafana MCP: http://localhost:9100"
+echo "Frontend: http://localhost:3000"
+echo "Backend API: http://localhost:8080"
+echo "PostgreSQL MCP: http://localhost:9211"
+echo "Grafana MCP: http://localhost:9110"
 echo ""
 echo "To stop all services, run:"
 echo "docker-compose down"
