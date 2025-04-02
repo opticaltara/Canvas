@@ -85,26 +85,6 @@ services:
       - GRAFANA_API_KEY=${GRAFANA_API_KEY:-}
     restart: unless-stopped
 
-  nextjs-app:
-    build:
-      context: ./nextjs-app
-      dockerfile: Dockerfile
-      args:
-        - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-    container_name: sherlog-canvas-nextjs
-    ports:
-      - "3003:3000"
-    environment:
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - ANTHROPIC_MODEL=claude-3-sonnet-20240229
-      - PG_MCP_URL=http://sherlog-canvas-pg-mcp:8000
-      - GRAFANA_MCP_URL=http://sherlog-canvas-mcp-grafana:8000
-    depends_on:
-      - backend
-      - pg-mcp
-      - mcp-grafana
-    restart: unless-stopped
-
 volumes:
   data:
     driver: local
