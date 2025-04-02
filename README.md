@@ -18,7 +18,7 @@ Sherlog Canvas consists of:
 1. **Backend**:
    - FastAPI server with WebSocket support
    - Dependency tracking system for reactivity
-   - Plugin system for data sources
+   - MCP server integration for data sources
    - AI orchestration for query planning
    - Context engine with RAG for data source understanding
    - Qdrant vector database for storing schema embeddings
@@ -29,9 +29,9 @@ Sherlog Canvas consists of:
    - Monaco Editor for code/query editing
    - Dependency visualization
 
-## Quick Start with Docker
+## Quick Start
 
-The easiest way to get started is using Docker Compose:
+Sherlog Canvas now includes a convenient startup script that handles all components:
 
 1. Clone the repository:
    ```bash
@@ -49,19 +49,94 @@ The easiest way to get started is using Docker Compose:
    ANTHROPIC_API_KEY=your_anthropic_api_key_here
    ```
 
-4. Start the containers:
+4. Install dependencies:
    ```bash
-   docker-compose up -d
+   # Install Python dependencies
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   pip install -r requirements.txt
+   
+   # Install Node.js dependencies
+   npm install
+   
+   # Install frontend dependencies
+   cd frontend
+   npm install
+   cd ..
    ```
 
-5. Access the application at http://localhost:80
+5. Start all services with a single command:
+   ```bash
+   ./start.sh
+   ```
+
+6. Access the application at http://localhost:5173
+
+The start script handles:
+- Starting Qdrant vector database in Docker
+- Installing and starting required MCP servers
+- Starting the backend API server
+- Starting the frontend development server
+
+## MCP Servers
+
+Sherlog Canvas uses Machine-Callable Package (MCP) servers for data source integration. These are standalone servers that expose standardized APIs for AI agents to interact with various data sources.
+
+### Supported MCP Servers
+
+| Data Source | MCP Package          | Purpose                                 |
+|-------------|----------------------|-----------------------------------------|
+| Grafana     | @anthropic-ai/mcp-grafana | Query Grafana dashboards, metrics, logs |
+| PostgreSQL  | pg-mcp              | Query PostgreSQL databases              |
+| Prometheus  | *(coming soon)*     | Query Prometheus metrics                |
+| Loki        | *(coming soon)*     | Query Loki logs                         |
+| S3          | *(coming soon)*     | Interact with S3 storage                |
+
+### Setting Up Data Connections
+
+1. Start Sherlog Canvas with `./start.sh`
+2. Navigate to the "Data Connections" tab in the UI
+3. Click "Add Connection" and select the connection type
+4. Provide the connection details:
+   - **Grafana**: URL and API key
+   - **PostgreSQL**: Connection string (e.g., `postgresql://user:pass@localhost/dbname`)
+   - **Prometheus**: URL and optional authentication
+   - **Loki**: URL and optional authentication
+   - **S3**: Endpoint, bucket, access key, and secret key
+
+Sherlog Canvas will:
+1. Store your connection details securely
+2. Start the appropriate MCP server for each connection
+3. Index schema information for AI context
+4. Automatically connect your AI agents to these data sources
+
+### Manual MCP Server Setup
+
+You can also install and run MCP servers manually:
+
+```bash
+# Install MCP packages globally
+npm install -g @anthropic-ai/mcp-grafana pg-mcp
+
+# Start Grafana MCP server
+export GRAFANA_URL=https://your-grafana-url
+export GRAFANA_API_KEY=your-api-key
+npx @anthropic-ai/mcp-grafana --port 9100
+
+# Start PostgreSQL MCP server
+export PG_CONNECTION_STRING=postgresql://user:pass@localhost/dbname
+npx pg-mcp --port 9200
+```
 
 ## Manual Setup
+
+If you prefer to start components individually:
 
 ### Prerequisites
 - Python 3.9+
 - Node.js 16+
-- Access to data sources (PostgreSQL, Prometheus, Loki, etc.)
+- Docker (for Qdrant)
+- Access to data sources (PostgreSQL, Grafana, etc.)
 
 ### Backend Setup
 
@@ -70,12 +145,14 @@ The easiest way to get started is using Docker Compose:
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install dependencies with uv
-pip install uv
-uv pip install -r requirements.txt
+# Install dependencies
+pip install -r requirements.txt
+
+# Start Qdrant
+docker run -d --name sherlog-canvas-qdrant -p 6333:6333 qdrant/qdrant:latest
 
 # Start the backend server
-python -m backend.server
+python -m uvicorn backend.server:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ### Frontend Setup
@@ -132,7 +209,8 @@ sherlog-canvas/
 ├── backend/                 # Backend Python code
 │   ├── ai/                  # AI agent system
 │   ├── core/                # Core notebook functionality
-│   ├── plugins/             # Data source plugins
+│   │   ├── executors/       # Cell executors for different cell types
+│   ├── mcp/                 # MCP server integration
 │   ├── services/            # Backend services
 │   ├── routes/              # API routes
 │   ├── config.py            # Configuration
@@ -154,17 +232,43 @@ sherlog-canvas/
 
 ## Extending Sherlog Canvas
 
-### Adding a New Data Source Plugin
+### Adding a New MCP Server Integration
 
-1. Create a new plugin file in `backend/plugins/`
-2. Implement the `PluginBase` interface
-3. Register the plugin in `backend/services/connection_manager.py`
+1. Find or create an MCP server for your data source
+2. Add connection type to `backend/services/connection_manager.py`
+3. Add MCP server startup logic in `backend/mcp/manager.py`
+4. Add appropriate agent tools in `backend/ai/agent.py`
+
+### Creating a Custom MCP Server
+
+If you need to integrate a data source that doesn't have an existing MCP server:
+
+1. Create a new MCP server using the MCP specification
+2. Basic structure:
+   ```javascript
+   const express = require('express');
+   const app = express();
+   app.use(express.json());
+   
+   app.post('/mcp/query', async (req, res) => {
+     const { query, parameters } = req.body;
+     // Connect to your data source and execute query
+     const result = await executeQuery(query, parameters);
+     res.json({ data: result });
+   });
+   
+   app.listen(process.env.PORT || 9000);
+   ```
+
+3. Register your MCP server in the MCP server manager
+4. Add appropriate agent tools 
 
 ### Adding a New Cell Type
 
 1. Add the new cell type to `backend/core/cell.py`
-2. Create a cell executor in the appropriate plugin
-3. Add UI components for the new cell type in the frontend
+2. Create a cell executor in `backend/core/execution.py`
+3. Add appropriate UI components in the frontend
+4. Update pydantic-ai tools to handle the new cell type
 
 ## Contributing
 

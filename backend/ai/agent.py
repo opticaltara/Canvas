@@ -190,7 +190,7 @@ async def get_data_source_context(ctx: RunContext[InvestigationDependencies], pa
 @investigation_planner.tool
 async def query_sql(ctx: RunContext[InvestigationDependencies], params: SQLQueryParams) -> DataQueryResult:
     """
-    Execute an SQL query against a database.
+    Execute an SQL query against a database using an MCP server.
     
     Args:
         params: SQLQueryParams containing the query and connection details
@@ -199,14 +199,14 @@ async def query_sql(ctx: RunContext[InvestigationDependencies], params: SQLQuery
         DataQueryResult with the query results or error
     """
     try:
-        # This would be injected or retrieved from a registry in a real implementation
+        # Get connection manager
         from backend.services.connection_manager import get_connection_manager
         connection_manager = get_connection_manager()
         
         connection_id = params.connection_id
         if not connection_id:
             # Get default SQL connection
-            connection_config = connection_manager.get_default_connection("sql")
+            connection_config = connection_manager.get_default_connection("postgres")
             if not connection_config:
                 return DataQueryResult(
                     data=[],
@@ -224,31 +224,36 @@ async def query_sql(ctx: RunContext[InvestigationDependencies], params: SQLQuery
                 error=f"Connection not found: {connection_id}"
             )
         
-        # Get the plugin
-        plugin = connection_manager.get_plugin(connection_config.plugin_name)
-        if not plugin:
+        # Get MCP client if available
+        mcp_client = ctx.state.get(f"mcp_{connection_id}", None)
+        
+        if mcp_client:
+            # Use MCP client to execute query
+            try:
+                result = await mcp_client.query_db(params.query, params.parameters)
+                
+                return DataQueryResult(
+                    data=result.get("rows", []),
+                    query=params.query,
+                    metadata={
+                        "connection_id": connection_id,
+                        "connection_name": connection_config.name,
+                        "columns": result.get("columns", [])
+                    }
+                )
+            except Exception as e:
+                return DataQueryResult(
+                    data=[],
+                    query=params.query,
+                    error=f"MCP query error: {str(e)}"
+                )
+        else:
+            # No MCP client available
             return DataQueryResult(
                 data=[],
                 query=params.query,
-                error=f"SQL plugin not found for connection: {connection_id}"
+                error=f"No MCP client available for connection: {connection_id}"
             )
-        
-        # Execute the query
-        result = await plugin.execute_query(
-            params.query,
-            connection_config,
-            params.parameters
-        )
-        
-        return DataQueryResult(
-            data=result.get("data", []),
-            query=params.query,
-            metadata={
-                "connection_id": connection_id,
-                "connection_name": connection_config.name,
-                "dialect": result.get("dialect", "unknown")
-            }
-        )
     
     except Exception as e:
         return DataQueryResult(
@@ -262,7 +267,7 @@ async def query_sql(ctx: RunContext[InvestigationDependencies], params: SQLQuery
 @investigation_planner.tool
 async def query_logs(ctx: RunContext[InvestigationDependencies], params: LogQueryParams) -> DataQueryResult:
     """
-    Execute a log query (e.g., against Loki or Grafana).
+    Execute a log query (e.g., against Loki or Grafana) using an MCP server.
     
     Args:
         params: LogQueryParams containing the query and source details
@@ -271,56 +276,63 @@ async def query_logs(ctx: RunContext[InvestigationDependencies], params: LogQuer
         DataQueryResult with the query results or error
     """
     try:
-        # This would be injected or retrieved from a registry in a real implementation
+        # Get connection manager
         from backend.services.connection_manager import get_connection_manager
         connection_manager = get_connection_manager()
         
-        # Determine plugin name based on source
-        plugin_name = params.source
-        if plugin_name not in ["loki", "grafana_loki"]:
-            if plugin_name == "grafana":
-                plugin_name = "grafana_loki"
-            else:
-                plugin_name = "loki"  # Default to loki
+        # Determine connection type based on source
+        connection_type = params.source
+        if connection_type not in ["loki", "grafana"]:
+            connection_type = "loki"  # Default to loki
         
-        # Get default connection for this plugin
-        connection_config = connection_manager.get_default_connection(plugin_name)
+        # Get default connection for this type
+        connection_config = connection_manager.get_default_connection(connection_type)
         if not connection_config:
             return DataQueryResult(
                 data=[],
                 query=params.query,
-                error=f"No default connection found for {plugin_name}"
+                error=f"No default connection found for {connection_type}"
             )
         
-        # Get the plugin
-        plugin = connection_manager.get_plugin(plugin_name)
-        if not plugin:
+        # Get MCP client if available
+        mcp_client = ctx.state.get(f"mcp_{connection_config.id}", None)
+        
+        if mcp_client:
+            # Use MCP client to execute query
+            try:
+                # Set up query parameters
+                query_params = {}
+                if params.time_range:
+                    query_params["from"] = params.time_range.get("start")
+                    query_params["to"] = params.time_range.get("end")
+                
+                # Execute the query differently based on the source
+                if connection_type == "grafana":
+                    result = await mcp_client.query_loki(params.query, query_params)
+                else:
+                    result = await mcp_client.query_logs(params.query, query_params)
+                
+                return DataQueryResult(
+                    data=result.get("data", []),
+                    query=params.query,
+                    metadata={
+                        "source": params.source,
+                        "time_range": params.time_range
+                    }
+                )
+            except Exception as e:
+                return DataQueryResult(
+                    data=[],
+                    query=params.query,
+                    error=f"MCP query error: {str(e)}"
+                )
+        else:
+            # No MCP client available
             return DataQueryResult(
                 data=[],
                 query=params.query,
-                error=f"Plugin not found: {plugin_name}"
+                error=f"No MCP client available for connection: {connection_config.id}"
             )
-        
-        # Set up query parameters
-        query_params = {}
-        if params.time_range:
-            query_params["time_range"] = params.time_range
-        
-        # Execute the query
-        result = await plugin.execute_query(
-            params.query,
-            connection_config,
-            query_params
-        )
-        
-        return DataQueryResult(
-            data=result.get("data", []),
-            query=params.query,
-            metadata={
-                "source": params.source,
-                "time_range": params.time_range
-            }
-        )
     
     except Exception as e:
         return DataQueryResult(
@@ -334,7 +346,7 @@ async def query_logs(ctx: RunContext[InvestigationDependencies], params: LogQuer
 @investigation_planner.tool
 async def query_metrics(ctx: RunContext[InvestigationDependencies], params: MetricQueryParams) -> DataQueryResult:
     """
-    Execute a metric query (e.g., PromQL).
+    Execute a metric query (e.g., PromQL) using an MCP server.
     
     Args:
         params: MetricQueryParams containing the query and source details
@@ -343,60 +355,67 @@ async def query_metrics(ctx: RunContext[InvestigationDependencies], params: Metr
         DataQueryResult with the query results or error
     """
     try:
-        # This would be injected or retrieved from a registry in a real implementation
+        # Get connection manager
         from backend.services.connection_manager import get_connection_manager
         connection_manager = get_connection_manager()
         
-        # Determine plugin name based on source
-        plugin_name = params.source
-        if plugin_name not in ["prometheus", "grafana_prometheus"]:
-            if plugin_name == "grafana":
-                plugin_name = "grafana_prometheus"
-            else:
-                plugin_name = "prometheus"  # Default to prometheus
+        # Determine connection type based on source
+        connection_type = params.source
+        if connection_type not in ["prometheus", "grafana"]:
+            connection_type = "prometheus"  # Default to prometheus
         
-        # Get default connection for this plugin
-        connection_config = connection_manager.get_default_connection(plugin_name)
+        # Get default connection for this type
+        connection_config = connection_manager.get_default_connection(connection_type)
         if not connection_config:
             return DataQueryResult(
                 data=[],
                 query=params.query,
-                error=f"No default connection found for {plugin_name}"
+                error=f"No default connection found for {connection_type}"
             )
         
-        # Get the plugin
-        plugin = connection_manager.get_plugin(plugin_name)
-        if not plugin:
+        # Get MCP client if available
+        mcp_client = ctx.state.get(f"mcp_{connection_config.id}", None)
+        
+        if mcp_client:
+            # Use MCP client to execute query
+            try:
+                # Set up query parameters
+                query_params = {
+                    "instant": params.instant
+                }
+                if params.time_range:
+                    query_params["from"] = params.time_range.get("start")
+                    query_params["to"] = params.time_range.get("end")
+                
+                # Execute the query differently based on the source
+                if connection_type == "grafana":
+                    result = await mcp_client.query_prometheus(params.query, query_params)
+                else:
+                    result = await mcp_client.query_metrics(params.query, query_params)
+                
+                return DataQueryResult(
+                    data=result.get("data", []),
+                    query=params.query,
+                    metadata={
+                        "source": params.source,
+                        "time_range": params.time_range,
+                        "instant": params.instant,
+                        "result_type": result.get("result_type", "unknown")
+                    }
+                )
+            except Exception as e:
+                return DataQueryResult(
+                    data=[],
+                    query=params.query,
+                    error=f"MCP query error: {str(e)}"
+                )
+        else:
+            # No MCP client available
             return DataQueryResult(
                 data=[],
                 query=params.query,
-                error=f"Plugin not found: {plugin_name}"
+                error=f"No MCP client available for connection: {connection_config.id}"
             )
-        
-        # Set up query parameters
-        query_params = {
-            "instant": params.instant
-        }
-        if params.time_range:
-            query_params["time_range"] = params.time_range
-        
-        # Execute the query
-        result = await plugin.execute_query(
-            params.query,
-            connection_config,
-            query_params
-        )
-        
-        return DataQueryResult(
-            data=result.get("data", []),
-            query=params.query,
-            metadata={
-                "source": params.source,
-                "time_range": params.time_range,
-                "instant": params.instant,
-                "result_type": result.get("result_type", "unknown")
-            }
-        )
     
     except Exception as e:
         return DataQueryResult(
@@ -410,7 +429,7 @@ async def query_metrics(ctx: RunContext[InvestigationDependencies], params: Metr
 @investigation_planner.tool
 async def query_s3(ctx: RunContext[InvestigationDependencies], params: S3QueryParams) -> DataQueryResult:
     """
-    Execute an S3 operation (list, get, or select).
+    Execute an S3 operation (list, get, or select) using an MCP server.
     
     Args:
         params: S3QueryParams containing the operation details
@@ -419,7 +438,7 @@ async def query_s3(ctx: RunContext[InvestigationDependencies], params: S3QueryPa
         DataQueryResult with the operation results or error
     """
     try:
-        # This would be injected or retrieved from a registry in a real implementation
+        # Get connection manager
         from backend.services.connection_manager import get_connection_manager
         connection_manager = get_connection_manager()
         
@@ -432,43 +451,56 @@ async def query_s3(ctx: RunContext[InvestigationDependencies], params: S3QueryPa
                 error="No default S3 connection found"
             )
         
-        # Get the plugin
-        plugin = connection_manager.get_plugin("s3")
-        if not plugin:
+        # Get MCP client if available
+        mcp_client = ctx.state.get(f"mcp_{connection_config.id}", None)
+        
+        if mcp_client:
+            # Use MCP client to execute S3 operation
+            try:
+                # Set up operation parameters
+                operation_params = {
+                    "bucket": params.bucket,
+                    "operation": params.operation
+                }
+                
+                if params.prefix:
+                    operation_params["prefix"] = params.prefix
+                
+                if params.operation in ["get_object", "select_object"]:
+                    operation_params["key"] = params.query
+                
+                # Execute the appropriate S3 operation
+                if params.operation == "list_objects":
+                    result = await mcp_client.s3_list_objects(params.bucket, params.prefix)
+                elif params.operation == "get_object":
+                    result = await mcp_client.s3_get_object(params.bucket, params.query)
+                elif params.operation == "select_object":
+                    result = await mcp_client.s3_select_object(params.bucket, params.query, params.query)
+                else:
+                    result = {"data": [], "error": f"Unsupported S3 operation: {params.operation}"}
+                
+                return DataQueryResult(
+                    data=result.get("data", []),
+                    query=params.query,
+                    metadata={
+                        "bucket": params.bucket,
+                        "operation": params.operation,
+                        "prefix": params.prefix
+                    }
+                )
+            except Exception as e:
+                return DataQueryResult(
+                    data=[],
+                    query=params.query,
+                    error=f"MCP query error: {str(e)}"
+                )
+        else:
+            # No MCP client available
             return DataQueryResult(
                 data=[],
                 query=params.query,
-                error="S3 plugin not found"
+                error=f"No MCP client available for connection: {connection_config.id}"
             )
-        
-        # Set up operation parameters
-        operation_params = {
-            "bucket": params.bucket,
-            "operation": params.operation
-        }
-        
-        if params.prefix:
-            operation_params["prefix"] = params.prefix
-        
-        if params.operation in ["get_object", "select_object"]:
-            operation_params["key"] = params.query
-        
-        # Execute the operation
-        result = await plugin.execute_query(
-            params.query if params.operation == "select_object" else "",
-            connection_config,
-            operation_params
-        )
-        
-        return DataQueryResult(
-            data=result.get("data", []),
-            query=params.query,
-            metadata={
-                "bucket": params.bucket,
-                "operation": params.operation,
-                "prefix": params.prefix
-            }
-        )
     
     except Exception as e:
         return DataQueryResult(
@@ -525,13 +557,14 @@ class AIAgent:
         self.model = self.settings.anthropic_model
         self.context_engine = get_context_engine()
     
-    async def generate_investigation_plan(self, query: str, available_data_sources: List[str] = None) -> InvestigationPlanModel:
+    async def generate_investigation_plan(self, query: str, available_data_sources: List[str] = None, mcp_clients: Dict[str, Any] = None) -> InvestigationPlanModel:
         """
         Generate an investigation plan for a query using Pydantic AI
         
         Args:
             query: The user's investigation query
             available_data_sources: List of available data sources
+            mcp_clients: Dictionary of MCP clients to use
             
         Returns:
             A structured investigation plan with steps and cell types
@@ -546,16 +579,25 @@ class AIAgent:
         )
         
         try:
+            # Create a run context with the dependencies
+            run_context = RunContext(dependencies)
+            
+            # Add MCP clients to the run context if provided
+            if mcp_clients:
+                run_context.state.update(mcp_clients)
+            
             # Retrieve relevant context about data sources for the query
             context_params = DataSourceContextParams(query=query)
-            context_str = await get_data_source_context(RunContext(dependencies), context_params)
+            context_str = await get_data_source_context(run_context, context_params)
             
             # Add context to the query if available
             if context_str and not context_str.startswith("Error") and not context_str.startswith("No relevant"):
                 dependencies.user_query = f"{query}\n\n{context_str}"
             
             # Run the agent to generate a plan
-            plan = await investigation_planner.run(dependencies)
+            # Note: The standard pydantic-ai API only has `run()` not `run_with_context()`,
+            # so we use the regular run method with the new context
+            plan = await investigation_planner.run(dependencies, context=run_context)
             return plan
         except Exception as e:
             print(f"Error generating investigation plan: {e}")
@@ -661,8 +703,52 @@ async def execute_ai_query_cell(cell: AIQueryCell, context: ExecutionContext) ->
     agent = AIAgent()
     
     try:
-        # Generate an investigation plan
-        plan = await agent.generate_investigation_plan(cell.content)
+        # Set up MCP clients for the AI tools if needed
+        if hasattr(context, 'mcp_clients') and context.mcp_clients:
+            # We already have MCP clients in the context
+            pass
+        else:
+            # We need to initialize MCP clients
+            from backend.mcp.manager import get_mcp_server_manager
+            from backend.services.connection_manager import get_connection_manager
+            
+            # Get connection manager and MCP server manager
+            connection_manager = get_connection_manager()
+            mcp_manager = get_mcp_server_manager()
+            
+            # Get all connections
+            connections = connection_manager.get_all_connections()
+            
+            # Start MCP servers for all connections
+            server_addresses = await mcp_manager.start_mcp_servers(
+                [conn for conn in connections if isinstance(conn, dict) and "id" in conn]
+            )
+            
+            # Create basic client objects for each connection/server
+            mcp_clients = {}
+            for conn in connections:
+                if isinstance(conn, dict) and "id" in conn and conn["id"] in server_addresses:
+                    # Create a simple client object for the MCP server
+                    # This is a placeholder - a real implementation would create actual client objects
+                    mcp_clients[f"mcp_{conn['id']}"] = {
+                        "connection_id": conn["id"],
+                        "address": server_addresses[conn["id"]],
+                        "query_db": lambda query, params: {"rows": [], "columns": []},
+                        "query_logs": lambda query, params: {"data": []},
+                        "query_metrics": lambda query, params: {"data": []},
+                        "s3_list_objects": lambda bucket, prefix: {"data": []},
+                        "s3_get_object": lambda bucket, key: {"data": ""},
+                        "s3_select_object": lambda bucket, key, query: {"data": []},
+                    }
+            
+            # Add MCP clients to the context
+            context.mcp_clients = mcp_clients
+        
+        # Generate an investigation plan with MCP clients
+        plan = await agent.generate_investigation_plan(
+            query=cell.content,
+            mcp_clients=context.mcp_clients
+        )
         
         # Store thinking output if available
         if plan.thinking:

@@ -1,416 +1,275 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
-import { Cell as CellType, Notebook, CellStatus, CellType as CellTypeEnum } from '../types/notebook';
-import Cell from './Cell';
-import CellToolbar from './CellToolbar';
-import NotebookHeader from './NotebookHeader';
-import useWebSocket from '../hooks/useWebSocket';
-import { v4 as uuidv4 } from 'uuid';
+import { Cell as CellComponent } from './Cell';
+import { useWebSocket } from '../hooks/useWebSocket';
+import { Cell, CellType, Notebook } from '../types/notebook';
+import { cn } from '../utils/cn';
 
-const NotebookView: React.FC = () => {
-  const { id } = useParams<{ id: string }>();
+export function NotebookView() {
+  const { notebookId } = useParams<{ notebookId: string }>();
   const [notebook, setNotebook] = useState<Notebook | null>(null);
-  const [editingCellId, setEditingCellId] = useState<string | null>(null);
-  const [selectedCellId, setSelectedCellId] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const notebookRef = useRef<HTMLDivElement>(null);
+  const [cellTypeToAdd, setCellTypeToAdd] = useState<CellType>('markdown');
 
-  // Initialize WebSocket connection
-  const { socket, connected, send } = useWebSocket(
-    id ? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/notebook/${id}` : null
+  // Create WebSocket connection for real-time updates
+  const { isConnected, messages, sendMessage } = useWebSocket(
+    `ws://${window.location.host}/ws/notebook/${notebookId}`
   );
 
-  // Placeholder for API fetch - would be replaced with an actual API call
+  // Fetch notebook data
   useEffect(() => {
-    if (!id) {
-      setError('Notebook ID is required');
-      setIsLoading(false);
-      return;
-    }
+    if (!notebookId) return;
 
-    // In a real implementation, you would fetch the notebook from the API
-    // For now, we will wait for the WebSocket to provide the initial state
-    if (connected) {
-      setIsLoading(false);
-    }
-  }, [id, connected]);
-
-  // Handle WebSocket messages
-  useEffect(() => {
-    if (!socket) return;
-
-    const handleMessage = (event: MessageEvent) => {
-      const data = JSON.parse(event.data);
-      
-      switch (data.type) {
-        case 'notebook_state':
-          // Initial notebook state
-          setNotebook(deserializeNotebook(data.data));
-          setIsLoading(false);
-          break;
-          
-        case 'cell_updated':
-          // Cell content or state updated
-          setNotebook((prev) => {
-            if (!prev) return prev;
-            const updatedCells = { ...prev.cells };
-            updatedCells[data.cell_id] = data.data;
-            return { ...prev, cells: updatedCells };
-          });
-          break;
-          
-        case 'cell_added':
-          // New cell added
-          setNotebook((prev) => {
-            if (!prev) return prev;
-            const updatedCells = { ...prev.cells };
-            updatedCells[data.cell_id] = data.data;
-            const updatedCellOrder = [...prev.cell_order];
-            if (!updatedCellOrder.includes(data.cell_id)) {
-              updatedCellOrder.push(data.cell_id);
-            }
-            return { ...prev, cells: updatedCells, cell_order: updatedCellOrder };
-          });
-          break;
-          
-        case 'cell_deleted':
-          // Cell deleted
-          setNotebook((prev) => {
-            if (!prev) return prev;
-            const updatedCells = { ...prev.cells };
-            delete updatedCells[data.cell_id];
-            const updatedCellOrder = prev.cell_order.filter((id) => id !== data.cell_id);
-            return { ...prev, cells: updatedCells, cell_order: updatedCellOrder };
-          });
-          break;
-          
-        case 'dependency_added':
-          // Dependency added between cells
-          setNotebook((prev) => {
-            if (!prev) return prev;
-            const updatedCells = { ...prev.cells };
-            
-            // Update dependent cell
-            const dependentCell = { ...updatedCells[data.dependent_id] };
-            dependentCell.dependencies = [...(dependentCell.dependencies || []), data.dependency_id];
-            updatedCells[data.dependent_id] = dependentCell;
-            
-            // Update dependency cell
-            const dependencyCell = { ...updatedCells[data.dependency_id] };
-            dependencyCell.dependents = [...(dependencyCell.dependents || []), data.dependent_id];
-            updatedCells[data.dependency_id] = dependencyCell;
-            
-            return { ...prev, cells: updatedCells };
-          });
-          break;
-          
-        case 'dependency_removed':
-          // Dependency removed between cells
-          setNotebook((prev) => {
-            if (!prev) return prev;
-            const updatedCells = { ...prev.cells };
-            
-            // Update dependent cell
-            const dependentCell = { ...updatedCells[data.dependent_id] };
-            dependentCell.dependencies = (dependentCell.dependencies || []).filter(
-              (id) => id !== data.dependency_id
-            );
-            updatedCells[data.dependent_id] = dependentCell;
-            
-            // Update dependency cell
-            const dependencyCell = { ...updatedCells[data.dependency_id] };
-            dependencyCell.dependents = (dependencyCell.dependents || []).filter(
-              (id) => id !== data.dependent_id
-            );
-            updatedCells[data.dependency_id] = dependencyCell;
-            
-            return { ...prev, cells: updatedCells };
-          });
-          break;
-          
-        case 'error':
-          // Error message
-          setError(data.message);
-          break;
-          
-        default:
-          console.log('Unknown message type:', data.type);
-      }
-    };
-
-    socket.addEventListener('message', handleMessage);
-
-    return () => {
-      socket.removeEventListener('message', handleMessage);
-    };
-  }, [socket]);
-
-  // Helper to convert serialized notebook data
-  const deserializeNotebook = (data: any): Notebook => {
-    return {
-      id: data.id,
-      metadata: data.metadata,
-      cells: Object.fromEntries(
-        Object.entries(data.cells).map(([id, cellData]: [string, any]) => [
-          id,
-          {
-            ...cellData,
-            dependencies: new Set(cellData.dependencies || []),
-            dependents: new Set(cellData.dependents || []),
-          },
-        ])
-      ),
-      cell_order: data.cell_order,
-    };
-  };
-
-  // Handle cell editing
-  const handleCellEdit = useCallback(
-    (cellId: string, content: string) => {
-      if (!notebook || !socket) return;
-
-      send({
-        type: 'update_cell',
-        notebook_id: notebook.id,
-        cell_id: cellId,
-        content,
+    setLoading(true);
+    fetch(`/api/notebooks/${notebookId}`)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Error ${response.status}: ${response.statusText}`);
+        }
+        return response.json();
+      })
+      .then((data) => {
+        setNotebook(data);
+        setLoading(false);
+      })
+      .catch((err) => {
+        setError(err.message);
+        setLoading(false);
       });
+  }, [notebookId]);
 
-      setEditingCellId(null);
-    },
-    [notebook, socket, send]
-  );
+  // Update notebook state based on WebSocket messages
+  useEffect(() => {
+    if (!messages.length || !notebook) return;
 
-  // Handle cell execution
-  const handleCellExecute = useCallback(
+    const latestMessage = messages[messages.length - 1];
+    switch (latestMessage.type) {
+      case 'notebook_state':
+        setNotebook(latestMessage.data);
+        break;
+      case 'cell_updated':
+        if (latestMessage.notebook_id === notebookId) {
+          setNotebook((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              cells: prev.cells.map((cell) =>
+                cell.id === latestMessage.cell_id ? latestMessage.data : cell
+              ),
+            };
+          });
+        }
+        break;
+      case 'cell_added':
+        if (latestMessage.notebook_id === notebookId) {
+          setNotebook((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              cells: [...prev.cells, latestMessage.data],
+            };
+          });
+        }
+        break;
+      case 'cell_deleted':
+        if (latestMessage.notebook_id === notebookId) {
+          setNotebook((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              cells: prev.cells.filter(
+                (cell) => cell.id !== latestMessage.cell_id
+              ),
+              dependencies: prev.dependencies.filter(
+                (dep) =>
+                  dep.dependent_id !== latestMessage.cell_id &&
+                  dep.dependency_id !== latestMessage.cell_id
+              ),
+            };
+          });
+        }
+        break;
+      case 'dependency_added':
+        if (latestMessage.notebook_id === notebookId) {
+          setNotebook((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              dependencies: [
+                ...prev.dependencies,
+                {
+                  dependent_id: latestMessage.dependent_id,
+                  dependency_id: latestMessage.dependency_id,
+                },
+              ],
+            };
+          });
+        }
+        break;
+      case 'dependency_removed':
+        if (latestMessage.notebook_id === notebookId) {
+          setNotebook((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              dependencies: prev.dependencies.filter(
+                (dep) =>
+                  !(dep.dependent_id === latestMessage.dependent_id &&
+                    dep.dependency_id === latestMessage.dependency_id)
+              ),
+            };
+          });
+        }
+        break;
+      default:
+        break;
+    }
+  }, [messages, notebookId, notebook]);
+
+  // Handler for executing a cell
+  const handleExecuteCell = useCallback(
     (cellId: string) => {
-      if (!notebook || !socket) return;
+      if (!notebookId || !isConnected) return;
 
-      send({
+      sendMessage({
         type: 'execute_cell',
-        notebook_id: notebook.id,
+        notebook_id: notebookId,
         cell_id: cellId,
       });
     },
-    [notebook, socket, send]
+    [notebookId, isConnected, sendMessage]
   );
 
-  // Handle cell deletion
-  const handleCellDelete = useCallback(
+  // Handler for updating cell content
+  const handleUpdateCell = useCallback(
+    (cellId: string, content: string) => {
+      if (!notebookId || !isConnected) return;
+
+      sendMessage({
+        type: 'update_cell',
+        notebook_id: notebookId,
+        cell_id: cellId,
+        content: content,
+      });
+    },
+    [notebookId, isConnected, sendMessage]
+  );
+
+  // Handler for deleting a cell
+  const handleDeleteCell = useCallback(
     (cellId: string) => {
-      if (!notebook || !socket) return;
+      if (!notebookId || !isConnected) return;
 
-      const confirmDelete = window.confirm('Are you sure you want to delete this cell?');
-      if (!confirmDelete) return;
-
-      send({
+      sendMessage({
         type: 'delete_cell',
-        notebook_id: notebook.id,
+        notebook_id: notebookId,
         cell_id: cellId,
       });
-
-      if (editingCellId === cellId) {
-        setEditingCellId(null);
-      }
-      if (selectedCellId === cellId) {
-        setSelectedCellId(null);
-      }
     },
-    [notebook, socket, send, editingCellId, selectedCellId]
+    [notebookId, isConnected, sendMessage]
   );
 
-  // Handle adding a new cell
-  const handleAddCell = useCallback(
-    (cellType: CellTypeEnum, position?: number) => {
-      if (!notebook || !socket) return;
+  // Handler for adding a new cell
+  const handleAddCell = useCallback(() => {
+    if (!notebookId || !isConnected) return;
 
-      // Default content based on cell type
-      let content = '';
-      switch (cellType) {
-        case CellTypeEnum.MARKDOWN:
-          content = '# New Markdown Cell';
-          break;
-        case CellTypeEnum.PYTHON:
-          content = '# Write your Python code here\n';
-          break;
-        case CellTypeEnum.SQL:
-          content = '-- Write your SQL query here\nSELECT * FROM table LIMIT 10;';
-          break;
-        case CellTypeEnum.LOG:
-          content = '-- Write your log query here\n{app="example"}';
-          break;
-        case CellTypeEnum.METRIC:
-          content = '-- Write your metric query here\nrate(http_requests_total[5m])';
-          break;
-        case CellTypeEnum.AI_QUERY:
-          content = 'Ask AI to investigate...';
-          break;
-        default:
-          content = '';
-      }
-
-      send({
-        type: 'add_cell',
-        notebook_id: notebook.id,
-        cell_type: cellType,
-        content,
-        position,
-      });
-    },
-    [notebook, socket, send]
-  );
-
-  // Handle adding a dependency between cells
-  const handleAddDependency = useCallback(
-    (dependentId: string, dependencyId: string) => {
-      if (!notebook || !socket) return;
-
-      send({
-        type: 'add_dependency',
-        notebook_id: notebook.id,
-        dependent_id: dependentId,
-        dependency_id: dependencyId,
-      });
-    },
-    [notebook, socket, send]
-  );
-
-  // Handle removing a dependency between cells
-  const handleRemoveDependency = useCallback(
-    (dependentId: string, dependencyId: string) => {
-      if (!notebook || !socket) return;
-
-      send({
-        type: 'remove_dependency',
-        notebook_id: notebook.id,
-        dependent_id: dependentId,
-        dependency_id: dependencyId,
-      });
-    },
-    [notebook, socket, send]
-  );
-
-  // Handle saving the notebook
-  const handleSaveNotebook = useCallback(() => {
-    if (!notebook || !socket) return;
-
-    send({
-      type: 'save_notebook',
-      notebook_id: notebook.id,
+    sendMessage({
+      type: 'add_cell',
+      notebook_id: notebookId,
+      cell_type: cellTypeToAdd,
+      content: '',
     });
-  }, [notebook, socket, send]);
+  }, [notebookId, isConnected, sendMessage, cellTypeToAdd]);
 
-  // Helper to get dependencies and dependents for a cell
-  const getCellDependencies = (cellId: string) => {
-    if (!notebook) return { dependencies: [], dependents: [] };
-
-    const cell = notebook.cells[cellId];
-    if (!cell) return { dependencies: [], dependents: [] };
-
-    const dependencies = [...(cell.dependencies || [])].map((id) => notebook.cells[id]).filter(Boolean);
-    const dependents = [...(cell.dependents || [])].map((id) => notebook.cells[id]).filter(Boolean);
-
-    return { dependencies, dependents };
-  };
-
-  if (isLoading) {
+  // Show loading or error states
+  if (loading) {
     return (
-      <div className="flex items-center justify-center h-screen">
-        <div className="text-center">
-          <div className="spinner w-12 h-12 border-4 border-blue-500 rounded-full border-t-transparent animate-spin mx-auto"></div>
-          <p className="mt-4 text-gray-600 dark:text-gray-300">Loading notebook...</p>
-        </div>
+      <div className="flex justify-center items-center h-96">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="flex items-center justify-center h-screen">
-        <div className="text-center">
-          <div className="text-red-500 text-5xl mb-4">⚠️</div>
-          <h2 className="text-2xl font-bold mb-2">Error</h2>
-          <p className="text-gray-600 dark:text-gray-300">{error}</p>
-        </div>
+      <div className="text-center p-4 max-w-lg mx-auto bg-red-50 rounded-md border border-red-200 text-red-700">
+        <h2 className="text-lg font-semibold mb-2">Error Loading Notebook</h2>
+        <p>{error}</p>
       </div>
     );
   }
 
   if (!notebook) {
     return (
-      <div className="flex items-center justify-center h-screen">
-        <div className="text-center">
-          <h2 className="text-2xl font-bold mb-2">Notebook Not Found</h2>
-          <p className="text-gray-600 dark:text-gray-300">The requested notebook could not be loaded.</p>
-        </div>
+      <div className="text-center p-4 max-w-lg mx-auto">
+        <h2 className="text-lg font-semibold mb-2">Notebook Not Found</h2>
+        <p>
+          The requested notebook could not be found. Please check the URL and try
+          again.
+        </p>
       </div>
     );
   }
 
   return (
-    <div className="container mx-auto px-4 py-6 max-w-5xl" ref={notebookRef}>
-      <NotebookHeader
-        title={notebook.metadata.title}
-        description={notebook.metadata.description}
-        onSave={handleSaveNotebook}
-        connected={connected}
-      />
-
-      <CellToolbar onAddCell={handleAddCell} />
-
-      <div className="mt-6 space-y-4">
-        {notebook.cell_order.map((cellId) => {
-          const cell = notebook.cells[cellId];
-          if (!cell) return null;
-
-          const { dependencies, dependents } = getCellDependencies(cellId);
-
-          return (
-            <Cell
-              key={cellId}
-              cell={cell}
-              isEditing={editingCellId === cellId}
-              onEdit={(content) => handleCellEdit(cellId, content)}
-              onExecute={() => handleCellExecute(cellId)}
-              onFocus={() => {
-                setSelectedCellId(cellId);
-                setEditingCellId(cellId);
-              }}
-              onBlur={() => setEditingCellId(null)}
-              onDelete={() => handleCellDelete(cellId)}
-              onAddDependency={(dependencyId) => handleAddDependency(cellId, dependencyId)}
-              onRemoveDependency={(dependencyId) => handleRemoveDependency(cellId, dependencyId)}
-              dependencies={dependencies}
-              dependents={dependents}
-              isFocused={selectedCellId === cellId}
-            />
-          );
-        })}
+    <div className="container mx-auto p-4">
+      <div className="flex justify-between items-center mb-6">
+        <div>
+          <h1 className="text-2xl font-bold">{notebook.name}</h1>
+          {notebook.description && (
+            <p className="text-gray-600 mt-1">{notebook.description}</p>
+          )}
+        </div>
+        <div className="flex items-center">
+          <span
+            className={cn(
+              'h-3 w-3 rounded-full mr-2',
+              isConnected ? 'bg-green-500' : 'bg-red-500'
+            )}
+          ></span>
+          <span className="text-sm text-gray-600">
+            {isConnected ? 'Connected' : 'Disconnected'}
+          </span>
+        </div>
       </div>
 
-      {notebook.cell_order.length === 0 && (
-        <div className="text-center py-10 border-2 border-dashed border-gray-300 dark:border-gray-700 rounded-lg">
-          <h3 className="text-lg font-medium mb-2">This notebook is empty</h3>
-          <p className="text-gray-600 dark:text-gray-400 mb-4">Add a cell to get started</p>
-          <div className="flex justify-center space-x-2">
-            <button
-              onClick={() => handleAddCell(CellTypeEnum.AI_QUERY)}
-              className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700"
-            >
-              Add AI Query
-            </button>
-            <button
-              onClick={() => handleAddCell(CellTypeEnum.MARKDOWN)}
-              className="px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700"
-            >
-              Add Markdown
-            </button>
-          </div>
+      {/* Cell list */}
+      <div className="space-y-4">
+        {notebook.cells.map((cell) => (
+          <CellComponent
+            key={cell.id}
+            cell={cell}
+            dependencies={notebook.dependencies}
+            onExecute={handleExecuteCell}
+            onUpdate={handleUpdateCell}
+            onDelete={handleDeleteCell}
+          />
+        ))}
+
+        {/* Add cell controls */}
+        <div className="flex items-center space-x-3 p-4 border border-dashed border-gray-300 rounded-md hover:border-gray-400 transition-colors">
+          <select
+            value={cellTypeToAdd}
+            onChange={(e) => setCellTypeToAdd(e.target.value as CellType)}
+            className="border border-gray-300 rounded px-2 py-1 text-sm"
+          >
+            <option value="markdown">Markdown</option>
+            <option value="sql">SQL</option>
+            <option value="python">Python</option>
+            <option value="log">Log</option>
+            <option value="metric">Metric</option>
+            <option value="s3">S3</option>
+            <option value="ai_query">AI Query</option>
+          </select>
+          <button
+            onClick={handleAddCell}
+            className="bg-blue-500 text-white px-4 py-1 rounded text-sm hover:bg-blue-600 transition-colors"
+          >
+            Add Cell
+          </button>
         </div>
-      )}
+      </div>
     </div>
   );
-};
-
-export default NotebookView;
+}

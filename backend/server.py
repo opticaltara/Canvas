@@ -99,6 +99,19 @@ async def startup_event():
     
     # Attach the broadcast function to the notebook manager
     notebook_manager.set_notify_callback(websocket_manager.broadcast)
+    
+    # Initialize MCP server manager and start servers
+    from backend.mcp.manager import get_mcp_server_manager
+    mcp_manager = get_mcp_server_manager()
+    app.state.mcp_manager = mcp_manager
+    
+    # Start MCP servers for all connections
+    connections = list(connection_manager.connections.values())
+    if connections:
+        print(f"Starting MCP servers for {len(connections)} connections...")
+        server_addresses = await mcp_manager.start_mcp_servers(connections)
+        app.state.mcp_server_addresses = server_addresses
+        print(f"Started {len(server_addresses)} MCP servers")
 
 
 @app.on_event("shutdown")
@@ -109,6 +122,11 @@ async def shutdown_event():
     # Close connections
     connection_manager = app.state.connection_manager
     await connection_manager.close()
+    
+    # Stop MCP servers
+    if hasattr(app.state, "mcp_manager"):
+        mcp_manager = app.state.mcp_manager
+        await mcp_manager.stop_all_servers()
 
 
 @app.websocket("/ws/notebook/{notebook_id}")

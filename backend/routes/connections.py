@@ -16,7 +16,7 @@ router = APIRouter()
 class ConnectionCreate(BaseModel):
     """Parameters for creating a connection"""
     name: str
-    plugin_name: str
+    type: str  # "grafana", "postgres", "prometheus", "loki", "s3", etc.
     config: Dict
 
 
@@ -28,7 +28,7 @@ class ConnectionUpdate(BaseModel):
 
 class ConnectionTest(BaseModel):
     """Parameters for testing a connection"""
-    plugin_name: str
+    type: str  # "grafana", "postgres", "prometheus", "loki", "s3", etc.
     config: Dict
 
 
@@ -45,17 +45,18 @@ async def list_connections(
     return connection_manager.get_all_connections()
 
 
-@router.get("/plugins")
-async def list_plugins(
+@router.get("/types")
+async def list_connection_types(
     connection_manager: ConnectionManager = Depends(get_connection_manager)
-) -> List[Dict]:
+) -> List[str]:
     """
-    Get a list of all available plugins
+    Get a list of all available connection types
     
     Returns:
-        List of plugin information
+        List of connection types
     """
-    return connection_manager.get_all_plugins()
+    # Return supported connection types
+    return ["grafana", "postgres", "prometheus", "loki", "s3"]
 
 
 @router.get("/{connection_id}")
@@ -79,7 +80,7 @@ async def get_connection(
     return {
         "id": connection.id,
         "name": connection.name,
-        "plugin_name": connection.plugin_name,
+        "type": connection.type,
         "config": connection_manager._redact_sensitive_fields(connection.config)
     }
 
@@ -101,14 +102,14 @@ async def create_connection(
     try:
         connection = await connection_manager.create_connection(
             name=connection_data.name,
-            plugin_name=connection_data.plugin_name,
+            type=connection_data.type,
             config=connection_data.config
         )
         
         return {
             "id": connection.id,
             "name": connection.name,
-            "plugin_name": connection.plugin_name,
+            "type": connection.type,
             "config": connection_manager._redact_sensitive_fields(connection.config)
         }
     except ValueError as e:
@@ -141,7 +142,7 @@ async def update_connection(
         return {
             "id": connection.id,
             "name": connection.name,
-            "plugin_name": connection.plugin_name,
+            "type": connection.type,
             "config": connection_manager._redact_sensitive_fields(connection.config)
         }
     except ValueError as e:
@@ -181,7 +182,7 @@ async def test_connection(
     """
     try:
         is_valid = await connection_manager.test_connection(
-            plugin_name=connection_data.plugin_name,
+            connection_type=connection_data.type,
             config=connection_data.config
         )
         
@@ -199,7 +200,7 @@ async def set_default_connection(
     connection_manager: ConnectionManager = Depends(get_connection_manager)
 ) -> Dict:
     """
-    Set a connection as the default for its plugin
+    Set a connection as the default for its type
     
     Args:
         connection_id: The ID of the connection

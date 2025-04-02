@@ -15,10 +15,13 @@ class ExecutionContext:
     notebook: Notebook
     cell_id: UUID
     variables: Dict[str, Any] = None
+    mcp_clients: Dict[str, Any] = None
     
     def __post_init__(self):
         if self.variables is None:
             self.variables = {}
+        if self.mcp_clients is None:
+            self.mcp_clients = {}
 
 
 class ExecutionQueue:
@@ -168,26 +171,73 @@ class CellExecutor:
             The result of the execution
         """
         from backend.core.cell import CellType
+        from backend.mcp.manager import get_mcp_server_manager
+        from backend.services.connection_manager import get_connection_manager
+        
+        # Set up MCP connections if needed
+        mcp_clients = {}
+        if cell.type in [CellType.SQL, CellType.LOG, CellType.METRIC, CellType.S3]:
+            # Get connection manager and MCP server manager
+            connection_manager = get_connection_manager()
+            mcp_manager = get_mcp_server_manager()
+            
+            # Get relevant connections based on cell type
+            connection_type = None
+            if cell.type == CellType.SQL:
+                connection_type = "postgres"
+            elif cell.type == CellType.LOG:
+                connection_type = "loki"
+            elif cell.type == CellType.METRIC:
+                connection_type = "prometheus"
+            elif cell.type == CellType.S3:
+                connection_type = "s3"
+            
+            if connection_type:
+                # Get connections of this type
+                connections = connection_manager.get_connections_by_type(connection_type)
+                
+                # Start any MCP servers needed for these connections
+                server_addresses = await mcp_manager.start_mcp_servers(connections)
+                
+                # Create basic client objects for each connection/server
+                for conn in connections:
+                    if conn.id in server_addresses:
+                        # Create a simple client object for the MCP server
+                        # This is a placeholder - a real implementation would create actual client objects
+                        mcp_clients[f"mcp_{conn.id}"] = {
+                            "connection_id": conn.id,
+                            "address": server_addresses[conn.id],
+                            "query_db": lambda query, params: {"rows": [], "columns": []},
+                            "query_logs": lambda query, params: {"data": []},
+                            "query_metrics": lambda query, params: {"data": []},
+                            "s3_list_objects": lambda bucket, prefix: {"data": []},
+                            "s3_get_object": lambda bucket, key: {"data": ""},
+                            "s3_select_object": lambda bucket, key, query: {"data": []},
+                        }
         
         # Dispatch to the appropriate executor based on cell type
         if cell.type == CellType.PYTHON:
-            from backend.plugins.python import execute_python_cell
+            from backend.core.executors.python_executor import execute_python_cell
             return await execute_python_cell(cell, context)
         
         elif cell.type == CellType.SQL:
-            from backend.plugins.sql import execute_sql_cell
+            from backend.core.executors.sql_executor import execute_sql_cell
+            context.mcp_clients = mcp_clients
             return await execute_sql_cell(cell, context)
         
         elif cell.type == CellType.LOG:
-            from backend.plugins.log import execute_log_cell
+            from backend.core.executors.log_executor import execute_log_cell
+            context.mcp_clients = mcp_clients
             return await execute_log_cell(cell, context)
         
         elif cell.type == CellType.METRIC:
-            from backend.plugins.metric import execute_metric_cell
+            from backend.core.executors.metric_executor import execute_metric_cell
+            context.mcp_clients = mcp_clients
             return await execute_metric_cell(cell, context)
         
         elif cell.type == CellType.S3:
-            from backend.plugins.s3 import execute_s3_cell
+            from backend.core.executors.s3_executor import execute_s3_cell
+            context.mcp_clients = mcp_clients
             return await execute_s3_cell(cell, context)
         
         elif cell.type == CellType.MARKDOWN:

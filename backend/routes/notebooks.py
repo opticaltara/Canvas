@@ -188,3 +188,243 @@ async def create_cell(
         return cell.dict()
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Notebook {notebook_id} not found")
+
+
+@router.get("/{notebook_id}/cells")
+async def list_cells(
+    notebook_id: UUID,
+    notebook_manager: NotebookManager = Depends(get_notebook_manager)
+) -> List[Dict]:
+    """
+    List all cells in a notebook
+    
+    Args:
+        notebook_id: The ID of the notebook
+        
+    Returns:
+        List of cell data
+    """
+    try:
+        notebook = notebook_manager.get_notebook(notebook_id)
+        return [
+            notebook.cells[cell_id].dict() 
+            for cell_id in notebook.cell_order
+        ]
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Notebook {notebook_id} not found")
+
+
+@router.get("/{notebook_id}/cells/{cell_id}")
+async def get_cell(
+    notebook_id: UUID,
+    cell_id: UUID,
+    notebook_manager: NotebookManager = Depends(get_notebook_manager)
+) -> Dict:
+    """
+    Get a specific cell from a notebook
+    
+    Args:
+        notebook_id: The ID of the notebook
+        cell_id: The ID of the cell
+        
+    Returns:
+        The cell data
+    """
+    try:
+        notebook = notebook_manager.get_notebook(notebook_id)
+        cell = notebook.get_cell(cell_id)
+        return cell.dict()
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Notebook {notebook_id} not found")
+    except ValueError:
+        raise HTTPException(status_code=404, detail=f"Cell {cell_id} not found in notebook {notebook_id}")
+
+
+class CellUpdate(BaseModel):
+    """Parameters for updating a cell"""
+    content: Optional[str] = None
+    metadata: Optional[Dict] = None
+
+
+@router.put("/{notebook_id}/cells/{cell_id}")
+async def update_cell(
+    notebook_id: UUID,
+    cell_id: UUID,
+    cell_data: CellUpdate,
+    notebook_manager: NotebookManager = Depends(get_notebook_manager)
+) -> Dict:
+    """
+    Update a cell in a notebook
+    
+    Args:
+        notebook_id: The ID of the notebook
+        cell_id: The ID of the cell
+        cell_data: Parameters for updating the cell
+        
+    Returns:
+        The updated cell data
+    """
+    try:
+        notebook = notebook_manager.get_notebook(notebook_id)
+        
+        # Update content if provided
+        if cell_data.content is not None:
+            notebook.update_cell_content(cell_id, cell_data.content)
+        
+        # Update metadata if provided
+        if cell_data.metadata is not None:
+            notebook.update_cell_metadata(cell_id, cell_data.metadata)
+        
+        # Save the notebook
+        notebook_manager.save_notebook(notebook_id)
+        
+        return notebook.get_cell(cell_id).dict()
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Notebook {notebook_id} not found")
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.delete("/{notebook_id}/cells/{cell_id}", status_code=204)
+async def delete_cell(
+    notebook_id: UUID,
+    cell_id: UUID,
+    notebook_manager: NotebookManager = Depends(get_notebook_manager)
+) -> None:
+    """
+    Delete a cell from a notebook
+    
+    Args:
+        notebook_id: The ID of the notebook
+        cell_id: The ID of the cell
+    """
+    try:
+        notebook = notebook_manager.get_notebook(notebook_id)
+        notebook.remove_cell(cell_id)
+        
+        # Save the notebook
+        notebook_manager.save_notebook(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Notebook {notebook_id} not found")
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+class DependencyCreate(BaseModel):
+    """Parameters for creating a dependency between cells"""
+    dependent_id: UUID
+    dependency_id: UUID
+
+
+@router.post("/{notebook_id}/dependencies")
+async def add_dependency(
+    notebook_id: UUID,
+    dependency_data: DependencyCreate,
+    notebook_manager: NotebookManager = Depends(get_notebook_manager)
+) -> Dict:
+    """
+    Add a dependency relationship between cells
+    
+    Args:
+        notebook_id: The ID of the notebook
+        dependency_data: The dependency relationship to add
+        
+    Returns:
+        Success message
+    """
+    try:
+        notebook = notebook_manager.get_notebook(notebook_id)
+        notebook.add_dependency(
+            dependent_id=dependency_data.dependent_id,
+            dependency_id=dependency_data.dependency_id
+        )
+        
+        # Save the notebook
+        notebook_manager.save_notebook(notebook_id)
+        
+        return {
+            "message": "Dependency added successfully",
+            "dependent_id": str(dependency_data.dependent_id),
+            "dependency_id": str(dependency_data.dependency_id)
+        }
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Notebook {notebook_id} not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/{notebook_id}/dependencies")
+async def remove_dependency(
+    notebook_id: UUID,
+    dependency_data: DependencyCreate,
+    notebook_manager: NotebookManager = Depends(get_notebook_manager)
+) -> Dict:
+    """
+    Remove a dependency relationship between cells
+    
+    Args:
+        notebook_id: The ID of the notebook
+        dependency_data: The dependency relationship to remove
+        
+    Returns:
+        Success message
+    """
+    try:
+        notebook = notebook_manager.get_notebook(notebook_id)
+        notebook.remove_dependency(
+            dependent_id=dependency_data.dependent_id,
+            dependency_id=dependency_data.dependency_id
+        )
+        
+        # Save the notebook
+        notebook_manager.save_notebook(notebook_id)
+        
+        return {
+            "message": "Dependency removed successfully",
+            "dependent_id": str(dependency_data.dependent_id),
+            "dependency_id": str(dependency_data.dependency_id)
+        }
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Notebook {notebook_id} not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{notebook_id}/cells/{cell_id}/execute")
+async def execute_cell(
+    notebook_id: UUID,
+    cell_id: UUID,
+    notebook_manager: NotebookManager = Depends(get_notebook_manager)
+) -> Dict:
+    """
+    Queue a cell for execution
+    
+    Args:
+        notebook_id: The ID of the notebook
+        cell_id: The ID of the cell to execute
+        
+    Returns:
+        Status message
+    """
+    try:
+        notebook = notebook_manager.get_notebook(notebook_id)
+        cell = notebook.get_cell(cell_id)
+        
+        # Update cell status to queued
+        cell.status = "queued"
+        
+        # Save the notebook
+        notebook_manager.save_notebook(notebook_id)
+        
+        # Note: The actual execution would be handled by the execution service
+        # which would pick up the queued cell from the execution queue
+        
+        return {
+            "message": "Cell queued for execution",
+            "cell_id": str(cell_id),
+            "status": cell.status
+        }
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Notebook {notebook_id} not found")
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))

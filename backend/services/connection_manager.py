@@ -1,17 +1,27 @@
+"""
+Connection Manager Service
+
+Manages connections to data sources via MCP servers
+"""
+
 import asyncio
 import json
 import os
 from typing import Dict, List, Optional, Type
 from uuid import UUID, uuid4
 
+from pydantic import BaseModel, Field
+
 from backend.config import get_settings
 from backend.context.engine import get_context_engine
-from backend.plugins.base import ConnectionConfig, PluginBase
-from backend.plugins.log import GrafanaLokiPlugin, LokiPlugin
-from backend.plugins.metric import GrafanaPrometheusPlugin, PrometheusPlugin
-from backend.plugins.python import PythonExecutor
-from backend.plugins.s3 import S3Plugin
-from backend.plugins.sql import SQLPlugin
+
+
+class ConnectionConfig(BaseModel):
+    """Configuration for a connection"""
+    id: str
+    name: str
+    type: str  # "grafana", "postgres", "prometheus", "loki", "s3", etc.
+    config: Dict[str, str]  # Configuration details (API keys, URLs, etc.)
 
 
 # Singleton instance
@@ -28,72 +38,29 @@ def get_connection_manager():
 
 class ConnectionManager:
     """
-    Manages connections to data sources and their plugins
+    Manages connections to data sources via MCP servers
     """
     def __init__(self):
-        self.plugins: Dict[str, PluginBase] = {}
         self.connections: Dict[str, ConnectionConfig] = {}
         self.default_connections: Dict[str, str] = {}
         self.settings = get_settings()
         self.context_engine = get_context_engine()
+        self.active_mcp_servers = {}
     
     async def initialize(self) -> None:
-        """Initialize plugins and load connections"""
-        # Register plugins
-        self._register_plugins()
-        
+        """Initialize and load connections"""
         # Load connections from storage
         await self._load_connections()
     
     async def close(self) -> None:
         """Close all connections and cleanup resources"""
+        # Stop any running MCP servers
+        for server_id, server in self.active_mcp_servers.items():
+            if hasattr(server, 'stop') and callable(server.stop):
+                await server.stop()
+        
         # Close the context engine
         await self.context_engine.close()
-    
-    def _register_plugins(self) -> None:
-        """Register all available plugins"""
-        # SQL plugin
-        self.plugins["sql"] = SQLPlugin()
-        
-        # Log plugins
-        self.plugins["loki"] = LokiPlugin()
-        self.plugins["grafana_loki"] = GrafanaLokiPlugin()
-        
-        # Metric plugins
-        self.plugins["prometheus"] = PrometheusPlugin()
-        self.plugins["grafana_prometheus"] = GrafanaPrometheusPlugin()
-        
-        # S3 plugin
-        self.plugins["s3"] = S3Plugin()
-    
-    def get_plugin(self, plugin_name: str) -> Optional[PluginBase]:
-        """
-        Get a plugin by name
-        
-        Args:
-            plugin_name: The name of the plugin
-            
-        Returns:
-            The plugin, or None if not found
-        """
-        return self.plugins.get(plugin_name)
-    
-    def get_all_plugins(self) -> List[Dict]:
-        """
-        Get all registered plugins
-        
-        Returns:
-            List of plugin information
-        """
-        return [
-            {
-                "name": plugin.name,
-                "description": plugin.description,
-                "version": plugin.version,
-                "enabled": plugin.is_enabled
-            }
-            for plugin in self.plugins.values()
-        ]
     
     def get_connection(self, connection_id: str) -> Optional[ConnectionConfig]:
         """
@@ -107,19 +74,19 @@ class ConnectionManager:
         """
         return self.connections.get(connection_id)
     
-    def get_connections_by_plugin(self, plugin_name: str) -> List[ConnectionConfig]:
+    def get_connections_by_type(self, connection_type: str) -> List[ConnectionConfig]:
         """
-        Get all connections for a specific plugin
+        Get all connections for a specific type
         
         Args:
-            plugin_name: The name of the plugin
+            connection_type: The type of connection
             
         Returns:
-            List of connections for the plugin
+            List of connections for the type
         """
         return [
             conn for conn in self.connections.values()
-            if conn.plugin_name == plugin_name
+            if conn.type == connection_type
         ]
     
     def get_all_connections(self) -> List[Dict]:
@@ -133,78 +100,76 @@ class ConnectionManager:
             {
                 "id": conn.id,
                 "name": conn.name,
-                "plugin_name": conn.plugin_name,
+                "type": conn.type,
                 "config": self._redact_sensitive_fields(conn.config)
             }
             for conn in self.connections.values()
         ]
     
-    def get_default_connection(self, plugin_name: str) -> Optional[ConnectionConfig]:
+    def get_default_connection(self, connection_type: str) -> Optional[ConnectionConfig]:
         """
-        Get the default connection for a plugin
+        Get the default connection for a type
         
         Args:
-            plugin_name: The name of the plugin
+            connection_type: The type of connection
             
         Returns:
             The default connection, or None if not found
         """
-        connection_id = self.default_connections.get(plugin_name)
+        connection_id = self.default_connections.get(connection_type)
         if connection_id:
             return self.get_connection(connection_id)
         
-        # If no default is set, try to find any connection for this plugin
-        connections = self.get_connections_by_plugin(plugin_name)
+        # If no default is set, try to find any connection for this type
+        connections = self.get_connections_by_type(connection_type)
         if connections:
             return connections[0]
         
         return None
     
-    async def create_connection(self, name: str, plugin_name: str, config: Dict) -> ConnectionConfig:
+    async def create_connection(self, name: str, type: str, config: Dict) -> ConnectionConfig:
         """
         Create a new connection
         
         Args:
             name: The name of the connection
-            plugin_name: The name of the plugin
+            type: The type of connection
             config: The connection configuration
             
         Returns:
             The created connection
             
         Raises:
-            ValueError: If the plugin is not found or connection validation fails
+            ValueError: If connection validation fails
         """
-        plugin = self.get_plugin(plugin_name)
-        if not plugin:
-            raise ValueError(f"Plugin not found: {plugin_name}")
-        
-        # Create the connection
+        # Create a unique ID for the connection
         connection_id = str(uuid4())
+        
+        # Create the connection config
         connection = ConnectionConfig(
             id=connection_id,
             name=name,
-            plugin_name=plugin_name,
+            type=type,
             config=config
         )
         
         # Validate the connection
-        is_valid = await plugin.validate_connection(connection)
+        is_valid = await self.test_connection(type, config)
         if not is_valid:
             raise ValueError(f"Connection validation failed for {name}")
         
         # Add to connections
         self.connections[connection_id] = connection
         
-        # If this is the first connection for this plugin, set it as default
-        if not self.get_default_connection(plugin_name):
-            self.default_connections[plugin_name] = connection_id
+        # If this is the first connection for this type, set it as default
+        if not self.get_default_connection(type):
+            self.default_connections[type] = connection_id
         
         # Save connections
         await self._save_connections()
         
         # Index the connection schema/metadata for RAG
-        await self._index_connection_for_rag(connection_id, connection, plugin)
+        await self._index_connection_for_rag(connection_id)
         
         return connection
     
@@ -227,20 +192,16 @@ class ConnectionManager:
         if not connection:
             raise ValueError(f"Connection not found: {connection_id}")
         
-        plugin = self.get_plugin(connection.plugin_name)
-        if not plugin:
-            raise ValueError(f"Plugin not found: {connection.plugin_name}")
-        
         # Update the connection
         updated_connection = ConnectionConfig(
             id=connection_id,
             name=name,
-            plugin_name=connection.plugin_name,
+            type=connection.type,
             config=config
         )
         
         # Validate the connection
-        is_valid = await plugin.validate_connection(updated_connection)
+        is_valid = await self.test_connection(connection.type, config)
         if not is_valid:
             raise ValueError(f"Connection validation failed for {name}")
         
@@ -251,7 +212,7 @@ class ConnectionManager:
         await self._save_connections()
         
         # Re-index the connection schema/metadata for RAG
-        await self._index_connection_for_rag(connection_id, updated_connection, plugin)
+        await self._index_connection_for_rag(connection_id)
         
         return updated_connection
     
@@ -273,21 +234,21 @@ class ConnectionManager:
         del self.connections[connection_id]
         
         # Update default connections if needed
-        for plugin_name, default_id in list(self.default_connections.items()):
+        for conn_type, default_id in list(self.default_connections.items()):
             if default_id == connection_id:
-                # Find another connection for this plugin
-                connections = self.get_connections_by_plugin(plugin_name)
+                # Find another connection for this type
+                connections = self.get_connections_by_type(conn_type)
                 if connections:
-                    self.default_connections[plugin_name] = connections[0].id
+                    self.default_connections[conn_type] = connections[0].id
                 else:
-                    del self.default_connections[plugin_name]
+                    del self.default_connections[conn_type]
         
         # Save connections
         await self._save_connections()
     
     async def set_default_connection(self, connection_id: str) -> None:
         """
-        Set a connection as the default for its plugin
+        Set a connection as the default for its type
         
         Args:
             connection_id: The ID of the connection to set as default
@@ -300,39 +261,71 @@ class ConnectionManager:
             raise ValueError(f"Connection not found: {connection_id}")
         
         # Set as default
-        self.default_connections[connection.plugin_name] = connection_id
+        self.default_connections[connection.type] = connection_id
         
         # Save connections
         await self._save_connections()
     
-    async def test_connection(self, plugin_name: str, config: Dict) -> bool:
+    async def test_connection(self, connection_type: str, config: Dict) -> bool:
         """
         Test a connection configuration
         
         Args:
-            plugin_name: The name of the plugin
+            connection_type: The type of connection
             config: The connection configuration to test
             
         Returns:
             True if the connection is valid, False otherwise
-            
-        Raises:
-            ValueError: If the plugin is not found
         """
-        plugin = self.get_plugin(plugin_name)
-        if not plugin:
-            raise ValueError(f"Plugin not found: {plugin_name}")
+        try:
+            # Basic validation for each type
+            if connection_type == "grafana":
+                if not config.get("url") or not config.get("api_key"):
+                    return False
+                
+                # TODO: Actually test the connection to Grafana
+                # For now, just return True if the required fields are present
+                return True
+            
+            elif connection_type == "postgres":
+                if not config.get("connection_string"):
+                    return False
+                
+                # TODO: Actually test the connection to Postgres
+                # For now, just return True if the required fields are present
+                return True
+            
+            elif connection_type == "prometheus":
+                if not config.get("url"):
+                    return False
+                
+                # TODO: Actually test the connection to Prometheus
+                # For now, just return True if the required fields are present
+                return True
+            
+            elif connection_type == "loki":
+                if not config.get("url"):
+                    return False
+                
+                # TODO: Actually test the connection to Loki
+                # For now, just return True if the required fields are present
+                return True
+            
+            elif connection_type == "s3":
+                if not config.get("endpoint") or not config.get("access_key") or not config.get("secret_key"):
+                    return False
+                
+                # TODO: Actually test the connection to S3
+                # For now, just return True if the required fields are present
+                return True
+            
+            else:
+                # Unknown connection type
+                return False
         
-        # Create a temporary connection
-        connection = ConnectionConfig(
-            id="test",
-            name="Test Connection",
-            plugin_name=plugin_name,
-            config=config
-        )
-        
-        # Validate the connection
-        return await plugin.validate_connection(connection)
+        except Exception as e:
+            print(f"Error testing connection: {e}")
+            return False
     
     async def get_connection_schema(self, connection_id: str) -> Dict:
         """
@@ -351,47 +344,74 @@ class ConnectionManager:
         if not connection:
             raise ValueError(f"Connection not found: {connection_id}")
         
-        plugin = self.get_plugin(connection.plugin_name)
-        if not plugin:
-            raise ValueError(f"Plugin not found: {connection.plugin_name}")
+        # Placeholder schema extraction logic
+        # In a real implementation, this would connect to the MCP server
+        # and retrieve the schema information
         
-        # Get the schema
-        return await plugin.get_schema(connection)
+        if connection.type == "grafana":
+            return {"message": "Grafana schema retrieval not implemented yet"}
+        
+        elif connection.type == "postgres":
+            return {"message": "Postgres schema retrieval not implemented yet"}
+        
+        elif connection.type == "prometheus":
+            return {"message": "Prometheus schema retrieval not implemented yet"}
+        
+        elif connection.type == "loki":
+            return {"message": "Loki schema retrieval not implemented yet"}
+        
+        elif connection.type == "s3":
+            return {"message": "S3 schema retrieval not implemented yet"}
+        
+        else:
+            return {"message": f"Unknown connection type: {connection.type}"}
     
-    async def _index_connection_for_rag(
-        self, connection_id: str, connection: ConnectionConfig, plugin: PluginBase
-    ) -> None:
+    async def _index_connection_for_rag(self, connection_id: str) -> None:
         """
         Index connection schema/metadata for RAG
         
         Args:
             connection_id: The ID of the connection
-            connection: The connection configuration
-            plugin: The plugin to use
         """
         try:
-            # Get schema data
-            schema_data = await plugin.get_schema(connection)
+            connection = self.get_connection(connection_id)
+            if not connection:
+                return
             
-            # Handle different plugin types appropriately
-            if connection.plugin_name == "sql":
+            # Placeholder for schema extraction and indexing
+            # Note: A real implementation would extract the schema and
+            # use the context engine to index it
+            
+            # Get schema data (placeholder)
+            schema_data = await self.get_connection_schema(connection_id)
+            
+            # Index based on connection type
+            if connection.type == "postgres" or connection.type == "sql":
+                # Convert schema to expected format and index
+                sql_schema = {"tables": {}}  # Placeholder
                 await self.context_engine.index_sql_schema(
-                    connection_id, connection.name, schema_data
+                    connection_id, connection.name, sql_schema
                 )
             
-            elif connection.plugin_name in ["prometheus", "grafana_prometheus"]:
+            elif connection.type == "prometheus":
+                # Convert schema to expected format and index
+                prometheus_data = {"metrics": []}  # Placeholder
                 await self.context_engine.index_prometheus_metrics(
-                    connection_id, connection.name, schema_data
+                    connection_id, connection.name, prometheus_data
                 )
             
-            elif connection.plugin_name in ["loki", "grafana_loki"]:
+            elif connection.type == "loki":
+                # Convert schema to expected format and index
+                loki_data = {"labels": []}  # Placeholder
                 await self.context_engine.index_loki_logs(
-                    connection_id, connection.name, schema_data
+                    connection_id, connection.name, loki_data
                 )
             
-            elif connection.plugin_name == "s3":
+            elif connection.type == "s3":
+                # Convert schema to expected format and index
+                s3_data = {"buckets": []}  # Placeholder
                 await self.context_engine.index_s3_buckets(
-                    connection_id, connection.name, schema_data
+                    connection_id, connection.name, s3_data
                 )
             
         except Exception as e:
@@ -427,7 +447,7 @@ class ConnectionManager:
             conn_id: {
                 "id": conn.id,
                 "name": conn.name,
-                "plugin_name": conn.plugin_name,
+                "type": conn.type,
                 "config": conn.config
             }
             for conn_id, conn in self.connections.items()
@@ -471,7 +491,7 @@ class ConnectionManager:
             conn_id: ConnectionConfig(
                 id=conn["id"],
                 name=conn["name"],
-                plugin_name=conn["plugin_name"],
+                type=conn["type"],
                 config=conn["config"]
             )
             for conn_id, conn in data.get("connections", {}).items()
@@ -480,10 +500,8 @@ class ConnectionManager:
         self.default_connections = data.get("default_connections", {})
         
         # Index all connections for RAG
-        for connection_id, connection in self.connections.items():
-            plugin = self.get_plugin(connection.plugin_name)
-            if plugin:
-                await self._index_connection_for_rag(connection_id, connection, plugin)
+        for connection_id in self.connections:
+            await self._index_connection_for_rag(connection_id)
     
     async def _save_connections_to_file(self, data: Dict) -> None:
         """Save connections to a local file"""
@@ -515,9 +533,9 @@ class ConnectionManager:
         connections = {}
         default_connections = {}
         
-        # Example format: SHERLOG_CONNECTION_SQL_DEFAULT=connection_id
-        # Example format: SHERLOG_CONNECTION_SQL_MYDB_NAME=My Database
-        # Example format: SHERLOG_CONNECTION_SQL_MYDB_CONFIG_URL=postgresql://user:pass@localhost/db
+        # Example format: SHERLOG_CONNECTION_GRAFANA_MYSERVER_NAME=My Grafana Server
+        # Example format: SHERLOG_CONNECTION_GRAFANA_MYSERVER_CONFIG_URL=https://grafana.example.com
+        # Example format: SHERLOG_CONNECTION_DEFAULT_GRAFANA=myserver
         
         prefix = "SHERLOG_CONNECTION_"
         
@@ -529,14 +547,13 @@ class ConnectionManager:
             if len(parts) < 2:
                 continue
             
-            plugin_name = parts[0].lower()
-            
             # Check if this is a default connection
-            if parts[1] == "DEFAULT":
-                default_connections[plugin_name] = value
+            if parts[0] == "DEFAULT" and len(parts) >= 2:
+                connection_type = parts[1].lower()
+                default_connections[connection_type] = value
                 continue
             
-            # This is a connection config
+            connection_type = parts[0].lower()
             conn_id = parts[1].lower()
             
             if len(parts) < 3:
@@ -549,7 +566,7 @@ class ConnectionManager:
                     connections[conn_id] = {
                         "id": conn_id,
                         "name": value,
-                        "plugin_name": plugin_name,
+                        "type": connection_type,
                         "config": {}
                     }
                 else:
@@ -562,11 +579,13 @@ class ConnectionManager:
                 if conn_id not in connections:
                     connections[conn_id] = {
                         "id": conn_id,
-                        "name": f"{plugin_name.capitalize()} Connection",
-                        "plugin_name": plugin_name,
+                        "name": f"{connection_type.capitalize()} Connection",
+                        "type": connection_type,
                         "config": {config_key: value}
                     }
                 else:
+                    if "config" not in connections[conn_id]:
+                        connections[conn_id]["config"] = {}
                     connections[conn_id]["config"][config_key] = value
         
         return {

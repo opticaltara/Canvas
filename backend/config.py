@@ -2,7 +2,8 @@ import os
 from functools import lru_cache
 from typing import Dict, List, Optional
 
-from pydantic import BaseSettings, Field
+from pydantic import Field
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
@@ -42,7 +43,7 @@ class Settings(BaseSettings):
     python_cell_timeout: int = 30  # seconds
     python_cell_max_memory: int = 1024  # MB
     
-    # Plugin settings
+    # Query execution settings
     default_query_timeout: int = 30  # seconds
     
     # Qdrant settings (for vector database)
