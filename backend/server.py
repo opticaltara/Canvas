@@ -5,8 +5,10 @@ from typing import Dict, List, Optional, Set
 from uuid import UUID
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
+import logfire
+from logfire.integrations.fastapi import LogfireMiddleware
 
 from backend.config import get_settings
 from backend.core.cell import Cell, CellType
@@ -17,6 +19,22 @@ from backend.routes.notebooks import router as notebooks_router
 from backend.services.connection_manager import ConnectionManager
 from backend.services.notebook_manager import NotebookManager
 
+# Initialize Logfire
+settings = get_settings()
+logfire.configure(
+    token=os.getenv("LOGFIRE_TOKEN", ""),
+    service_name="sherlog-canvas-backend",
+    service_version="0.1.0",
+    environment=os.getenv("SHERLOG_ENV", "development"),
+    enable_console_logging=True,
+)
+
+# Instrument AI providers (Anthropic is used by the app)
+try:
+    logfire.instrument_anthropic()
+    logfire.instrument_openai()  # In case OpenAI is used later
+except Exception as e:
+    print(f"Warning: Could not instrument AI providers: {e}")
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -24,6 +42,9 @@ app = FastAPI(
     description="Reactive notebook for software engineering investigations",
     version="0.1.0"
 )
+
+# Add Logfire middleware
+app.add_middleware(LogfireMiddleware)
 
 # Add CORS middleware
 app.add_middleware(
@@ -34,6 +55,36 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Add request logging middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger = logfire.getLogger("request")
+    request_id = request.headers.get("X-Request-ID", str(UUID.uuid4()))
+    logger.info(
+        "Request started",
+        request_id=request_id,
+        method=request.method,
+        url=str(request.url),
+        client=request.client.host if request.client else None,
+    )
+    
+    try:
+        response = await call_next(request)
+        logger.info(
+            "Request completed",
+            request_id=request_id,
+            status_code=response.status_code,
+        )
+        return response
+    except Exception as e:
+        logger.error(
+            "Request failed",
+            request_id=request_id,
+            error=str(e),
+            error_type=type(e).__name__,
+        )
+        raise
+
 # Initialize execution queue
 execution_queue = ExecutionQueue()
 
@@ -41,26 +92,36 @@ execution_queue = ExecutionQueue()
 class WebSocketManager:
     def __init__(self):
         self.active_connections: Dict[UUID, Set[WebSocket]] = {}
+        self.logger = logfire.getLogger("websocket")
     
     async def connect(self, websocket: WebSocket, notebook_id: UUID):
         await websocket.accept()
         if notebook_id not in self.active_connections:
             self.active_connections[notebook_id] = set()
         self.active_connections[notebook_id].add(websocket)
+        self.logger.info("WebSocket connected", notebook_id=str(notebook_id), connections=len(self.active_connections[notebook_id]))
     
     def disconnect(self, websocket: WebSocket, notebook_id: UUID):
         if notebook_id in self.active_connections:
             self.active_connections[notebook_id].discard(websocket)
+            self.logger.info("WebSocket disconnected", notebook_id=str(notebook_id), 
+                           remaining_connections=len(self.active_connections[notebook_id]))
             if not self.active_connections[notebook_id]:
                 del self.active_connections[notebook_id]
+                self.logger.info("All connections closed for notebook", notebook_id=str(notebook_id))
     
     async def broadcast(self, notebook_id: UUID, message: Dict):
         if notebook_id in self.active_connections:
+            message_type = message.get("type", "unknown")
+            self.logger.debug("Broadcasting message", 
+                             notebook_id=str(notebook_id),
+                             message_type=message_type,
+                             connections=len(self.active_connections[notebook_id]))
             for connection in self.active_connections[notebook_id]:
                 try:
                     await connection.send_json(message)
                 except Exception as e:
-                    print(f"Error broadcasting to client: {e}")
+                    self.logger.error("Error broadcasting to client", error=str(e))
 
 
 # Create instances

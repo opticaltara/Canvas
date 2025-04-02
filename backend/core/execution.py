@@ -5,6 +5,8 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 from uuid import UUID
 
+import logfire
+
 from backend.core.cell import Cell, CellStatus
 from backend.core.notebook import Notebook
 
@@ -33,9 +35,20 @@ class ExecutionQueue:
         self.queue = asyncio.Queue()
         self._running = False
         self._task = None
+        self.active_tasks: Set[UUID] = set()
+        self.logger = logfire.getLogger("execution")
     
     async def add_cell(self, notebook_id: UUID, cell_id: UUID, executor: 'CellExecutor') -> None:
         """Add a cell to the execution queue"""
+        if cell_id in self.active_tasks:
+            self.logger.warning("Cell already in execution queue", 
+                              notebook_id=str(notebook_id), 
+                              cell_id=str(cell_id))
+            return
+        
+        self.logger.info("Adding cell to execution queue", 
+                        notebook_id=str(notebook_id), 
+                        cell_id=str(cell_id))
         await self.queue.put((notebook_id, cell_id, executor))
     
     async def start(self) -> None:
@@ -45,6 +58,7 @@ class ExecutionQueue:
         
         self._running = True
         self._task = asyncio.create_task(self._process_queue())
+        self.logger.info("Execution queue started")
     
     async def stop(self) -> None:
         """Stop processing the execution queue"""
@@ -60,6 +74,7 @@ class ExecutionQueue:
                 pass
             finally:
                 self._task = None
+        self.logger.info("Execution queue stopped")
     
     async def _process_queue(self) -> None:
         """Process items in the execution queue"""
@@ -68,22 +83,45 @@ class ExecutionQueue:
                 # Get the next cell to execute
                 notebook_id, cell_id, executor = await self.queue.get()
                 
-                # Execute the cell
-                try:
-                    await executor.execute_cell(notebook_id, cell_id)
-                except Exception as e:
-                    # Log the error but continue processing the queue
-                    print(f"Error executing cell {cell_id} in notebook {notebook_id}: {e}")
+                # Skip if cell is already being processed
+                if cell_id in self.active_tasks:
+                    self.logger.warning("Cell already being processed, skipping", 
+                                      notebook_id=str(notebook_id), 
+                                      cell_id=str(cell_id))
+                    self.queue.task_done()
+                    continue
                 
-                # Mark the task as done
-                self.queue.task_done()
+                # Track active task
+                self.active_tasks.add(cell_id)
+                
+                try:
+                    self.logger.info("Starting cell execution", 
+                                    notebook_id=str(notebook_id), 
+                                    cell_id=str(cell_id))
+                    
+                    # Execute the cell
+                    await executor.execute_cell(notebook_id, cell_id)
+                    
+                    self.logger.info("Cell execution completed", 
+                                    notebook_id=str(notebook_id), 
+                                    cell_id=str(cell_id))
+                except Exception as e:
+                    self.logger.error("Cell execution failed", 
+                                     notebook_id=str(notebook_id), 
+                                     cell_id=str(cell_id), 
+                                     error=str(e))
+                finally:
+                    # Remove from active tasks
+                    self.active_tasks.remove(cell_id)
+                    self.queue.task_done()
             
             except asyncio.CancelledError:
                 # Queue processing has been cancelled
                 break
             except Exception as e:
                 # Unexpected error, log and continue
-                print(f"Unexpected error in execution queue: {e}")
+                self.logger.error("Error in execution queue processing", error=str(e))
+                await asyncio.sleep(1)  # Prevent tight loop on error
 
 
 class CellExecutor:
@@ -93,6 +131,7 @@ class CellExecutor:
     """
     def __init__(self, notebook_manager):
         self.notebook_manager = notebook_manager
+        self.logger = logfire.getLogger("cell_executor")
     
     async def execute_cell(self, notebook_id: UUID, cell_id: UUID) -> Any:
         """
@@ -119,6 +158,13 @@ class CellExecutor:
         result = None
         error = None
         
+        execution_id = str(UUID.uuid4())
+        self.logger.info("Executing cell", 
+                        notebook_id=str(notebook_id), 
+                        cell_id=str(cell_id),
+                        cell_type=cell.type.value,
+                        execution_id=execution_id)
+        
         try:
             # Create execution context
             context = ExecutionContext(
@@ -143,6 +189,12 @@ class CellExecutor:
         
         # Notify that the cell has been updated
         await self.notebook_manager.notify_cell_update(notebook_id, cell_id)
+        
+        self.logger.info("Cell execution completed", 
+                        notebook_id=str(notebook_id), 
+                        cell_id=str(cell_id),
+                        execution_id=execution_id,
+                        execution_time=execution_time)
         
         return result
     
