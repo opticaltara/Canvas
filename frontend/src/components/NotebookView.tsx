@@ -14,7 +14,7 @@ export function NotebookView() {
 
   // Create WebSocket connection for real-time updates
   const { isConnected, messages, sendMessage } = useWebSocket(
-    `ws://${window.location.host}/ws/notebook/${notebookId}`
+    `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/notebook/${notebookId}`
   );
 
   // Fetch notebook data

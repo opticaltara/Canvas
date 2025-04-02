@@ -23,6 +23,8 @@ services:
       - "8000:8000"
     depends_on:
       - qdrant
+      - pg-mcp
+      - mcp-grafana
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
@@ -36,7 +38,7 @@ services:
       dockerfile: Dockerfile.frontend
     container_name: sherlog-canvas-frontend
     ports:
-      - "80:80"
+      - "5173:80"
     depends_on:
       - backend
     restart: unless-stopped
@@ -49,6 +51,32 @@ services:
     ports:
       - "6333:6333"
       - "6334:6334"
+    restart: unless-stopped
+    
+  pg-mcp:
+    build:
+      context: ./pg-mcp
+      dockerfile: Dockerfile
+    container_name: sherlog-canvas-pg-mcp
+    ports:
+      - "9201:8000"
+    environment:
+      - LOG_LEVEL=DEBUG
+      - PYTHONUNBUFFERED=1
+      - PG_CONNECTION_STRING=${PG_CONNECTION_STRING:-postgresql://user:pass@localhost/dbname}
+    restart: unless-stopped
+    
+  mcp-grafana:
+    # Using a custom build instead of the official image
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp-grafana
+    container_name: sherlog-canvas-mcp-grafana
+    ports:
+      - "9100:8000"
+    environment:
+      - GRAFANA_URL=${GRAFANA_URL:-http://localhost:3000}
+      - GRAFANA_API_KEY=${GRAFANA_API_KEY:-}
     restart: unless-stopped
 
 volumes:

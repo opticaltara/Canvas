@@ -1,0 +1,28 @@
+FROM golang:1.20-alpine AS builder
+
+# Install git and build dependencies
+RUN apk add --no-cache git
+
+# Set working directory
+WORKDIR /app
+
+# Install mcp-grafana from source
+RUN go install github.com/grafana/mcp-grafana/cmd/mcp-grafana@latest
+
+# Runtime stage
+FROM alpine:3.17
+
+# Install runtime dependencies
+RUN apk add --no-cache ca-certificates
+
+# Copy the binary from the builder stage
+COPY --from=builder /go/bin/mcp-grafana /usr/local/bin/mcp-grafana
+
+# Set the working directory
+WORKDIR /app
+
+# Expose the default port
+EXPOSE 8000
+
+# Run the server
+ENTRYPOINT ["mcp-grafana"] 

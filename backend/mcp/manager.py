@@ -163,7 +163,20 @@ class MCPServerManager:
                 print(f"Grafana MCP server failed to start: {stderr}")
                 return None
             
-            address = f"localhost:{port}"
+            # Check if we're running in Docker
+            is_docker = os.path.exists('/.dockerenv')
+            
+            # Get the host name based on environment
+            if is_docker:
+                # Use the Docker Compose service name
+                # The internal port is 8000, not 9100
+                host = "sherlog-canvas-mcp-grafana"
+                port = 8000
+                address = f"{host}:{port}"
+            else:
+                # Use localhost when running outside Docker
+                address = f"localhost:{port}"
+                
             print(f"Started Grafana MCP server for {connection.name} at {address}")
             return address
         
@@ -202,33 +215,29 @@ class MCPServerManager:
         try:
             # The PostgreSQL MCP server is already running in Docker
             # We don't need to start a new process, just return the address
-            # Using port 9201 for the Docker container
-            port = 9201
+            # When using Docker Compose, we use the service name and internal port
+            # External port: 9201, Internal port: 8000
+            port = 8000
             
             # We don't need to start a process as it's running in Docker
             # Just record a placeholder in the processes dict for cleanup tracking
             self.processes[connection.id] = None
             
-            # Wait a moment to ensure Docker container is ready
-            await asyncio.sleep(1)
+            # In Docker Compose, use the service name as the host
+            # This works when running in Docker, but localhost is needed when running locally
+            # Let's check if we're running in Docker
+            is_docker = os.path.exists('/.dockerenv')
             
-            # Check if the Docker container is running
-            try:
-                docker_check = subprocess.run(
-                    ["docker", "ps", "--filter", "name=pg-mcp", "--format", "{{.Names}}"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                
-                if "pg-mcp" not in docker_check.stdout:
-                    print("PostgreSQL MCP Docker container is not running")
-                    return None
-            except Exception as e:
-                print(f"Error checking PostgreSQL MCP Docker container: {e}")
-                return None
+            # Get the host name based on environment
+            if is_docker:
+                # Use the Docker Compose service name
+                host = "sherlog-canvas-pg-mcp"
+            else:
+                # Use localhost with external port when running outside Docker
+                host = "localhost"
+                port = 9201
             
-            address = f"localhost:{port}"
+            address = f"{host}:{port}"
             print(f"Started Postgres MCP server for {connection.name} at {address}")
             return address
         

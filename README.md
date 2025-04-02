@@ -31,7 +31,7 @@ Sherlog Canvas consists of:
 
 ## Quick Start
 
-Sherlog Canvas now includes a convenient startup script that handles all components:
+Sherlog Canvas now includes a convenient startup script that handles all components using Docker Compose:
 
 1. Clone the repository:
    ```bash
@@ -49,34 +49,21 @@ Sherlog Canvas now includes a convenient startup script that handles all compone
    ANTHROPIC_API_KEY=your_anthropic_api_key_here
    ```
 
-4. Install dependencies:
-   ```bash
-   # Install Python dependencies
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   pip install -r requirements.txt
-   
-   # Install Node.js dependencies
-   npm install
-   
-   # Install frontend dependencies
-   cd frontend
-   npm install
-   cd ..
-   ```
-
-5. Start all services with a single command:
+4. Start all services with a single command:
    ```bash
    ./start.sh
    ```
 
-6. Access the application at http://localhost:5173
+5. Access the application at http://localhost:5173
 
 The start script handles:
 - Starting Qdrant vector database in Docker
-- Installing and starting required MCP servers
-- Starting the backend API server
-- Starting the frontend development server
+- Starting PostgreSQL MCP server in Docker
+- Starting Grafana MCP server in Docker
+- Starting the backend API server in Docker
+- Starting the frontend in Docker
+
+All services are managed through Docker Compose for consistency and ease of use.
 
 ## MCP Servers
 
