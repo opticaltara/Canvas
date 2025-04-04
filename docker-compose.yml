@@ -42,11 +42,11 @@ services:
       dockerfile: Dockerfile.frontend
     container_name: sherlog-canvas-frontend
     ports:
-      - "3000:3000"
+      - "3001:3001"
     depends_on:
       - backend
     environment:
-      - WDS_SOCKET_PORT=3000
+      - WDS_SOCKET_PORT=3001
     restart: unless-stopped
 
   qdrant:
