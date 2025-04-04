@@ -2,16 +2,26 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies and Deno
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    && rm -rf /var/lib/apt/lists/*
+    curl \
+    unzip \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL https://deno.land/x/install/install.sh | sh \
+    && mv /root/.deno/bin/deno /usr/local/bin/deno
 
 # Copy requirements first for better caching
 COPY requirements.txt .
 
 # Install dependencies using pip directly
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Create node_modules directory for Deno
+RUN mkdir -p node_modules && chmod 777 node_modules
+
+# Warm up the Pyodide environment
+RUN deno run -A --unstable-worker-options jsr:@pydantic/mcp-run-python warmup
 
 # Copy application code
 COPY backend/ ./backend/

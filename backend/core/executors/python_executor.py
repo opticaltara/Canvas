@@ -3,7 +3,7 @@ Python Cell Executor
 
 Supports two execution modes:
 1. Local execution (in-process)
-2. Sandboxed execution using Pydantic MCP Python Run server
+2. Sandboxed execution using Pydantic MCP Python Run server through Deno
 """
 
 import ast
@@ -11,6 +11,9 @@ import sys
 import traceback
 import json
 import aiohttp
+import asyncio
+import subprocess
+import os
 from io import StringIO
 from typing import Any, Dict, List, Optional
 
@@ -18,7 +21,6 @@ from backend.core.cell import Cell
 from backend.core.execution import ExecutionContext
 from backend.mcp.manager import get_mcp_server_manager, MCPServerStatus
 from backend.services.connection_manager import ConnectionConfig, get_connection_manager
-
 
 from pydantic import BaseModel
 
@@ -52,7 +54,7 @@ async def execute_python_cell(cell: Cell, context: ExecutionContext) -> PythonCe
 
 async def execute_python_cell_sandboxed(cell: Cell, context: ExecutionContext) -> PythonCellResult:
     """
-    Execute a Python cell in a sandboxed environment using Pydantic MCP Python Run
+    Execute a Python cell in a sandboxed environment using Pydantic MCP Python Run through Deno
     
     Args:
         cell: The Python cell to execute
@@ -61,70 +63,72 @@ async def execute_python_cell_sandboxed(cell: Cell, context: ExecutionContext) -
     Returns:
         The result of the execution
     """
-    # Get the Python MCP server
-    mcp_manager = get_mcp_server_manager()
-    connection_manager = get_connection_manager()
+    # Start the Deno MCP Run Python server if not already running
+    process = None
+    port = None
     
-    # Get or create a Python connection
-    python_connections = [
-        conn for conn in connection_manager.get_all_connections() 
-        if conn.get("type") == "python"
-    ]
-    
-    if not python_connections:
-        # Create a Python connection
-        connection = await connection_manager.create_connection(
-            name="Python Sandbox",
-            type="python",
-            config={}  # No config needed for Python MCP
+    try:
+        # Find a free port
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(('', 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        
+        # Start the Deno MCP Run Python server
+        cmd = [
+            "deno", "run", "-A", "--unstable-worker-options",
+            "jsr:@pydantic/mcp-run-python", "sse"
+        ]
+        
+        # Add port as an environment variable
+        env = os.environ.copy()
+        env["PORT"] = str(port)
+        
+        process = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
         )
-        connection_id = connection.id
-    else:
-        # Use the first Python connection
-        connection_id = python_connections[0]["id"]
-        connection = connection_manager.get_connection(connection_id)
-    
-    # Ensure the Python MCP server is running
-    server_status = mcp_manager.get_server_status(connection_id)
-    if server_status["status"] != MCPServerStatus.RUNNING:
-        # Start the server
-        if not connection:
-            raise RuntimeError("No valid Python connection found")
-        address = await mcp_manager.start_mcp_server(connection)
-        if not address:
-            raise RuntimeError("Failed to start the Python MCP server")
-    else:
-        address = server_status["address"]
-    
-    # Prepare the code for execution
-    # Format the code with dependencies section if needed
-    dependencies = context.settings.get("dependencies", [])
-    code = cell.content
-    
-    if dependencies:
-        # Format the code with dependencies using PEP 723 syntax
-        dependencies_str = ", ".join([f'"{dep}"' for dep in dependencies])
-        code = f'''# /// script
+        
+        # Wait for server to start
+        await asyncio.sleep(2)
+        
+        # Check if process started successfully
+        if process.poll() is not None:
+            stderr = process.stderr.read() if process.stderr else ""
+            raise RuntimeError(f"Failed to start MCP Run Python server: {stderr}")
+        
+        # Prepare the code for execution
+        # Format the code with dependencies section if needed
+        dependencies = context.settings.get("dependencies", [])
+        code = cell.content
+        
+        if dependencies:
+            # Format the code with dependencies using PEP 723 syntax
+            dependencies_str = ", ".join([f'"{dep}"' for dep in dependencies])
+            code = f'''# /// script
 # dependencies = [{dependencies_str}]
 # ///
 
 {code}
 '''
-    
-    # Define the input variables
-    variables = {}
-    for var_name, var_value in context.variables.items():
-        # Only pass serializable values to the sandbox
-        try:
-            json.dumps(var_value)
-            variables[var_name] = var_value
-        except (TypeError, ValueError):
-            # Skip non-serializable values
-            pass
-    
-    # Call the Python MCP API to execute the code using the Pydantic MCP Run Python server
-    async with aiohttp.ClientSession() as session:
-        try:
+        
+        # Define the input variables
+        variables = {}
+        for var_name, var_value in context.variables.items():
+            # Only pass serializable values to the sandbox
+            try:
+                json.dumps(var_value)
+                variables[var_name] = var_value
+            except (TypeError, ValueError):
+                # Skip non-serializable values
+                pass
+        
+        # Call the Python MCP API to execute the code
+        async with aiohttp.ClientSession() as session:
             # MCP Protocol: Pydantic MCP Run Python uses the MCP protocol
             mcp_payload = {
                 "toolId": "run_python_code",
@@ -133,7 +137,7 @@ async def execute_python_cell_sandboxed(cell: Cell, context: ExecutionContext) -
                 }
             }
             
-            url = f"http://{address}/mcp/invoke"
+            url = f"http://localhost:{port}/mcp/invoke"
             async with session.post(url, json=mcp_payload) as response:
                 result_data = await response.json()
                 
@@ -154,9 +158,6 @@ async def execute_python_cell_sandboxed(cell: Cell, context: ExecutionContext) -
                 output = ""
                 return_value = None
                 error_message = None
-                
-                # Log the response for debugging
-                print(f"Python MCP Response: {text_content}")
                 
                 # Parse the content to extract status, output, and return value
                 if "<status>success</status>" in text_content:
@@ -204,14 +205,22 @@ async def execute_python_cell_sandboxed(cell: Cell, context: ExecutionContext) -
                         stderr="",
                         error=error_message or "Error executing Python code"
                     )
-                
-        except Exception as e:
-            return PythonCellResult(
-                result=None,
-                stdout="",
-                stderr="",
-                error=f"Failed to execute code in sandbox: {str(e)}"
-            )
+                    
+    except Exception as e:
+        return PythonCellResult(
+            result=None,
+            stdout="",
+            stderr="",
+            error=f"Failed to execute code in sandbox: {str(e)}"
+        )
+    finally:
+        # Clean up the server process
+        if process and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
 
 
 async def execute_python_cell_local(cell: Cell, context: ExecutionContext) -> PythonCellResult:
