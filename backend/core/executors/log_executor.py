@@ -2,15 +2,23 @@
 Log Cell Executor
 """
 
-from typing import Any, Dict, Optional
-from pydantic_ai import RunContext
+from typing import Any
 
 from backend.core.cell import Cell
 from backend.core.execution import ExecutionContext
-from backend.ai.agent import LogQueryParams, query_logs, InvestigationDependencies
+from backend.ai.agent import LogQueryParams
+from backend.services.connection_manager import get_connection_manager
 
+from pydantic import BaseModel
+from typing import List, Dict, Optional
 
-async def execute_log_cell(cell: Cell, context: ExecutionContext) -> Any:
+class LogQueryResult(BaseModel):
+    data: List[Dict]
+    query: str 
+    error: Optional[str] = None
+    metadata: Dict = {}
+
+async def execute_log_cell(cell: Cell, context: ExecutionContext) -> LogQueryResult:
     """
     Execute a Log query cell using MCP servers
     
@@ -32,24 +40,40 @@ async def execute_log_cell(cell: Cell, context: ExecutionContext) -> Any:
         time_range=time_range
     )
     
-    # Set up dependencies for the AI tool to use
-    dependencies = InvestigationDependencies(
-        user_query="",  # Not needed for direct execution
-        notebook_id=context.notebook.id if context.notebook else None
-    )
+    # Execute the query directly using the MCP clients
+    connection_manager = get_connection_manager()
     
-    # Execute the query using the AI agent's query_logs tool
-    run_context = RunContext(dependencies)
+    # Get the appropriate connection
+    connection_type = "loki" if source == "loki" else "grafana"
+    connection = connection_manager.get_default_connection(connection_type)
     
-    # Add MCP clients to the run context state
-    run_context.state.update(context.mcp_clients)
+    if not connection:
+        return LogQueryResult(
+            data=[],
+            query=cell.content,
+            error=f"No {connection_type} connection available",
+            metadata={}
+        )
     
-    result = await query_logs(run_context, query_params)
-    
-    # Return the query result
-    return {
-        "data": result.data,
-        "query": result.query,
-        "error": result.error,
-        "metadata": result.metadata
-    }
+    # Execute the query using the connection
+    try:
+        # Get the MCP client for this connection
+        mcp_client = context.mcp_clients.get(f"mcp_{connection.id}")
+        if not mcp_client:
+            raise ValueError(f"No MCP client found for connection {connection.id}")
+            
+        # Execute the query using the MCP client
+        result = mcp_client["query_logs"](cell.content, query_params.model_dump())
+        return LogQueryResult(
+            data=result.get("data", []),
+            query=cell.content,
+            error=None,
+            metadata={"source": source, "connection_id": connection.id}
+        )
+    except Exception as e:
+        return LogQueryResult(
+            data=[],
+            query=cell.content,
+            error=str(e),
+            metadata={"source": source, "connection_id": connection.id}
+        )

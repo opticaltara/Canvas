@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from backend.core.cell import CellType
 from backend.core.notebook import Notebook
 from backend.services.notebook_manager import NotebookManager, get_notebook_manager
+from backend.core.cell import CellStatus
 
 router = APIRouter()
 
@@ -50,11 +51,11 @@ async def list_notebooks(
     return [
         {
             "id": str(notebook.id),
-            "name": notebook.name,
-            "description": notebook.description,
+            "name": notebook.metadata.title,
+            "description": notebook.metadata.description,
             "cell_count": len(notebook.cells),
-            "created_at": notebook.created_at,
-            "updated_at": notebook.updated_at
+            "created_at": notebook.metadata.created_at,
+            "updated_at": notebook.metadata.updated_at
         }
         for notebook in notebooks
     ]
@@ -125,13 +126,15 @@ async def update_notebook(
         
         # Update fields if provided
         if notebook_data.name is not None:
-            notebook.name = notebook_data.name
+            notebook.metadata.title = notebook_data.name
         
         if notebook_data.description is not None:
-            notebook.description = notebook_data.description
+            notebook.metadata.description = notebook_data.description
         
         if notebook_data.metadata is not None:
-            notebook.metadata.update(notebook_data.metadata)
+            for key, value in notebook_data.metadata.items():
+                if hasattr(notebook.metadata, key):
+                    setattr(notebook.metadata, key, value)
         
         # Save the notebook
         notebook_manager.save_notebook(notebook_id)
@@ -411,7 +414,7 @@ async def execute_cell(
         cell = notebook.get_cell(cell_id)
         
         # Update cell status to queued
-        cell.status = "queued"
+        cell.status = CellStatus.QUEUED
         
         # Save the notebook
         notebook_manager.save_notebook(notebook_id)

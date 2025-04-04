@@ -213,31 +213,47 @@ class CellExecutor:
                 connection_type = "loki"
             elif cell.type == CellType.METRIC:
                 connection_type = "prometheus"
-            elif cell.type == CellType.S3:
-                connection_type = "s3"
             
             if connection_type:
-                # Get connections of this type
-                connections = connection_manager.get_connections_by_type(connection_type)
-                
-                # Start any MCP servers needed for these connections
-                server_addresses = await mcp_manager.start_mcp_servers(connections)
-                
-                # Create basic client objects for each connection/server
-                for conn in connections:
-                    if conn.id in server_addresses:
-                        # Create a simple client object for the MCP server
-                        # This is a placeholder - a real implementation would create actual client objects
-                        mcp_clients[f"mcp_{conn.id}"] = {
-                            "connection_id": conn.id,
-                            "address": server_addresses[conn.id],
-                            "query_db": lambda query, params: {"rows": [], "columns": []},
-                            "query_logs": lambda query, params: {"data": []},
-                            "query_metrics": lambda query, params: {"data": []},
-                            "s3_list_objects": lambda bucket, prefix: {"data": []},
-                            "s3_get_object": lambda bucket, key: {"data": ""},
-                            "s3_select_object": lambda bucket, key, query: {"data": []},
-                        }
+                # Use the cell's connection_id if available
+                if cell.connection_id is not None:
+                    # Get the specific connection
+                    connection = connection_manager.get_connection(str(cell.connection_id))
+                    if connection:
+                        # Start MCP server for this specific connection
+                        server_addresses = await mcp_manager.start_mcp_servers([connection])
+                        
+                        # Create client object for this connection
+                        if connection.id in server_addresses:
+                            mcp_clients[f"mcp_{connection.id}"] = {
+                                "connection_id": connection.id,
+                                "address": server_addresses[connection.id],
+                                "query_db": lambda query, params: {"rows": [], "columns": []},
+                                "query_logs": lambda query, params: {"data": []},
+                                "query_metrics": lambda query, params: {"data": []},
+                                "s3_list_objects": lambda bucket, prefix: {"data": []},
+                                "s3_get_object": lambda bucket, key: {"data": ""},
+                                "s3_select_object": lambda bucket, key, query: {"data": []},
+                            }
+                else:
+                    # If no specific connection ID, get the default connection
+                    connection = connection_manager.get_default_connection(connection_type)
+                    if connection:
+                        # Start MCP server for the default connection
+                        server_addresses = await mcp_manager.start_mcp_servers([connection])
+                        
+                        # Create client object for this connection
+                        if connection.id in server_addresses:
+                            mcp_clients[f"mcp_{connection.id}"] = {
+                                "connection_id": connection.id,
+                                "address": server_addresses[connection.id],
+                                "query_db": lambda query, params: {"rows": [], "columns": []},
+                                "query_logs": lambda query, params: {"data": []},
+                                "query_metrics": lambda query, params: {"data": []},
+                                "s3_list_objects": lambda bucket, prefix: {"data": []},
+                                "s3_get_object": lambda bucket, key: {"data": ""},
+                                "s3_select_object": lambda bucket, key, query: {"data": []},
+                            }
         
         # Dispatch to the appropriate executor based on cell type
         if cell.type == CellType.PYTHON:
@@ -259,18 +275,14 @@ class CellExecutor:
             context.mcp_clients = mcp_clients
             return await execute_metric_cell(cell, context)
         
-        elif cell.type == CellType.S3:
-            from backend.core.executors.s3_executor import execute_s3_cell
-            context.mcp_clients = mcp_clients
-            return await execute_s3_cell(cell, context)
-        
         elif cell.type == CellType.MARKDOWN:
             # Markdown cells don't need execution
             return cell.content
         
         elif cell.type == CellType.AI_QUERY:
             from backend.ai.agent import execute_ai_query_cell
-            return await execute_ai_query_cell(cell, context)
+            from backend.core.cell import AIQueryCell
+            return await execute_ai_query_cell(AIQueryCell(**cell.model_dump()), context)
         
         else:
             raise ValueError(f"Unknown cell type: {cell.type}")

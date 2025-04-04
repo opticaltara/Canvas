@@ -234,7 +234,7 @@ class Notebook(BaseModel):
         Returns:
             List of cell IDs in execution order
         """
-        return self.dependency_graph.get_execution_order(cell_ids)
+        return self.dependency_graph.get_execution_order(cell_ids or [])
     
     def move_cell(self, cell_id: UUID, position: int) -> None:
         """

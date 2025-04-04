@@ -5,12 +5,12 @@ Notebook Manager Service
 import asyncio
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 from uuid import UUID, uuid4
 
 from backend.config import get_settings
-from backend.core.notebook import Notebook
+from backend.core.notebook import Notebook, NotebookMetadata
 
 # Singleton instance
 _notebook_manager_instance = None
@@ -60,12 +60,17 @@ class NotebookManager:
         notebook_id = uuid4()
         notebook = Notebook(
             id=notebook_id,
-            name=name,
-            description=description or "",
-            metadata=metadata or {},
-            created_at=datetime.utcnow().isoformat(),
-            updated_at=datetime.utcnow().isoformat()
+            metadata=NotebookMetadata(
+                title=name,
+                description=description or "",
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc)
+            )
         )
+        
+        # Update metadata if provided
+        if metadata:
+            notebook.update_metadata(metadata)
         
         self.notebooks[notebook_id] = notebook
         self.save_notebook(notebook_id)
@@ -114,7 +119,7 @@ class NotebookManager:
         notebook = self.notebooks[notebook_id]
         
         # Update the updated_at timestamp
-        notebook.updated_at = datetime.utcnow().isoformat()
+        notebook.metadata.updated_at = datetime.now(timezone.utc)
         
         # Save to storage based on storage type
         storage_type = self.settings.notebook_storage_type
@@ -201,16 +206,25 @@ class NotebookManager:
                 # Create a notebook instance
                 notebook = Notebook(
                     id=notebook_id,
-                    name=data.get("name", "Untitled"),
-                    description=data.get("description", ""),
-                    metadata=data.get("metadata", {}),
-                    created_at=data.get("created_at", datetime.utcnow().isoformat()),
-                    updated_at=data.get("updated_at", datetime.utcnow().isoformat())
+                    metadata=NotebookMetadata(
+                        title=data.get("name", "Untitled"),
+                        description=data.get("description", ""),
+                        created_at=datetime.fromisoformat(data.get("created_at", datetime.now(timezone.utc).isoformat())),
+                        updated_at=datetime.fromisoformat(data.get("updated_at", datetime.now(timezone.utc).isoformat()))
+                    )
                 )
+                
+                # Update metadata if provided
+                if data.get("metadata"):
+                    notebook.update_metadata(data.get("metadata"))
                 
                 # Load cells
                 for cell_data in data.get("cells", []):
-                    notebook.add_cell_from_dict(cell_data)
+                    notebook.create_cell(
+                        cell_type=cell_data["type"],
+                        content=cell_data["content"],
+                        **cell_data.get("metadata", {})
+                    )
                 
                 # Load dependencies
                 for dependency in data.get("dependencies", []):
@@ -256,13 +270,13 @@ class NotebookManager:
                 region_name=self.settings.aws_region
             )
             
-            async with session.client("s3") as s3:
-                await s3.put_object(
-                    Bucket=bucket,
-                    Key=key,
-                    Body=json.dumps(notebook.serialize(), indent=2),
-                    ContentType="application/json"
-                )
+            s3 = session.client("s3")
+            await s3.put_object(
+                Bucket=bucket,
+                Key=key,
+                Body=json.dumps(notebook.serialize(), indent=2),
+                ContentType="application/json"
+            )
         
         except Exception as e:
             print(f"Error saving notebook to S3: {e}")
@@ -281,54 +295,63 @@ class NotebookManager:
                 region_name=self.settings.aws_region
             )
             
-            async with session.client("s3") as s3:
-                # List objects in the bucket with the prefix
-                response = await s3.list_objects_v2(
+            s3 = session.client("s3")
+            # List objects in the bucket with the prefix
+            response = await s3.list_objects_v2(
+                Bucket=bucket,
+                Prefix=prefix
+            )
+            
+            # Get each notebook file
+            for obj in response.get("Contents", []):
+                key = obj["Key"]
+                
+                if not key.endswith(".json"):
+                    continue
+                
+                # Get the notebook file
+                response = await s3.get_object(
                     Bucket=bucket,
-                    Prefix=prefix
+                    Key=key
                 )
                 
-                # Get each notebook file
-                for obj in response.get("Contents", []):
-                    key = obj["Key"]
-                    
-                    if not key.endswith(".json"):
-                        continue
-                    
-                    # Get the notebook file
-                    response = await s3.get_object(
-                        Bucket=bucket,
-                        Key=key
-                    )
-                    
-                    # Read the data
-                    data = await response["Body"].read()
-                    data = json.loads(data)
-                    
-                    notebook_id = UUID(data.get("id"))
-                    
-                    # Create a notebook instance
-                    notebook = Notebook(
-                        id=notebook_id,
-                        name=data.get("name", "Untitled"),
+                # Read the data
+                data = await response["Body"].read()
+                data = json.loads(data)
+                
+                notebook_id = UUID(data.get("id"))
+                
+                # Create a notebook instance
+                notebook = Notebook(
+                    id=notebook_id,
+                    metadata=NotebookMetadata(
+                        title=data.get("name", "Untitled"),
                         description=data.get("description", ""),
-                        metadata=data.get("metadata", {}),
-                        created_at=data.get("created_at", datetime.utcnow().isoformat()),
-                        updated_at=data.get("updated_at", datetime.utcnow().isoformat())
+                        created_at=datetime.fromisoformat(data.get("created_at", datetime.now(timezone.utc).isoformat())),
+                        updated_at=datetime.fromisoformat(data.get("updated_at", datetime.now(timezone.utc).isoformat()))
                     )
-                    
-                    # Load cells
-                    for cell_data in data.get("cells", []):
-                        notebook.add_cell_from_dict(cell_data)
-                    
-                    # Load dependencies
-                    for dependency in data.get("dependencies", []):
-                        dependent_id = UUID(dependency[0])
-                        dependency_id = UUID(dependency[1])
-                        notebook.add_dependency(dependent_id, dependency_id)
-                    
-                    # Add to notebooks dict
-                    self.notebooks[notebook_id] = notebook
+                )
+                
+                # Update metadata if provided
+                if data.get("metadata"):
+                    notebook.update_metadata(data.get("metadata"))
+                
+                # Load cells
+                for cell_data in data.get("cells", []):
+                    notebook.create_cell(
+                        cell_type=cell_data["type"],
+                        content=cell_data["content"],
+                        **cell_data.get("metadata", {})
+                    )
+                
+                # Load dependencies
+                for dependency in data.get("dependencies", []):
+                    dependent_id = UUID(dependency[0])
+                    dependency_id = UUID(dependency[1])
+                    notebook.add_dependency(dependent_id, dependency_id)
+                
+                # Add to notebooks dict
+                self.notebooks[notebook_id] = notebook
         
         except Exception as e:
             print(f"Error loading notebooks from S3: {e}")
@@ -352,11 +375,11 @@ class NotebookManager:
                 region_name=self.settings.aws_region
             )
             
-            async with session.client("s3") as s3:
-                await s3.delete_object(
-                    Bucket=bucket,
-                    Key=key
-                )
+            s3 = session.client("s3")
+            await s3.delete_object(
+                Bucket=bucket,
+                Key=key
+            )
         
         except Exception as e:
             print(f"Error deleting notebook from S3: {e}")

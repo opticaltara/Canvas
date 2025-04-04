@@ -13,7 +13,7 @@ Key components:
 """
 
 from collections import defaultdict, deque
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set, Tuple, Optional
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -158,7 +158,7 @@ class DependencyGraph(BaseModel):
         
         return result
     
-    def get_execution_order(self, cell_ids: List[UUID] = None) -> List[UUID]:
+    def get_execution_order(self, cell_ids: Optional[List[UUID]] = None) -> List[UUID]:
         """
         Get a valid execution order for cells using topological sort
         

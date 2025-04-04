@@ -12,7 +12,16 @@ from backend.core.cell import Cell
 from backend.core.execution import ExecutionContext
 
 
-async def execute_python_cell(cell: Cell, context: ExecutionContext) -> Any:
+from pydantic import BaseModel
+from typing import Any, Optional
+
+class PythonCellResult(BaseModel):
+    result: Any = None
+    stdout: str = ""
+    stderr: str = ""
+    error: Optional[str] = None
+
+async def execute_python_cell(cell: Cell, context: ExecutionContext) -> PythonCellResult:
     """
     Execute a Python cell
     
@@ -84,4 +93,9 @@ async def execute_python_cell(cell: Cell, context: ExecutionContext) -> Any:
         sys.stdout = old_stdout
         sys.stderr = old_stderr
     
-    return result
+    return PythonCellResult(
+        result=result,
+        stdout=stdout.getvalue(),
+        stderr=stderr.getvalue(),
+        error=None
+    )

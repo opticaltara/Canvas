@@ -3,14 +3,23 @@ Metric Cell Executor
 """
 
 from typing import Any, Dict, Optional
-from pydantic_ai import RunContext
+from pydantic import BaseModel
+from typing import List
 
 from backend.core.cell import Cell
 from backend.core.execution import ExecutionContext
-from backend.ai.agent import MetricQueryParams, query_metrics, InvestigationDependencies
+from backend.ai.agent import MetricQueryParams
+from backend.services.connection_manager import get_connection_manager
 
 
-async def execute_metric_cell(cell: Cell, context: ExecutionContext) -> Any:
+class MetricQueryResult(BaseModel):
+    data: List[Dict]
+    query: str 
+    error: Optional[str] = None
+    metadata: Dict = {}
+
+
+async def execute_metric_cell(cell: Cell, context: ExecutionContext) -> MetricQueryResult:
     """
     Execute a Metric query cell using MCP servers
     
@@ -34,24 +43,39 @@ async def execute_metric_cell(cell: Cell, context: ExecutionContext) -> Any:
         instant=instant
     )
     
-    # Set up dependencies for the AI tool to use
-    dependencies = InvestigationDependencies(
-        user_query="",  # Not needed for direct execution
-        notebook_id=context.notebook.id if context.notebook else None
-    )
+    # Execute the query directly using the MCP clients
+    connection_manager = get_connection_manager()
     
-    # Execute the query using the AI agent's query_metrics tool
-    run_context = RunContext(dependencies)
+    # Get the appropriate connection
+    connection = connection_manager.get_default_connection("prometheus")
     
-    # Add MCP clients to the run context state
-    run_context.state.update(context.mcp_clients)
+    if not connection:
+        return MetricQueryResult(
+            data=[],
+            query=cell.content,
+            error="No prometheus connection available",
+            metadata={}
+        )
     
-    result = await query_metrics(run_context, query_params)
-    
-    # Return the query result
-    return {
-        "data": result.data,
-        "query": result.query,
-        "error": result.error,
-        "metadata": result.metadata
-    }
+    # Execute the query using the connection
+    try:
+        # Get the MCP client for this connection
+        mcp_client = context.mcp_clients.get(f"mcp_{connection.id}")
+        if not mcp_client:
+            raise ValueError(f"No MCP client found for connection {connection.id}")
+            
+        # Execute the query using the MCP client
+        result = mcp_client["query_metrics"](cell.content, query_params.model_dump())
+        return MetricQueryResult(
+            data=result.get("data", []),
+            query=cell.content,
+            error=None,
+            metadata={"source": source, "connection_id": connection.id}
+        )
+    except Exception as e:
+        return MetricQueryResult(
+            data=[],
+            query=cell.content,
+            error=str(e),
+            metadata={"source": source, "connection_id": connection.id}
+        )

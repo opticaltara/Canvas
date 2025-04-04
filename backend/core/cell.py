@@ -20,7 +20,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Union
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 
 
 class CellStatus(str, Enum):
@@ -96,6 +96,7 @@ class Cell(BaseModel):
         dependencies: Set of cell IDs this cell depends on
         dependents: Set of cell IDs that depend on this cell
         metadata: Additional cell metadata
+        connection_id: ID of the connection to use (0 or 1)
     """
     id: UUID = Field(default_factory=uuid4)
     type: CellType
@@ -104,6 +105,7 @@ class Cell(BaseModel):
     status: CellStatus = CellStatus.IDLE
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+    connection_id: Optional[int] = None
     
     # Dependency handling
     dependencies: Set[UUID] = Field(default_factory=set)
@@ -111,6 +113,12 @@ class Cell(BaseModel):
     
     # Metadata
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    
+    @validator('connection_id')
+    def validate_connection_id(cls, v):
+        if v is not None and v not in [0, 1]:
+            raise ValueError('connection_id must be either 0 or 1')
+        return v
     
     def mark_stale(self) -> None:
         """Mark this cell as stale (needs re-execution)"""
@@ -211,12 +219,8 @@ class SQLCell(Cell):
     A cell containing an SQL query
     
     This cell type executes SQL against connected databases.
-    
-    Attributes:
-        connection_id: ID of the database connection to use
     """
     type: CellType = CellType.SQL
-    connection_id: Optional[str] = None
     
     class Config:
         schema_extra = {
@@ -365,4 +369,14 @@ def create_cell(cell_type: CellType, content: str, **kwargs) -> Cell:
     if not cell_class:
         raise ValueError(f"Unknown cell type: {cell_type}")
     
-    return cell_class(content=content, **kwargs)
+    # Extract connection_id from kwargs if present
+    connection_id = kwargs.pop('connection_id', None)
+    
+    # Create the cell
+    cell = cell_class(content=content, **kwargs)
+    
+    # Set connection_id if provided
+    if connection_id is not None:
+        cell.connection_id = connection_id
+    
+    return cell

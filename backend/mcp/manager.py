@@ -66,12 +66,6 @@ class MCPServerManager:
             address = await self._start_grafana_mcp(connection)
         elif server_type == "postgres":
             address = await self._start_postgres_mcp(connection)
-        elif server_type == "prometheus":
-            address = await self._start_prometheus_mcp(connection)
-        elif server_type == "loki":
-            address = await self._start_loki_mcp(connection)
-        elif server_type == "s3":
-            address = await self._start_s3_mcp(connection)
         else:
             print(f"Unsupported MCP server type: {server_type}")
             return None
@@ -244,52 +238,7 @@ class MCPServerManager:
         except Exception as e:
             print(f"Error starting Postgres MCP server: {e}")
             return None
-    
-    async def _start_prometheus_mcp(self, connection: ConnectionConfig) -> Optional[str]:
-        """
-        Start a Prometheus MCP server
-        
-        Args:
-            connection: The Prometheus connection configuration
-            
-        Returns:
-            The MCP server address if successful, None otherwise
-        """
-        # Currently, this is a placeholder for Prometheus MCP server
-        # In a real implementation, you would add code to start the actual MCP server
-        print(f"Prometheus MCP server not implemented yet: {connection.name}")
-        return None
-    
-    async def _start_loki_mcp(self, connection: ConnectionConfig) -> Optional[str]:
-        """
-        Start a Loki MCP server
-        
-        Args:
-            connection: The Loki connection configuration
-            
-        Returns:
-            The MCP server address if successful, None otherwise
-        """
-        # Currently, this is a placeholder for Loki MCP server
-        # In a real implementation, you would add code to start the actual MCP server
-        print(f"Loki MCP server not implemented yet: {connection.name}")
-        return None
-    
-    async def _start_s3_mcp(self, connection: ConnectionConfig) -> Optional[str]:
-        """
-        Start an S3 MCP server
-        
-        Args:
-            connection: The S3 connection configuration
-            
-        Returns:
-            The MCP server address if successful, None otherwise
-        """
-        # Currently, this is a placeholder for S3 MCP server
-        # In a real implementation, you would add code to start the actual MCP server
-        print(f"S3 MCP server not implemented yet: {connection.name}")
-        return None
-    
+
     def _find_free_port(self, start_port: int, end_port: int) -> Optional[int]:
         """Find a free port in the given range"""
         import socket
