@@ -5,18 +5,26 @@ WORKDIR /app
 # Install basic utilities
 RUN apk add --no-cache curl
 
+# Create a health check script
+RUN echo '#!/bin/sh\ncurl -f http://localhost:8000/health || exit 1' > /healthcheck.sh && \
+    chmod +x /healthcheck.sh
+
 # Expose the server port
 EXPOSE 8000
 
-# Setup health check path
-HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:8000/health || exit 1
+# Setup health check
+HEALTHCHECK --interval=30s --timeout=5s CMD /healthcheck.sh
 
 # Set default environment variables
 ENV PORT=8000
 ENV STANDBY_MODE=false
 
-# Warmup the Python standard library (cache it)
-RUN deno run -N -R=node_modules -W=node_modules --node-modules-dir=auto jsr:@pydantic/mcp-run-python@0.7.0 warmup
+# Create a directory for node_modules
+RUN mkdir -p node_modules && chmod 777 node_modules
+
+# Warm up the Pyodide environment by running a simple command
+# This will download and cache the Python standard library
+RUN deno run -A --unstable-worker-options jsr:@pydantic/mcp-run-python warmup
 
 # Start the server in SSE mode
-CMD ["deno", "run", "-N", "-R=node_modules", "-W=node_modules", "--node-modules-dir=auto", "--allow-net", "jsr:@pydantic/mcp-run-python@0.7.0", "sse"]
+CMD ["deno", "run", "-A", "--unstable-worker-options", "jsr:@pydantic/mcp-run-python", "sse"]

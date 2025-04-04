@@ -122,35 +122,88 @@ async def execute_python_cell_sandboxed(cell: Cell, context: ExecutionContext) -
             # Skip non-serializable values
             pass
     
-    # Prepare the request payload
-    payload = {
-        "code": code,
-        "vars": variables
-    }
-    
-    # Call the Python MCP API to execute the code
+    # Call the Python MCP API to execute the code using the Pydantic MCP Run Python server
     async with aiohttp.ClientSession() as session:
         try:
-            url = f"http://{address}/run"
-            async with session.post(url, json=payload) as response:
+            # MCP Protocol: Pydantic MCP Run Python uses the MCP protocol
+            mcp_payload = {
+                "toolId": "run_python_code",
+                "toolInput": {
+                    "python_code": code
+                }
+            }
+            
+            url = f"http://{address}/mcp/invoke"
+            async with session.post(url, json=mcp_payload) as response:
                 result_data = await response.json()
                 
-                # Extract the execution results
-                if "error" in result_data and result_data["error"]:
+                # Process the MCP response
+                content = result_data.get("content", [])
+                if not content:
                     return PythonCellResult(
                         result=None,
-                        stdout=result_data.get("stdout", ""),
-                        stderr=result_data.get("stderr", ""),
-                        error=result_data["error"]
+                        stdout="",
+                        stderr="",
+                        error="Empty response from Python MCP server"
                     )
+                
+                text_content = content[0].get("text", "")
+                
+                # Extract results from MCP format
+                status = None
+                output = ""
+                return_value = None
+                error_message = None
+                
+                # Log the response for debugging
+                print(f"Python MCP Response: {text_content}")
+                
+                # Parse the content to extract status, output, and return value
+                if "<status>success</status>" in text_content:
+                    status = "success"
                     
-                # Process the successful result
-                return PythonCellResult(
-                    result=result_data.get("result"),
-                    stdout=result_data.get("stdout", ""),
-                    stderr=result_data.get("stderr", ""),
-                    error=None
-                )
+                    # Extract output
+                    if "<output>" in text_content and "</output>" in text_content:
+                        output_start = text_content.find("<output>") + len("<output>")
+                        output_end = text_content.find("</output>")
+                        output = text_content[output_start:output_end].strip()
+                    
+                    # Extract return value
+                    if "<return_value>" in text_content and "</return_value>" in text_content:
+                        return_value_start = text_content.find("<return_value>") + len("<return_value>")
+                        return_value_end = text_content.find("</return_value>")
+                        return_value_str = text_content[return_value_start:return_value_end].strip()
+                        try:
+                            return_value = json.loads(return_value_str)
+                        except:
+                            return_value = return_value_str
+                            
+                elif "<status>run-error</status>" in text_content or "<status>install-error</status>" in text_content:
+                    status = "error"
+                    
+                    # Extract error
+                    if "<error>" in text_content and "</error>" in text_content:
+                        error_start = text_content.find("<error>") + len("<error>")
+                        error_end = text_content.find("</error>")
+                        error_message = text_content[error_start:error_end].strip()
+                else:
+                    status = "unknown"
+                    error_message = "Unknown response format from Python MCP server"
+                
+                if status == "success":
+                    return PythonCellResult(
+                        result=return_value,
+                        stdout=output,
+                        stderr="",
+                        error=None
+                    )
+                else:
+                    return PythonCellResult(
+                        result=None,
+                        stdout=output,
+                        stderr="",
+                        error=error_message or "Error executing Python code"
+                    )
                 
         except Exception as e:
             return PythonCellResult(

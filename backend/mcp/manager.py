@@ -469,7 +469,7 @@ class MCPServerManager:
             
     async def _start_python_mcp(self, connection: ConnectionConfig) -> Optional[str]:
         """
-        Start a Python MCP server for sandboxed code execution
+        Start a Python MCP server for sandboxed code execution using Pydantic MCP
         
         Args:
             connection: The Python connection configuration
@@ -492,17 +492,14 @@ class MCPServerManager:
             
         # Start the MCP server for Python execution
         try:
-            # For local development, we would use Deno to run the Pydantic MCP
-            # But in production, we'll use the Docker container
-            
             # Check if we're running in Docker
             is_docker = os.path.exists('/.dockerenv')
             
             if not is_docker:
                 # For local development, we'll use Deno to start the server
                 cmd = [
-                    "deno", "run", "-N", "--allow-net",
-                    "jsr:@pydantic/mcp-run-python@0.7.0", "sse"
+                    "deno", "run", "-A", "--unstable-worker-options",
+                    "jsr:@pydantic/mcp-run-python", "sse"
                 ]
                 
                 # Add port as an environment variable
