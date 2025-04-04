@@ -12,6 +12,11 @@ export interface Cell {
   created_at: string;
   updated_at: string;
   metadata: Record<string, any>;
+  settings?: {
+    use_sandbox?: boolean;
+    dependencies?: string[];
+    [key: string]: any;
+  };
 }
 
 export interface Dependency {

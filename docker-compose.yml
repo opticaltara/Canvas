@@ -133,6 +133,29 @@ services:
         limits:
           cpus: '0.50'  # Limit CPU usage when in standby
           memory: 256M  # Limit memory usage when in standby
+          
+  mcp-python:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp-python
+    container_name: sherlog-canvas-mcp-python
+    ports:
+      - "9410:8000"
+    environment:
+      - STANDBY_MODE=true  # Begin in standby mode (low resource usage)
+      - PORT=8000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'  # Limit CPU usage when in standby
+          memory: 256M  # Limit memory usage when in standby
 
 volumes:
   data:

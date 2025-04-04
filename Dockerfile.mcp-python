@@ -1,0 +1,22 @@
+FROM denoland/deno:alpine
+
+WORKDIR /app
+
+# Install basic utilities
+RUN apk add --no-cache curl
+
+# Expose the server port
+EXPOSE 8000
+
+# Setup health check path
+HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:8000/health || exit 1
+
+# Set default environment variables
+ENV PORT=8000
+ENV STANDBY_MODE=false
+
+# Warmup the Python standard library (cache it)
+RUN deno run -N -R=node_modules -W=node_modules --node-modules-dir=auto jsr:@pydantic/mcp-run-python@0.7.0 warmup
+
+# Start the server in SSE mode
+CMD ["deno", "run", "-N", "-R=node_modules", "-W=node_modules", "--node-modules-dir=auto", "--allow-net", "jsr:@pydantic/mcp-run-python@0.7.0", "sse"]

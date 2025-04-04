@@ -247,6 +247,7 @@ class CellUpdate(BaseModel):
     """Parameters for updating a cell"""
     content: Optional[str] = None
     metadata: Optional[Dict] = None
+    settings: Optional[Dict] = None
 
 
 @router.put("/{notebook_id}/cells/{cell_id}")
@@ -277,6 +278,11 @@ async def update_cell(
         # Update metadata if provided
         if cell_data.metadata is not None:
             notebook.update_cell_metadata(cell_id, cell_data.metadata)
+            
+        # Update settings if provided
+        if cell_data.settings is not None:
+            cell = notebook.get_cell(cell_id)
+            cell.settings = cell_data.settings
         
         # Save the notebook
         notebook_manager.save_notebook(notebook_id)

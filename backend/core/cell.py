@@ -114,6 +114,9 @@ class Cell(BaseModel):
     # Metadata
     metadata: Dict[str, Any] = Field(default_factory=dict)
     
+    # Settings for cell execution
+    settings: Dict[str, Any] = Field(default_factory=dict)
+    
     @validator('connection_id')
     def validate_connection_id(cls, v):
         if v is not None and v not in [0, 1]:
@@ -238,13 +241,19 @@ class PythonCell(Cell):
     
     Attributes:
         type: Always set to PYTHON
+        use_sandbox: Whether to use the sandboxed execution environment
+        dependencies: Python package dependencies for the sandboxed environment
     """
     type: CellType = CellType.PYTHON
     
     class Config:
         schema_extra = {
             "example": {
-                "content": "import pandas as pd\ndf = pd.DataFrame(result)\ndf.groupby('status').count()"
+                "content": "import pandas as pd\ndf = pd.DataFrame(result)\ndf.groupby('status').count()",
+                "settings": {
+                    "use_sandbox": True,
+                    "dependencies": ["pandas", "numpy"]
+                }
             }
         }
 

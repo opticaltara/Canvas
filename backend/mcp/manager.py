@@ -81,6 +81,8 @@ class MCPServerManager:
                 address = await self._start_postgres_mcp(connection)
             elif server_type == "kubernetes":
                 address = await self._start_kubernetes_mcp(connection)
+            elif server_type == "python":
+                address = await self._start_python_mcp(connection)
             else:
                 self.last_error[connection.id] = f"Unsupported MCP server type: {server_type}"
                 self.status[connection.id] = MCPServerStatus.FAILED
@@ -463,6 +465,89 @@ class MCPServerManager:
                 except:
                     pass
                     
+            return None
+            
+    async def _start_python_mcp(self, connection: ConnectionConfig) -> Optional[str]:
+        """
+        Start a Python MCP server for sandboxed code execution
+        
+        Args:
+            connection: The Python connection configuration
+            
+        Returns:
+            The MCP server address if successful, None otherwise
+        """
+        # For Python MCP, there's no specific configuration needed since
+        # it's a utility server rather than a data connection
+        
+        # Choose a port for local development (when not using Docker)
+        port = self._find_free_port(9401, 9500)
+        if not port:
+            self.last_error[connection.id] = f"Could not find a free port for Python MCP server"
+            print(f"Could not find a free port for Python MCP server: {connection.name}")
+            return None
+        
+        # Set environment variables
+        env = os.environ.copy()
+            
+        # Start the MCP server for Python execution
+        try:
+            # For local development, we would use Deno to run the Pydantic MCP
+            # But in production, we'll use the Docker container
+            
+            # Check if we're running in Docker
+            is_docker = os.path.exists('/.dockerenv')
+            
+            if not is_docker:
+                # For local development, we'll use Deno to start the server
+                cmd = [
+                    "deno", "run", "-N", "--allow-net",
+                    "jsr:@pydantic/mcp-run-python@0.7.0", "sse"
+                ]
+                
+                # Add port as an environment variable
+                env["PORT"] = str(port)
+                
+                process = subprocess.Popen(
+                    cmd,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                
+                self.processes[connection.id] = process
+                
+                # Wait for server to start
+                await asyncio.sleep(2)
+                
+                # Check if process is still running
+                if process.poll() is not None:
+                    stderr = ""
+                    if process.stderr:
+                        stderr = process.stderr.read() or ""
+                    self.last_error[connection.id] = f"Python MCP server failed to start: {stderr}"
+                    print(f"Python MCP server failed to start: {stderr}")
+                    return None
+                
+                host = "localhost"
+            else:
+                # In Docker, we don't need to start a process as it's managed by Docker Compose
+                # Just record a placeholder in the processes dict for cleanup tracking
+                self.processes[connection.id] = None
+                
+                # Use the Docker Compose service name
+                host = "sherlog-canvas-mcp-python"
+                # The internal port is 8000, not our dynamic port
+                port = 8000
+            
+            address = f"{host}:{port}"
+            print(f"Started Python MCP server for {connection.name} at {address}")
+            return address
+        
+        except Exception as e:
+            self.last_error[connection.id] = f"Error starting Python MCP server: {str(e)}"
+            print(f"Error starting Python MCP server: {e}")
             return None
     
     def _find_free_port(self, start_port: int, end_port: int) -> Optional[int]:

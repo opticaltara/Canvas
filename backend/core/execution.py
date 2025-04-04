@@ -17,6 +17,7 @@ class ExecutionContext:
     cell_id: UUID
     variables: Dict[str, Any] = field(default_factory=dict)
     mcp_clients: Dict[str, Any] = field(default_factory=dict)
+    settings: Dict[str, Any] = field(default_factory=dict)
 
 
 class ExecutionQueue:
@@ -143,10 +144,16 @@ class CellExecutor:
         
         try:
             # Create execution context
+            # Get cell settings
+            settings = {}
+            if hasattr(cell, 'settings') and cell.settings:
+                settings = cell.settings
+            
             context = ExecutionContext(
                 notebook=notebook,
                 cell_id=cell_id,
-                variables=self._get_dependency_results(notebook, cell_id)
+                variables=self._get_dependency_results(notebook, cell_id),
+                settings=settings
             )
             
             # Execute the cell based on its type

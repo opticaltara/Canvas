@@ -142,17 +142,25 @@ export function NotebookView() {
     [notebookId, isConnected, sendMessage]
   );
 
-  // Handler for updating cell content
+  // Handler for updating cell content and settings
   const handleUpdateCell = useCallback(
-    (cellId: string, content: string) => {
+    (cellId: string, content: string, settings?: Record<string, any>) => {
       if (!notebookId || !isConnected) return;
 
-      sendMessage({
+      // Create message with basic update info
+      const message: any = {
         type: 'update_cell',
         notebook_id: notebookId,
         cell_id: cellId,
         content: content,
-      });
+      };
+      
+      // Add settings if provided
+      if (settings) {
+        message.settings = settings;
+      }
+
+      sendMessage(message);
     },
     [notebookId, isConnected, sendMessage]
   );

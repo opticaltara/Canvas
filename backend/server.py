@@ -206,13 +206,18 @@ async def websocket_endpoint(websocket: WebSocket, notebook_id: UUID):
                     })
                 
                 elif message_type == "update_cell":
-                    # Update a cell's content
+                    # Update a cell's content and settings
                     cell_id = UUID(message.get("cell_id"))
                     notebook_id = UUID(message.get("notebook_id"))
                     content = message.get("content")
+                    settings = message.get("settings")
                     
                     notebook = notebook_manager.get_notebook(notebook_id)
                     cell = notebook.update_cell_content(cell_id, content)
+                    
+                    # Update settings if provided
+                    if settings is not None:
+                        cell.settings = settings
                     
                     # Notify clients of the update
                     await websocket_manager.broadcast(notebook_id, {
