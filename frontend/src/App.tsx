@@ -11,8 +11,17 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from './components/ui/dropdown-menu';
 import { MoreVertical, Plus, Search } from 'lucide-react';
 
+// Define connection types
+interface Connection {
+  id: string;
+  name: string;
+  type: string;
+  config: Record<string, string>;
+}
+
 function App() {
   const [notebooks, setNotebooks] = useState<NotebookList[]>([]);
+  const [connections, setConnections] = useState<Connection[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState('notebooks');
@@ -22,25 +31,47 @@ function App() {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Fetch notebooks
+  // Fetch data based on active tab
   useEffect(() => {
     setLoading(true);
-    fetch('/api/notebooks')
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error(`Error ${response.status}: ${response.statusText}`);
-        }
-        return response.json();
-      })
-      .then((data) => {
-        setNotebooks(data);
-        setLoading(false);
-      })
-      .catch((err) => {
-        setError(err.message);
-        setLoading(false);
-      });
-  }, []);
+    setError(null);
+    
+    if (activeTab === 'notebooks') {
+      // Fetch notebooks
+      fetch('/api/notebooks')
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error(`Error ${response.status}: ${response.statusText}`);
+          }
+          return response.json();
+        })
+        .then((data) => {
+          setNotebooks(data);
+          setLoading(false);
+        })
+        .catch((err) => {
+          setError(err.message);
+          setLoading(false);
+        });
+    } else if (activeTab === 'connections') {
+      // Fetch connections
+      fetch('/api/connections')
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error(`Error ${response.status}: ${response.statusText}`);
+          }
+          return response.json();
+        })
+        .then((data) => {
+          setConnections(data);
+          setLoading(false);
+        })
+        .catch((err) => {
+          setError(err.message);
+          setLoading(false);
+        });
+    }
+  }, [activeTab]);
 
   // Create a new notebook
   const handleCreateNotebook = async (e: React.FormEvent) => {
@@ -257,19 +288,147 @@ function App() {
                     id: 'connections',
                     label: 'Data Connections',
                     content: (
-                      <Card>
-                        <CardHeader>
-                          <CardTitle>Data Connections</CardTitle>
-                          <CardDescription>
-                            Configure your data sources here. Connect to SQL databases, Prometheus, Loki, or S3.
-                          </CardDescription>
-                        </CardHeader>
-                        <CardContent>
-                          <div className="rounded-md bg-muted p-4 text-muted-foreground">
-                            <p>Coming soon! This feature is currently under development.</p>
+                      <div className="space-y-6">
+                        <div className="flex justify-between items-center">
+                          <h2 className="text-2xl font-bold tracking-tight">Data Connections</h2>
+                          <Button>
+                            <Plus className="mr-2 h-4 w-4" />
+                            New Connection
+                          </Button>
+                        </div>
+                        
+                        {loading ? (
+                          <Card>
+                            <CardContent className="flex justify-center py-8">
+                              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+                            </CardContent>
+                          </Card>
+                        ) : error ? (
+                          <Card>
+                            <CardHeader>
+                              <CardTitle className="text-destructive">Error</CardTitle>
+                              <CardDescription>{error}</CardDescription>
+                            </CardHeader>
+                          </Card>
+                        ) : connections.length === 0 ? (
+                          <Card>
+                            <CardContent className="flex flex-col items-center justify-center py-10">
+                              <p className="text-muted-foreground mb-4">
+                                No data connections found. Create your first one!
+                              </p>
+                              <Button>
+                                <Plus className="mr-2 h-4 w-4" />
+                                Create Connection
+                              </Button>
+                            </CardContent>
+                          </Card>
+                        ) : (
+                          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                            {/* Map over actual connections */}
+                            {connections.map((connection) => (
+                              <Card key={connection.id}>
+                                <CardHeader className="pb-2">
+                                  <CardTitle className="text-lg">{connection.name}</CardTitle>
+                                  <CardDescription>
+                                    {connection.type.charAt(0).toUpperCase() + connection.type.slice(1)} Connection
+                                  </CardDescription>
+                                </CardHeader>
+                                <CardContent>
+                                  <p className="text-sm text-muted-foreground mb-4">
+                                    Status: <span className="text-green-600 font-medium">Connected</span>
+                                  </p>
+                                  <div className="text-sm">
+                                    {/* Display key config values except sensitive ones */}
+                                    {Object.entries(connection.config)
+                                      .filter(([key]) => !key.includes('password') && !key.includes('key') && !key.includes('secret'))
+                                      .map(([key, value]) => (
+                                        <p key={key}>
+                                          <span className="font-medium">{key.charAt(0).toUpperCase() + key.slice(1).replace('_', ' ')}:</span> {value}
+                                        </p>
+                                      ))}
+                                  </div>
+                                </CardContent>
+                                <CardFooter className="bg-muted/50 flex justify-between">
+                                  <Button variant="outline" size="sm">
+                                    Edit
+                                  </Button>
+                                  <Button variant="secondary" size="sm">
+                                    Test Connection
+                                  </Button>
+                                </CardFooter>
+                              </Card>
+                            ))}
+                            
+                            {/* Show default connections if API didn't return them */}
+                            {connections.find(c => c.type === 'postgres') === undefined && (
+                              <Card>
+                                <CardHeader className="pb-2">
+                                  <CardTitle className="text-lg">PostgreSQL</CardTitle>
+                                  <CardDescription>Connect to your PostgreSQL databases</CardDescription>
+                                </CardHeader>
+                                <CardContent>
+                                  <p className="text-sm text-muted-foreground mb-4">
+                                    Status: <span className="text-green-600 font-medium">Connected</span>
+                                  </p>
+                                  <div className="text-sm">
+                                    <p><span className="font-medium">Server:</span> pg-mcp:8000</p>
+                                    <p><span className="font-medium">Host:</span> localhost</p>
+                                    <p><span className="font-medium">Port:</span> 9211</p>
+                                  </div>
+                                </CardContent>
+                                <CardFooter className="bg-muted/50 flex justify-between">
+                                  <Button variant="outline" size="sm">
+                                    Edit
+                                  </Button>
+                                  <Button variant="secondary" size="sm">
+                                    Test Connection
+                                  </Button>
+                                </CardFooter>
+                              </Card>
+                            )}
+                            
+                            {connections.find(c => c.type === 'grafana') === undefined && (
+                              <Card>
+                                <CardHeader className="pb-2">
+                                  <CardTitle className="text-lg">Grafana</CardTitle>
+                                  <CardDescription>Connect to your Grafana dashboards</CardDescription>
+                                </CardHeader>
+                                <CardContent>
+                                  <p className="text-sm text-muted-foreground mb-4">
+                                    Status: <span className="text-green-600 font-medium">Connected</span>
+                                  </p>
+                                  <div className="text-sm">
+                                    <p><span className="font-medium">Server:</span> mcp-grafana:8000</p>
+                                    <p><span className="font-medium">Host:</span> localhost</p>
+                                    <p><span className="font-medium">Port:</span> 9110</p>
+                                  </div>
+                                </CardContent>
+                                <CardFooter className="bg-muted/50 flex justify-between">
+                                  <Button variant="outline" size="sm">
+                                    Edit
+                                  </Button>
+                                  <Button variant="secondary" size="sm">
+                                    Test Connection
+                                  </Button>
+                                </CardFooter>
+                              </Card>
+                            )}
+                            
+                            {/* Add New Connection Card */}
+                            <Card className="border-dashed">
+                              <CardContent className="flex flex-col items-center justify-center py-10 h-full">
+                                <Plus className="h-10 w-10 text-muted-foreground mb-4" />
+                                <p className="text-muted-foreground mb-4 text-center">
+                                  Add another data connection
+                                </p>
+                                <Button variant="outline">
+                                  Add Connection
+                                </Button>
+                              </CardContent>
+                            </Card>
                           </div>
-                        </CardContent>
-                      </Card>
+                        )}
+                      </div>
                     ),
                   }
                 ]}
