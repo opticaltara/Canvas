@@ -5,7 +5,7 @@ Connection API Endpoints
 from typing import Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from backend.services.connection_manager import ConnectionManager, get_connection_manager
@@ -409,3 +409,5 @@ async def get_all_mcp_server_statuses(
                 }
         
         return {"servers": enriched_statuses}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

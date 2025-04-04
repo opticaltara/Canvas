@@ -110,14 +110,14 @@ services:
           memory: 256M  # Limit memory usage when in standby
           
   mcp-kubernetes:
-    image: node:18-alpine
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp-kubernetes
     container_name: sherlog-canvas-mcp-kubernetes
     ports:
       - "9310:8000"
     volumes:
       - ${HOME}/.kube:/root/.kube:ro  # Mount kubeconfig from host (read-only)
-    working_dir: /app
-    command: sh -c "npm install -g @mcp/kubernetes && npx @mcp/kubernetes serve --port 8000"
     environment:
       - STANDBY_MODE=true  # Begin in standby mode (low resource usage)
       - KUBECONFIG=/root/.kube/config

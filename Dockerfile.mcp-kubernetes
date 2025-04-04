@@ -1,0 +1,29 @@
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Install basic utilities
+RUN apk add --no-cache curl
+
+# Create necessary directories 
+RUN mkdir -p /root/.kube
+
+# Create a simple Kubernetes MCP server implementation
+COPY ./mcp-kubernetes/package.json /app/package.json
+COPY ./mcp-kubernetes/server.js /app/server.js
+
+# Install dependencies
+RUN npm install
+
+# Expose the server port
+EXPOSE 8000
+
+# Set default environment variables
+ENV KUBECONFIG=/root/.kube/config
+ENV STANDBY_MODE=false
+
+# Setup health check path
+HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:8000/health || exit 1
+
+# Start the server
+CMD ["node", "server.js"]

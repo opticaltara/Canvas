@@ -396,13 +396,13 @@ class MCPServerManager:
             
         # Start the MCP server using the kubernetes MCP package
         try:
-            # Use npx to run the MCP server package
+            # For local development, use node to run our custom server
             cmd = [
-                "npx",
-                "@mcp/kubernetes",
-                "serve",
-                "--port", str(port)
+                "node",
+                "mcp-kubernetes/server.js"
             ]
+            # Add port as an environment variable
+            env["PORT"] = str(port)
             
             process = subprocess.Popen(
                 cmd,
@@ -439,11 +439,14 @@ class MCPServerManager:
             
             # Get the host name based on environment
             if is_docker:
-                # Use localhost within the container
-                host = "localhost"
+                # Use the Docker Compose service name
+                host = "sherlog-canvas-mcp-kubernetes"
+                # The internal port is 8000, not our dynamic port
+                port = 8000
             else:
                 # Use localhost when running outside Docker
-                host = "localhost"
+                host = "localhost" 
+                # Use the dynamically assigned port
                 
             address = f"{host}:{port}"
             print(f"Started Kubernetes MCP server for {connection.name} at {address}")
