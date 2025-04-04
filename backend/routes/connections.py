@@ -56,7 +56,7 @@ async def list_connection_types(
         List of connection types
     """
     # Return supported connection types
-    return ["grafana", "postgres", "prometheus", "loki", "s3"]
+    return ["grafana", "postgres", "prometheus", "loki", "s3", "kubernetes"]
 
 
 @router.get("/{connection_id}")

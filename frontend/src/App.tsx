@@ -419,6 +419,10 @@ function App() {
                                   >
                                     <option value="postgres">PostgreSQL</option>
                                     <option value="grafana">Grafana</option>
+                                    <option value="kubernetes">Kubernetes</option>
+                                    <option value="prometheus">Prometheus</option>
+                                    <option value="loki">Loki</option>
+                                    <option value="s3">S3</option>
                                   </select>
                                 </div>
                                 
@@ -537,6 +541,92 @@ function App() {
                                   </div>
                                 )}
                                 
+                                {newConnectionType === 'kubernetes' && (
+                                  <div className="space-y-4 border p-3 rounded-md">
+                                    <div className="space-y-2">
+                                      <label htmlFor="kubeconfig_type" className="text-sm font-medium">
+                                        Kubeconfig Source
+                                      </label>
+                                      <select 
+                                        id="kubeconfig_type"
+                                        className="w-full p-2 border rounded-md"
+                                        value={newConnectionConfig.kubeconfig_type || 'file'}
+                                        onChange={(e) => setNewConnectionConfig({
+                                          ...newConnectionConfig, 
+                                          kubeconfig_type: e.target.value
+                                        })}
+                                      >
+                                        <option value="file">Use kubeconfig file path</option>
+                                        <option value="content">Paste kubeconfig content</option>
+                                      </select>
+                                    </div>
+                                    
+                                    {(newConnectionConfig.kubeconfig_type === 'file' || !newConnectionConfig.kubeconfig_type) && (
+                                      <div className="space-y-2">
+                                        <label htmlFor="kubeconfig" className="text-sm font-medium">
+                                          Kubeconfig File Path
+                                        </label>
+                                        <Input
+                                          id="kubeconfig"
+                                          value={newConnectionConfig.kubeconfig || ''}
+                                          onChange={(e) => setNewConnectionConfig({...newConnectionConfig, kubeconfig: e.target.value})}
+                                          placeholder="~/.kube/config"
+                                          required
+                                        />
+                                        <p className="text-xs text-muted-foreground">
+                                          Path to your kubeconfig file (e.g., ~/.kube/config)
+                                        </p>
+                                      </div>
+                                    )}
+                                    
+                                    {newConnectionConfig.kubeconfig_type === 'content' && (
+                                      <div className="space-y-2">
+                                        <label htmlFor="kubeconfig_content" className="text-sm font-medium">
+                                          Kubeconfig Content
+                                        </label>
+                                        <Textarea
+                                          id="kubeconfig_content"
+                                          value={newConnectionConfig.kubeconfig || ''}
+                                          onChange={(e) => setNewConnectionConfig({...newConnectionConfig, kubeconfig: e.target.value})}
+                                          placeholder="apiVersion: v1\nkind: Config\nclusters:\n..."
+                                          className="min-h-[150px]"
+                                          required
+                                        />
+                                        <p className="text-xs text-muted-foreground">
+                                          Paste the full content of your kubeconfig file
+                                        </p>
+                                      </div>
+                                    )}
+                                    
+                                    <div className="space-y-2">
+                                      <label htmlFor="context" className="text-sm font-medium">
+                                        Kubernetes Context (Optional)
+                                      </label>
+                                      <Input
+                                        id="context"
+                                        value={newConnectionConfig.context || ''}
+                                        onChange={(e) => setNewConnectionConfig({...newConnectionConfig, context: e.target.value})}
+                                        placeholder="my-cluster-context"
+                                      />
+                                      <p className="text-xs text-muted-foreground">
+                                        Specify which context to use from your kubeconfig
+                                      </p>
+                                    </div>
+                                    
+                                    <div className="space-y-2">
+                                      <label htmlFor="namespace" className="text-sm font-medium">
+                                        Default Namespace (Optional)
+                                      </label>
+                                      <Input
+                                        id="namespace"
+                                        value={newConnectionConfig.namespace || ''}
+                                        onChange={(e) => setNewConnectionConfig({...newConnectionConfig, namespace: e.target.value})}
+                                        placeholder="default"
+                                      />
+                                    </div>
+                                  </div>
+                                )}
+                                
                                 <DialogFooter>
                                   <Button type="submit" disabled={isCreatingConnection}>
                                     {isCreatingConnection ? 'Creating...' : 'Create Connection'}
@@ -589,7 +679,12 @@ function App() {
                                         <path fill="currentColor" d="M11.982 0A12 12 0 0 0 0 11.978a12 12 0 0 0 11.982 12.044 12 12 0 0 0 12.018-12.044A12 12 0 0 0 11.982 0z"/>
                                       </svg>
                                     )}
-                                    {!['postgres', 'grafana'].includes(connection.type) && (
+                                    {connection.type === 'kubernetes' && (
+                                      <svg viewBox="0 0 24 24" className="h-8 w-8 text-blue-500" xmlns="http://www.w3.org/2000/svg">
+                                        <path fill="currentColor" d="M10.204 14.35l.007.01-.999 2.413a5.171 5.171 0 0 1-2.075-2.597l2.578-.437.013.06a.525.525 0 0 0 .476.55zm-.198-1.153a.525.525 0 0 0-.578-.32l-2.825.48a5.203 5.203 0 0 1-.096-1.307l2.708-1.25a.528.528 0 0 0 .109.205c.38.475.568.974.479.815a.524.524 0 0 0 .204-.623zm.811-1.924a.524.524 0 0 0-.775.152l-1.648 2.647a5.2 5.2 0 0 1-.99-.847l1.907-2.27a.525.525 0 0 0 .072-.11.525.525 0 0 0 .20.152c.777.439.915.561 1.057.637a.397.397 0 0 1 .122.103c.018.026.044.076.055.119M12 8.1c.18 0 .355.026.523.047l.963-2.842a.525.525 0 0 0-.128-.504.526.526 0 0 0-.476-.153C11.386 4.93 9.64 5.46 9.64 5.46a5.18 5.18 0 0 1 2.36-1.36zM8.277 8.8a5.18 5.18 0 0 1 1.74-1.654l.658 2.946a.525.525 0 0 0-.076.172.525.525 0 0 0-.131-.213c-.164-.163-1.003-1.145-1.48-1.628a.526.526 0 0 0-.715.378zm5.484.929c.051-.21.093-.424.122-.642l3.01-.573a.525.525 0 0 0 .126-.035c.002.023.006.046.008.069a5.181 5.181 0 0 1-.616 3.06c-.964-1.922-1.845-1.195-2.65-1.879zm.106 5.101a5.2 5.2 0 0 1-1.609.926l-.387-3.013a.526.526 0 0 0 .483-.574.526.526 0 0 0 .245.508c.323.214 1.935.271 1.268 2.153zm.446-1.747a.525.525 0 0 0 .266-.447.526.526 0 0 0-.351-.487c-.544-.225-1.407-1.581-.697-2.615a5.185 5.185 0 0 1 1.526 2.446l-.744 1.103zm4.241-8.723c.053.273-.165.32-.232.773-.031.213-.285 2.363-.32 2.598a.525.525 0 0 0 .329.542.525.525 0 0 0-.585-.144c-.483.219-1.464 1.254-3.17-.33a5.17 5.17 0 0 1 3.978-3.439zM12 3.53a8.47 8.47 0 1 0 0 16.94 8.47 8.47 0 0 0 0-16.94zm7.045 9.67a7.28 7.28 0 0 1-.43 1.569.525.525 0 0 0-.519-.05.525.525 0 0 0-.27.43l-.336 3.307a7.384 7.384 0 0 1-11.077-1.305l1.123-2.702a.525.525 0 0 0 .273-.363.526.526 0 0 0-.607-.038 7.28 7.28 0 0 1-.932-1.316l2.86-.485a.525.525 0 0 0 .396-.318.526.526 0 0 0-.19-.615L7.18 9.391a7.367 7.367 0 0 1 .773-1.334l1.972 2.34a.526.526 0 0 0 .561.15.526.526 0 0 0 .353-.454l.44-2.958c.397-.154.81-.268 1.23-.346l.51 3.143a.525.525 0 0 0 .3.394.525.525 0 0 0 .501-.03l2.46-1.474c.2.373.367.766.495 1.17l-2.593 1.268a.526.526 0 0 0-.184.743c.507.778.507.778.614.943l.276.433 1.257-1.86a7.284 7.284 0 0 1 .276 1.63l-2.523.48a.526.526 0 0 0-.18.924l1.887 1.664a7.284 7.284 0 0 1-.638 1.498z"/>
+                                      </svg>
+                                    )}
+                                    {!['postgres', 'grafana', 'kubernetes'].includes(connection.type) && (
                                       <div className="h-8 w-8 text-gray-600">DB</div>
                                     )}
                                   </div>

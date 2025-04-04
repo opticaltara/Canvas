@@ -79,6 +79,8 @@ class MCPServerManager:
                 address = await self._start_grafana_mcp(connection)
             elif server_type == "postgres":
                 address = await self._start_postgres_mcp(connection)
+            elif server_type == "kubernetes":
+                address = await self._start_kubernetes_mcp(connection)
             else:
                 self.last_error[connection.id] = f"Unsupported MCP server type: {server_type}"
                 self.status[connection.id] = MCPServerStatus.FAILED
@@ -345,6 +347,121 @@ class MCPServerManager:
             print(f"Error starting Postgres MCP server: {e}")
             return None
 
+    async def _start_kubernetes_mcp(self, connection: ConnectionConfig) -> Optional[str]:
+        """
+        Start a Kubernetes MCP server
+        
+        Args:
+            connection: The Kubernetes connection configuration
+            
+        Returns:
+            The MCP server address if successful, None otherwise
+        """
+        # Get configuration
+        kubeconfig = connection.config.get("kubeconfig")
+        context = connection.config.get("context")
+        
+        if not kubeconfig:
+            self.last_error[connection.id] = "Missing required kubeconfig for Kubernetes MCP server"
+            print(f"Missing required kubeconfig for Kubernetes MCP server: {connection.name}")
+            return None
+        
+        # Choose a port
+        port = self._find_free_port(9301, 9400)
+        if not port:
+            self.last_error[connection.id] = f"Could not find a free port for Kubernetes MCP server"
+            print(f"Could not find a free port for Kubernetes MCP server: {connection.name}")
+            return None
+        
+        # Set environment variables
+        env = os.environ.copy()
+        
+        # Write the kubeconfig to a temporary file if it's provided as content
+        # Otherwise use the path directly
+        kubeconfig_path = None
+        if kubeconfig.startswith("{") or kubeconfig.startswith("apiVersion:"):
+            # This is a kubeconfig content rather than a path
+            import tempfile
+            kubeconfig_fd, kubeconfig_path = tempfile.mkstemp(suffix=".yaml")
+            with os.fdopen(kubeconfig_fd, 'w') as f:
+                f.write(kubeconfig)
+            env["KUBECONFIG"] = kubeconfig_path
+        else:
+            # This is a path to the kubeconfig file
+            env["KUBECONFIG"] = os.path.expanduser(kubeconfig)
+            
+        # Set context if provided
+        if context:
+            env["KUBE_CONTEXT"] = context
+            
+        # Start the MCP server using the kubernetes MCP package
+        try:
+            # Use npx to run the MCP server package
+            cmd = [
+                "npx",
+                "@mcp/kubernetes",
+                "serve",
+                "--port", str(port)
+            ]
+            
+            process = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            self.processes[connection.id] = process
+            
+            # Wait for server to start
+            await asyncio.sleep(2)
+            
+            # Check if process is still running
+            if process.poll() is not None:
+                stderr = ""
+                if process.stderr:
+                    stderr = process.stderr.read() or ""
+                self.last_error[connection.id] = f"Kubernetes MCP server failed to start: {stderr}"
+                print(f"Kubernetes MCP server failed to start: {stderr}")
+                
+                # Clean up the temp file if we created one
+                if kubeconfig_path and kubeconfig.startswith(("{", "apiVersion:")):
+                    try:
+                        os.unlink(kubeconfig_path)
+                    except:
+                        pass
+                        
+                return None
+            
+            # Check if we're running in Docker
+            is_docker = os.path.exists('/.dockerenv')
+            
+            # Get the host name based on environment
+            if is_docker:
+                # Use localhost within the container
+                host = "localhost"
+            else:
+                # Use localhost when running outside Docker
+                host = "localhost"
+                
+            address = f"{host}:{port}"
+            print(f"Started Kubernetes MCP server for {connection.name} at {address}")
+            return address
+        
+        except Exception as e:
+            self.last_error[connection.id] = f"Error starting Kubernetes MCP server: {str(e)}"
+            print(f"Error starting Kubernetes MCP server: {e}")
+            
+            # Clean up the temp file if we created one
+            if kubeconfig_path and kubeconfig.startswith(("{", "apiVersion:")):
+                try:
+                    os.unlink(kubeconfig_path)
+                except:
+                    pass
+                    
+            return None
+    
     def _find_free_port(self, start_port: int, end_port: int) -> Optional[int]:
         """Find a free port in the given range"""
         import socket

@@ -108,6 +108,31 @@ services:
         limits:
           cpus: '0.50'  # Limit CPU usage when in standby
           memory: 256M  # Limit memory usage when in standby
+          
+  mcp-kubernetes:
+    image: node:18-alpine
+    container_name: sherlog-canvas-mcp-kubernetes
+    ports:
+      - "9310:8000"
+    volumes:
+      - ${HOME}/.kube:/root/.kube:ro  # Mount kubeconfig from host (read-only)
+    working_dir: /app
+    command: sh -c "npm install -g @mcp/kubernetes && npx @mcp/kubernetes serve --port 8000"
+    environment:
+      - STANDBY_MODE=true  # Begin in standby mode (low resource usage)
+      - KUBECONFIG=/root/.kube/config
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'  # Limit CPU usage when in standby
+          memory: 256M  # Limit memory usage when in standby
 
 volumes:
   data:
