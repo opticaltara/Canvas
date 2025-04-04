@@ -4,6 +4,7 @@ import { Cell as CellComponent } from './Cell';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { Cell, CellType, Notebook } from '../types/notebook';
 import { cn } from '../utils/cn';
+import { BACKEND_URL, WS_URL } from '../config';
 
 export function NotebookView() {
   const { notebookId } = useParams<{ notebookId: string }>();
@@ -14,7 +15,7 @@ export function NotebookView() {
 
   // Create WebSocket connection for real-time updates
   const { isConnected, messages, sendMessage } = useWebSocket(
-    `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/notebook/${notebookId}`
+    `${WS_URL}/ws/notebook/${notebookId}`
   );
 
   // Fetch notebook data
@@ -22,7 +23,7 @@ export function NotebookView() {
     if (!notebookId) return;
 
     setLoading(true);
-    fetch(`/api/notebooks/${notebookId}`)
+    fetch(`${BACKEND_URL}/api/notebooks/${notebookId}`)
       .then((response) => {
         if (!response.ok) {
           throw new Error(`Error ${response.status}: ${response.statusText}`);
