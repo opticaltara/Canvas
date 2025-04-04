@@ -12,9 +12,6 @@ It uses Anthropic's Claude model for natural language understanding and code gen
 with tools that connect to various data sources like SQL, Prometheus, Loki, and S3.
 """
 
-import asyncio
-import json
-import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple, Union, Literal
 from uuid import UUID
@@ -33,7 +30,6 @@ from backend.ai.planning import InvestigationPlan, InvestigationStep, PlanAdapte
 from backend.services.connection_manager import ConnectionConfig
 
 # Get logger for AI operations
-# ai_logger = logfire.getLogger("ai")
 ai_logger = logging.getLogger("ai")
 
 # Get settings for API keys
