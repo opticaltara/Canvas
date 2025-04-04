@@ -134,18 +134,14 @@ async def startup_event():
     # Attach the broadcast function to the notebook manager
     notebook_manager.set_notify_callback(websocket_manager.broadcast)
     
-    # Initialize MCP server manager and start servers
+    # Initialize MCP server manager but don't start servers automatically
     from backend.mcp.manager import get_mcp_server_manager
     mcp_manager = get_mcp_server_manager()
     app.state.mcp_manager = mcp_manager
     
-    # Start MCP servers for all connections
-    connections = list(connection_manager.connections.values())
-    if connections:
-        print(f"Starting MCP servers for {len(connections)} connections...")
-        server_addresses = await mcp_manager.start_mcp_servers(connections)
-        app.state.mcp_server_addresses = server_addresses
-        print(f"Started {len(server_addresses)} MCP servers")
+    # We'll start MCP servers on demand when connections are used, not at startup
+    # This improves scalability as the number of connections increases
+    print("MCP servers will be started on demand when connections are used")
 
 
 @app.on_event("shutdown")

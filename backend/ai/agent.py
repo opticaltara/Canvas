@@ -12,20 +12,19 @@ It uses Anthropic's Claude model for natural language understanding and code gen
 with tools that connect to various data sources like SQL, Prometheus, Loki, and S3.
 """
 
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Union, cast
+from typing import Any, Dict, List, Optional, cast
 from typing_extensions import Literal
 from uuid import UUID
 
 # import logfire
 import logging
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent
 from pydantic_ai.mcp import MCPServerHTTP
 
 from backend.config import get_settings
 from backend.context.engine import get_context_engine
-from backend.core.cell import AIQueryCell, Cell, CellStatus, CellType, create_cell
+from backend.core.cell import AIQueryCell, CellType, create_cell
 from backend.core.execution import ExecutionContext
 from backend.core.notebook import Notebook
 from backend.ai.planning import InvestigationPlan, InvestigationStep, PlanAdapter
@@ -151,7 +150,7 @@ class AIAgent:
         self.investigation_planner = Agent(
             f"anthropic:{self.model}",
             deps_type=InvestigationDependencies,
-            result_type=InvestigationPlanModel,
+            result_type=Dict,  # Changed to Dict since we'll convert to InvestigationPlan
             mcp_servers=self.mcp_servers,
             system_prompt="""
             You are an expert at software engineering investigation. Your task is to create a detailed plan
@@ -175,6 +174,21 @@ class AIAgent:
 
             Think carefully about the logical sequence of investigation. What data do you need first?
             How will you analyze it? What conclusions can you draw?
+            
+            Return the plan as a dictionary with:
+            {
+                "query": "the original query",
+                "steps": [
+                    {
+                        "step_id": 1,
+                        "description": "step description",
+                        "cell_type": "sql|log|metric|python|markdown",
+                        "content": "actual query/code/content",
+                        "depends_on": [list of step_ids this depends on]
+                    }
+                ],
+                "thinking": "optional explanation of your thought process"
+            }
             """
         )
 
@@ -218,7 +232,7 @@ class AIAgent:
         self,
         query: str,
         available_data_sources: Optional[List[str]] = None
-    ) -> InvestigationPlanModel:
+    ) -> InvestigationPlan:
         """
         Generate an investigation plan for a query using Pydantic AI
 
@@ -256,17 +270,22 @@ class AIAgent:
                     user_prompt=dependencies.user_query,
                     deps=dependencies
                 )
-                return cast(InvestigationPlanModel, result.data)
+                
+                # Convert the dictionary result to an InvestigationPlan using PlanAdapter
+                plan_dict = cast(Dict, result.data)
+                plan_dict["query"] = query  # Ensure query is set
+                return PlanAdapter.from_dict(plan_dict)
                 
         except Exception as e:
             print(f"Error generating investigation plan: {e}")
             # Create a simple fallback plan
-            return InvestigationPlanModel(
+            return InvestigationPlan(
+                query=query,
                 steps=[
-                    InvestigationStepModel(
+                    InvestigationStep(
                         step_id=1,
                         description="Initial analysis",
-                        cell_type="markdown",
+                        cell_type=CellType.MARKDOWN,
                         content=f"# Investigation for: {query}\n\nLet's break down this problem and investigate.",
                         depends_on=[]
                     )
@@ -276,7 +295,7 @@ class AIAgent:
     async def create_cells_from_plan(
         self,
         notebook: Notebook,
-        plan: InvestigationPlanModel,
+        plan: InvestigationPlan,
         query_cell_id: Optional[UUID] = None
     ) -> Dict[int, UUID]:
         """
@@ -297,16 +316,9 @@ class AIAgent:
         for step in plan.steps:
             step_id = step.step_id
             description = step.description
-            cell_type_str = step.cell_type.upper()
+            cell_type = step.cell_type  # Already a CellType enum
             content = step.content
             depends_on = step.depends_on
-            
-            # Convert cell type string to enum
-            try:
-                cell_type = CellType[cell_type_str]
-            except KeyError:
-                # Default to markdown if type is unknown
-                cell_type = CellType.MARKDOWN
             
             # Create metadata with description and step info
             metadata = {
@@ -316,11 +328,8 @@ class AIAgent:
                 "query_cell_id": str(query_cell_id) if query_cell_id else None
             }
             
-            # Get connection_id from step metadata if available
-            connection_id = step.metadata.get("connection_id") if hasattr(step, "metadata") else None
-            
-            # Create the cell with connection_id if available
-            cell = create_cell(cell_type, content, connection_id=connection_id)
+            # Create the cell
+            cell = create_cell(cell_type, content)
             cell.metadata.update(metadata)
             
             # Add to notebook
@@ -409,7 +418,7 @@ async def execute_ai_query_cell(cell: AIQueryCell, context: ExecutionContext) ->
         )
         
         # Convert plan to dict for result
-        plan_dict = plan.model_dump()
+        plan_dict = PlanAdapter.to_dict(plan)
         
         # Return the result
         return {

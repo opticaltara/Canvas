@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from './components/ui/dropdown-menu';
 import { MoreVertical, Plus, Search } from 'lucide-react';
 import { BACKEND_URL } from './config';
+import { MCPServerStatus } from './components/MCPServerStatus';
 
 // Define connection types
 interface Connection {
@@ -576,16 +577,40 @@ function App() {
                             {/* Map over actual connections */}
                             {connections.map((connection) => (
                               <Card key={connection.id}>
-                                <CardHeader className="pb-2">
-                                  <CardTitle className="text-lg">{connection.name}</CardTitle>
-                                  <CardDescription>
-                                    {connection.type.charAt(0).toUpperCase() + connection.type.slice(1)} Connection
-                                  </CardDescription>
+                                <CardHeader className="pb-2 flex flex-row items-center space-x-4">
+                                  <div className={`bg-${connection.type === 'postgres' ? 'blue' : connection.type === 'grafana' ? 'orange' : 'gray'}-100 p-2 rounded-full h-12 w-12 flex items-center justify-center`}>
+                                    {connection.type === 'postgres' && (
+                                      <svg viewBox="0 0 24 24" className="h-8 w-8 text-blue-600" xmlns="http://www.w3.org/2000/svg">
+                                        <path fill="currentColor" d="M12 0C8.922 0 6.642.18 5.129.962c-1.512.783-2.3 1.946-2.3 3.297 0 .784.479 2.082 1.285 3.92 1.37 3.133 3.432 7.077 5.344 9.892 1.048 1.54 2.096 2.78 3.035 3.668.47.443.925.76 1.356.998.43.237.838.38 1.3.38.463 0 .872-.143 1.302-.381.431-.237.886-.555 1.355-.998.94-.887 1.988-2.127 3.036-3.667 1.912-2.815 3.974-6.76 5.343-9.893.807-1.837 1.286-3.135 1.286-3.92 0-1.35-.788-2.514-2.3-3.296C17.357.18 15.078 0 12 0z"/>
+                                      </svg>
+                                    )}
+                                    {connection.type === 'grafana' && (
+                                      <svg viewBox="0 0 24 24" className="h-8 w-8 text-orange-600" xmlns="http://www.w3.org/2000/svg">
+                                        <path fill="currentColor" d="M11.982 0A12 12 0 0 0 0 11.978a12 12 0 0 0 11.982 12.044 12 12 0 0 0 12.018-12.044A12 12 0 0 0 11.982 0z"/>
+                                      </svg>
+                                    )}
+                                    {!['postgres', 'grafana'].includes(connection.type) && (
+                                      <div className="h-8 w-8 text-gray-600">DB</div>
+                                    )}
+                                  </div>
+                                  <div>
+                                    <CardTitle className="text-lg">{connection.name}</CardTitle>
+                                    <CardDescription>
+                                      {connection.type.charAt(0).toUpperCase() + connection.type.slice(1)} Connection
+                                    </CardDescription>
+                                  </div>
                                 </CardHeader>
                                 <CardContent>
-                                  <p className="text-sm text-muted-foreground mb-4">
-                                    Status: <span className="text-green-600 font-medium">Connected</span>
-                                  </p>
+                                  <div className="text-sm mb-4">
+                                    <div className="flex items-center mb-2">
+                                      <p className="mr-2">Connection Status:</p>
+                                      <span className="text-green-600 font-medium">Available</span>
+                                    </div>
+                                    <div className="flex items-center">
+                                      <p className="mr-2">MCP Server:</p>
+                                      <MCPServerStatus connectionId={connection.id} showControls={true} />
+                                    </div>
+                                  </div>
                                   <div className="text-sm">
                                     {/* Display key config values except sensitive ones */}
                                     {Object.entries(connection.config)
@@ -598,11 +623,25 @@ function App() {
                                   </div>
                                 </CardContent>
                                 <CardFooter className="bg-muted/50 flex justify-between">
-                                  <Button variant="outline" size="sm">
+                                  <Button variant="outline" size="sm" onClick={() => {
+                                    setNewConnectionName(connection.name);
+                                    setNewConnectionType(connection.type);
+                                    setIsConnectionDialogOpen(true);
+                                  }}>
                                     Edit
                                   </Button>
-                                  <Button variant="secondary" size="sm">
-                                    Test Connection
+                                  <Button variant="secondary" size="sm" onClick={() => {
+                                    fetch(`${BACKEND_URL}/api/connections/${connection.id}/mcp/start`, {
+                                      method: 'POST',
+                                    }).then(response => {
+                                      if (response.ok) {
+                                        alert("MCP server started successfully");
+                                      } else {
+                                        alert("Failed to start MCP server");
+                                      }
+                                    });
+                                  }}>
+                                    Start MCP
                                   </Button>
                                 </CardFooter>
                               </Card>
@@ -623,9 +662,16 @@ function App() {
                                   </div>
                                 </CardHeader>
                                 <CardContent>
-                                  <p className="text-sm text-muted-foreground mb-4">
-                                    Status: <span className="text-green-600 font-medium">Connected</span>
-                                  </p>
+                                  <div className="text-sm mb-4">
+                                    <div className="flex items-center mb-2">
+                                      <p className="mr-2">Connection Status:</p>
+                                      <span className="text-green-600 font-medium">Available</span>
+                                    </div>
+                                    <div className="flex items-center">
+                                      <p className="mr-2">MCP Server:</p>
+                                      <MCPServerStatus connectionId="postgres-default" showControls={true} />
+                                    </div>
+                                  </div>
                                   <div className="text-sm">
                                     <p><span className="font-medium">Server:</span> pg-mcp:8000</p>
                                     <p><span className="font-medium">Host:</span> localhost</p>
@@ -664,9 +710,16 @@ function App() {
                                   </div>
                                 </CardHeader>
                                 <CardContent>
-                                  <p className="text-sm text-muted-foreground mb-4">
-                                    Status: <span className="text-green-600 font-medium">Connected</span>
-                                  </p>
+                                  <div className="text-sm mb-4">
+                                    <div className="flex items-center mb-2">
+                                      <p className="mr-2">Connection Status:</p>
+                                      <span className="text-green-600 font-medium">Available</span>
+                                    </div>
+                                    <div className="flex items-center">
+                                      <p className="mr-2">MCP Server:</p>
+                                      <MCPServerStatus connectionId="grafana-default" showControls={true} />
+                                    </div>
+                                  </div>
                                   <div className="text-sm">
                                     <p><span className="font-medium">Server:</span> mcp-grafana:8000</p>
                                     <p><span className="font-medium">Host:</span> localhost</p>

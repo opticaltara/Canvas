@@ -67,10 +67,22 @@ services:
     ports:
       - "9211:8000"
     environment:
-      - LOG_LEVEL=DEBUG
+      - LOG_LEVEL=INFO  # Reduced logging in standby mode
       - PYTHONUNBUFFERED=1
       - PG_CONNECTION_STRING=${PG_CONNECTION_STRING:-postgresql://user:pass@localhost/dbname}
+      - STANDBY_MODE=true  # Begin in standby mode (low resource usage)
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'  # Limit CPU usage when in standby
+          memory: 256M  # Limit memory usage when in standby
     
   mcp-grafana:
     # Using a custom build instead of the official image
@@ -83,7 +95,19 @@ services:
     environment:
       - GRAFANA_URL=${GRAFANA_URL:-http://localhost:3000}
       - GRAFANA_API_KEY=${GRAFANA_API_KEY:-}
+      - STANDBY_MODE=true  # Begin in standby mode (low resource usage)
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'  # Limit CPU usage when in standby
+          memory: 256M  # Limit memory usage when in standby
 
 volumes:
   data:

@@ -234,3 +234,178 @@ async def get_connection_schema(
         return schema
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/{connection_id}/mcp/status")
+async def get_mcp_server_status(
+    connection_id: str,
+    request: Request
+) -> Dict:
+    """
+    Get the status of the MCP server for a connection
+    
+    Args:
+        connection_id: The ID of the connection
+        
+    Returns:
+        Status information for the MCP server
+    """
+    try:
+        # Get the MCP server manager from the application state
+        mcp_manager = request.app.state.mcp_manager
+        
+        # Get the connection manager to verify the connection exists
+        connection_manager = request.app.state.connection_manager
+        connection = connection_manager.get_connection(connection_id)
+        
+        if not connection:
+            raise HTTPException(status_code=404, detail=f"Connection {connection_id} not found")
+        
+        # Get the status
+        status = mcp_manager.get_server_status(connection_id)
+        
+        return {
+            "connection_id": connection_id,
+            "connection_name": connection.name,
+            "connection_type": connection.type,
+            "status": status["status"],
+            "address": status["address"],
+            "error": status["error"]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{connection_id}/mcp/start")
+async def start_mcp_server(
+    connection_id: str,
+    request: Request
+) -> Dict:
+    """
+    Start the MCP server for a connection
+    
+    Args:
+        connection_id: The ID of the connection
+        
+    Returns:
+        Status information for the MCP server
+    """
+    try:
+        # Get the MCP server manager from the application state
+        mcp_manager = request.app.state.mcp_manager
+        
+        # Get the connection manager to get the connection
+        connection_manager = request.app.state.connection_manager
+        connection = connection_manager.get_connection(connection_id)
+        
+        if not connection:
+            raise HTTPException(status_code=404, detail=f"Connection {connection_id} not found")
+        
+        # Start the MCP server
+        address = await mcp_manager.start_mcp_server(connection)
+        
+        # Get the updated status
+        status = mcp_manager.get_server_status(connection_id)
+        
+        return {
+            "connection_id": connection_id,
+            "connection_name": connection.name,
+            "connection_type": connection.type,
+            "status": status["status"],
+            "address": status["address"],
+            "error": status["error"]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{connection_id}/mcp/stop")
+async def stop_mcp_server(
+    connection_id: str,
+    request: Request
+) -> Dict:
+    """
+    Stop the MCP server for a connection
+    
+    Args:
+        connection_id: The ID of the connection
+        
+    Returns:
+        Status information for the MCP server
+    """
+    try:
+        # Get the MCP server manager from the application state
+        mcp_manager = request.app.state.mcp_manager
+        
+        # Get the connection manager to verify the connection exists
+        connection_manager = request.app.state.connection_manager
+        connection = connection_manager.get_connection(connection_id)
+        
+        if not connection:
+            raise HTTPException(status_code=404, detail=f"Connection {connection_id} not found")
+        
+        # Stop the MCP server
+        success = await mcp_manager.stop_server(connection_id)
+        
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to stop MCP server")
+        
+        # Get the updated status
+        status = mcp_manager.get_server_status(connection_id)
+        
+        return {
+            "connection_id": connection_id,
+            "connection_name": connection.name,
+            "connection_type": connection.type,
+            "status": status["status"],
+            "error": status["error"]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/mcp/status")
+async def get_all_mcp_server_statuses(
+    request: Request
+) -> Dict:
+    """
+    Get the status of all MCP servers
+    
+    Returns:
+        Status information for all MCP servers
+    """
+    try:
+        # Get the MCP server manager from the application state
+        mcp_manager = request.app.state.mcp_manager
+        
+        # Get the connection manager
+        connection_manager = request.app.state.connection_manager
+        
+        # Get all server statuses
+        statuses = mcp_manager.get_all_server_statuses()
+        
+        # Enrich with connection information
+        enriched_statuses = {}
+        for connection_id, status in statuses.items():
+            connection = connection_manager.get_connection(connection_id)
+            if connection:
+                enriched_statuses[connection_id] = {
+                    "connection_id": connection_id,
+                    "connection_name": connection.name,
+                    "connection_type": connection.type,
+                    "status": status["status"],
+                    "address": status["address"],
+                    "error": status["error"]
+                }
+            else:
+                # This is a connection that no longer exists
+                enriched_statuses[connection_id] = {
+                    "connection_id": connection_id,
+                    "connection_name": "Unknown",
+                    "connection_type": "Unknown",
+                    "status": status["status"],
+                    "address": status["address"],
+                    "error": status["error"]
+                }
+        
+        return {"servers": enriched_statuses}

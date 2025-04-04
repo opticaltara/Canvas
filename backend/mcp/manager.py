@@ -14,14 +14,22 @@ from typing import Dict, List, Optional
 from backend.services.connection_manager import ConnectionConfig
 
 
+class MCPServerStatus:
+    """Status of an MCP server"""
+    STARTING = "starting"
+    RUNNING = "running"
+    STOPPED = "stopped"
+    FAILED = "failed"
+
 class MCPServerManager:
     """
     Manages MCP servers for different data sources
     """
     def __init__(self):
-        self.servers = {}
-        self.processes = {}
-        self.ready = {}
+        self.servers = {}  # Maps connection_id to server address
+        self.processes = {}  # Maps connection_id to process
+        self.status = {}  # Maps connection_id to server status
+        self.last_error = {}  # Maps connection_id to last error message
     
     async def start_mcp_servers(self, connections: List[ConnectionConfig]) -> Dict[str, str]:
         """
@@ -56,25 +64,42 @@ class MCPServerManager:
             The MCP server address if successful, None otherwise
         """
         # Check if server is already running for this connection
-        if connection.id in self.servers:
+        if connection.id in self.servers and self.status.get(connection.id) == MCPServerStatus.RUNNING:
             return self.servers[connection.id]
+        
+        # Set status to starting
+        self.status[connection.id] = MCPServerStatus.STARTING
+        self.last_error[connection.id] = None
         
         server_type = connection.type
         config = connection.config
         
-        if server_type == "grafana":
-            address = await self._start_grafana_mcp(connection)
-        elif server_type == "postgres":
-            address = await self._start_postgres_mcp(connection)
-        else:
-            print(f"Unsupported MCP server type: {server_type}")
+        try:
+            if server_type == "grafana":
+                address = await self._start_grafana_mcp(connection)
+            elif server_type == "postgres":
+                address = await self._start_postgres_mcp(connection)
+            else:
+                self.last_error[connection.id] = f"Unsupported MCP server type: {server_type}"
+                self.status[connection.id] = MCPServerStatus.FAILED
+                print(self.last_error[connection.id])
+                return None
+            
+            if address:
+                self.servers[connection.id] = address
+                self.status[connection.id] = MCPServerStatus.RUNNING
+                return address
+            else:
+                self.status[connection.id] = MCPServerStatus.FAILED
+                if connection.id not in self.last_error or not self.last_error[connection.id]:
+                    self.last_error[connection.id] = "Failed to start MCP server"
+            
             return None
-        
-        if address:
-            self.servers[connection.id] = address
-            return address
-        
-        return None
+        except Exception as e:
+            self.status[connection.id] = MCPServerStatus.FAILED
+            self.last_error[connection.id] = str(e)
+            print(f"Error starting MCP server for {connection.name}: {e}")
+            return None
     
     async def stop_all_servers(self) -> None:
         """Stop all running MCP servers"""
@@ -93,12 +118,93 @@ class MCPServerManager:
                 # If still running, force kill
                 if process.poll() is None:
                     process.kill()
+                
+                # Update status
+                self.status[connection_id] = MCPServerStatus.STOPPED
             except Exception as e:
+                self.last_error[connection_id] = str(e)
                 print(f"Error stopping MCP server for {connection_id}: {e}")
         
+        # Clear all server data
         self.processes = {}
         self.servers = {}
-        self.ready = {}
+        
+    async def stop_server(self, connection_id: str) -> bool:
+        """
+        Stop a specific MCP server
+        
+        Args:
+            connection_id: The ID of the connection to stop
+            
+        Returns:
+            True if stopped successfully, False otherwise
+        """
+        if connection_id not in self.processes:
+            self.status[connection_id] = MCPServerStatus.STOPPED
+            return True
+            
+        process = self.processes[connection_id]
+        
+        try:
+            if process is None:
+                # For Docker-based processes, we just update the status
+                self.status[connection_id] = MCPServerStatus.STOPPED
+                del self.processes[connection_id]
+                if connection_id in self.servers:
+                    del self.servers[connection_id]
+                return True
+            
+            # Send SIGTERM to the process
+            process.terminate()
+            
+            # Wait for the process to exit
+            await asyncio.sleep(2)
+            
+            # If still running, force kill
+            if process.poll() is None:
+                process.kill()
+            
+            # Update status
+            self.status[connection_id] = MCPServerStatus.STOPPED
+            
+            # Remove from active processes and servers
+            del self.processes[connection_id]
+            if connection_id in self.servers:
+                del self.servers[connection_id]
+                
+            return True
+        except Exception as e:
+            self.last_error[connection_id] = str(e)
+            print(f"Error stopping MCP server for {connection_id}: {e}")
+            return False
+            
+    def get_server_status(self, connection_id: str) -> Dict:
+        """
+        Get the status of an MCP server
+        
+        Args:
+            connection_id: The ID of the connection
+            
+        Returns:
+            Dictionary with status information
+        """
+        return {
+            "status": self.status.get(connection_id, MCPServerStatus.STOPPED),
+            "address": self.servers.get(connection_id),
+            "error": self.last_error.get(connection_id)
+        }
+        
+    def get_all_server_statuses(self) -> Dict[str, Dict]:
+        """
+        Get the status of all MCP servers
+        
+        Returns:
+            Dictionary mapping connection IDs to status information
+        """
+        statuses = {}
+        for connection_id in set(list(self.status.keys()) + list(self.servers.keys())):
+            statuses[connection_id] = self.get_server_status(connection_id)
+        return statuses
     
     async def _start_grafana_mcp(self, connection: ConnectionConfig) -> Optional[str]:
         """
