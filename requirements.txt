@@ -41,6 +41,7 @@ python-dotenv>=1.0.0
 ujson>=5.8.0
 orjson>=3.9.10
 python-multipart>=0.0.6
+aiofiles>=23.2.1
 
 # Logfire for logging and observability
 logfire>=3.12.0

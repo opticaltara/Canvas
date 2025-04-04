@@ -418,9 +418,6 @@ function App() {
                                   >
                                     <option value="postgres">PostgreSQL</option>
                                     <option value="grafana">Grafana</option>
-                                    <option value="prometheus">Prometheus</option>
-                                    <option value="loki">Loki</option>
-                                    <option value="s3">S3</option>
                                   </select>
                                 </div>
                                 

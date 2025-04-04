@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Type
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
+import aiofiles
 
 from backend.config import get_settings
 from backend.context.engine import get_context_engine
@@ -509,7 +510,7 @@ class ConnectionManager:
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         
         # Save to file (use async file operations)
-        async with open(file_path, "w") as f:
+        async with aiofiles.open(file_path, "w") as f:
             await f.write(json.dumps(data, indent=2))
     
     async def _load_connections_from_file(self) -> Dict:
@@ -521,7 +522,7 @@ class ConnectionManager:
         
         # Load from file (use async file operations)
         try:
-            async with open(file_path, "r") as f:
+            async with aiofiles.open(file_path, "r") as f:
                 content = await f.read()
                 return json.loads(content)
         except Exception as e:
