@@ -40,13 +40,10 @@ check_docker() {
     fi
 }
 
-# Function to check if git is installed (needed for cloning pg-mcp)
+# We now use git inside the Docker build process
 check_git() {
-    if ! command -v git >/dev/null 2>&1; then
-        echo "Error: git is not installed."
-        echo "Please install git, then try again."
-        exit 1
-    fi
+    # Git is no longer required locally as it's used inside the containers
+    echo "Git check skipped - now used inside containers where needed"
 }
 
 # Main execution
@@ -59,13 +56,8 @@ check_git
 # Create directories needed for volumes
 mkdir -p data
 
-# Get pg-mcp repository if it doesn't exist
-if [ ! -d "pg-mcp" ]; then
-    echo "Cloning PostgreSQL MCP server..."
-    git clone https://github.com/stuzero/pg-mcp.git
-else
-    echo "PostgreSQL MCP server repo already present."
-fi
+# pg-mcp is now included in the project directly
+echo "Using local PostgreSQL MCP implementation"
 
 # Print steps as they execute
 set -x

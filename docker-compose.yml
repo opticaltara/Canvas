@@ -24,7 +24,7 @@ services:
       - SHERLOG_ENV=${SHERLOG_ENV:-development}
       - PYTHONUNBUFFERED=1
     ports:
-      - "9090:8000"
+      - "9091:8000"
     depends_on:
       - qdrant
       - pg-mcp
