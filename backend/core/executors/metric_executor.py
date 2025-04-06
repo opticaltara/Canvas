@@ -46,14 +46,14 @@ async def execute_metric_cell(cell: Cell, context: ExecutionContext) -> MetricQu
     # Execute the query directly using the MCP clients
     connection_manager = get_connection_manager()
     
-    # Get the appropriate connection
-    connection = connection_manager.get_default_connection("prometheus")
+    # Get the Grafana connection
+    connection = connection_manager.get_default_connection("grafana")
     
     if not connection:
         return MetricQueryResult(
             data=[],
             query=cell.content,
-            error="No prometheus connection available",
+            error="No Grafana connection available",
             metadata={}
         )
     

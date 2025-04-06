@@ -363,10 +363,10 @@ class CellExecutor:
             connection_type = None
             if cell.type == CellType.SQL:
                 connection_type = "postgres"
-            elif cell.type == CellType.LOG:
-                connection_type = "loki"
-            elif cell.type == CellType.METRIC:
-                connection_type = "prometheus"
+            elif cell.type == CellType.LOG or cell.type == CellType.METRIC:
+                connection_type = "grafana"
+            elif cell.type == CellType.S3:
+                connection_type = "s3"
             
             if connection_type:
                 # Use the cell's connection_id if available

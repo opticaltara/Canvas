@@ -4,6 +4,7 @@ Notebook Manager Service
 
 import asyncio
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set, Union
@@ -11,6 +12,9 @@ from uuid import UUID, uuid4
 
 from backend.config import get_settings
 from backend.core.notebook import Notebook, NotebookMetadata
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 # Singleton instance
 _notebook_manager_instance = None
@@ -58,6 +62,8 @@ class NotebookManager:
             The created notebook
         """
         notebook_id = uuid4()
+        logger.info(f"Creating new notebook with ID {notebook_id} and name '{name}'")
+        
         notebook = Notebook(
             id=notebook_id,
             metadata=NotebookMetadata(
@@ -70,10 +76,12 @@ class NotebookManager:
         
         # Update metadata if provided
         if metadata:
+            logger.debug(f"Updating metadata for notebook {notebook_id}")
             notebook.update_metadata(metadata)
         
         self.notebooks[notebook_id] = notebook
         self.save_notebook(notebook_id)
+        logger.info(f"Successfully created and saved notebook {notebook_id}")
         
         return notebook
     
@@ -91,7 +99,9 @@ class NotebookManager:
             KeyError: If the notebook is not found
         """
         if notebook_id not in self.notebooks:
+            logger.error(f"Notebook {notebook_id} not found")
             raise KeyError(f"Notebook {notebook_id} not found")
+        logger.debug(f"Retrieved notebook {notebook_id}")
         return self.notebooks[notebook_id]
     
     def list_notebooks(self) -> List[Notebook]:
@@ -114,9 +124,11 @@ class NotebookManager:
             KeyError: If the notebook is not found
         """
         if notebook_id not in self.notebooks:
+            logger.error(f"Cannot save notebook {notebook_id}: not found")
             raise KeyError(f"Notebook {notebook_id} not found")
         
         notebook = self.notebooks[notebook_id]
+        logger.info(f"Saving notebook {notebook_id} to storage")
         
         # Update the updated_at timestamp
         notebook.metadata.updated_at = datetime.now(timezone.utc)
@@ -129,6 +141,7 @@ class NotebookManager:
         elif storage_type == "s3":
             asyncio.create_task(self._save_notebook_to_s3(notebook))
         else:
+            logger.warning(f"No persistent storage configured for notebook {notebook_id}")
             # Default to in-memory only (no persistence)
             pass
     
@@ -143,7 +156,10 @@ class NotebookManager:
             KeyError: If the notebook is not found
         """
         if notebook_id not in self.notebooks:
+            logger.error(f"Cannot delete notebook {notebook_id}: not found")
             raise KeyError(f"Notebook {notebook_id} not found")
+        
+        logger.info(f"Deleting notebook {notebook_id}")
         
         # Delete from storage based on storage type
         storage_type = self.settings.notebook_storage_type
@@ -155,16 +171,19 @@ class NotebookManager:
         
         # Remove from memory
         del self.notebooks[notebook_id]
+        logger.info(f"Successfully deleted notebook {notebook_id}")
     
     def _load_notebooks(self) -> None:
         """Load notebooks from storage"""
         storage_type = self.settings.notebook_storage_type
+        logger.info(f"Loading notebooks from storage type: {storage_type}")
         
         if storage_type == "file":
             self._load_notebooks_from_file()
         elif storage_type == "s3":
             asyncio.create_task(self._load_notebooks_from_s3())
         else:
+            logger.warning("No persistent storage configured, starting with empty notebook set")
             # In-memory only, nothing to load
             pass
     
@@ -179,16 +198,24 @@ class NotebookManager:
         os.makedirs(directory, exist_ok=True)
         
         file_path = os.path.join(directory, f"{notebook.id}.json")
+        logger.debug(f"Saving notebook {notebook.id} to file: {file_path}")
         
-        with open(file_path, "w") as f:
-            json.dump(notebook.serialize(), f, indent=2)
+        try:
+            with open(file_path, "w") as f:
+                json.dump(notebook.serialize(), f, indent=2)
+            logger.debug(f"Successfully saved notebook {notebook.id} to file")
+        except Exception as e:
+            logger.error(f"Error saving notebook {notebook.id} to file: {e}")
+            raise
     
     def _load_notebooks_from_file(self) -> None:
         """Load notebooks from files"""
         directory = self.settings.notebook_file_storage_dir
+        logger.info(f"Loading notebooks from directory: {directory}")
         
         if not os.path.exists(directory):
             os.makedirs(directory, exist_ok=True)
+            logger.info(f"Created notebook storage directory: {directory}")
             return
         
         for filename in os.listdir(directory):
@@ -196,12 +223,14 @@ class NotebookManager:
                 continue
             
             file_path = os.path.join(directory, filename)
+            logger.debug(f"Loading notebook from file: {file_path}")
             
             try:
                 with open(file_path, "r") as f:
                     data = json.load(f)
                 
                 notebook_id = UUID(data.get("id"))
+                logger.debug(f"Creating notebook instance for ID: {notebook_id}")
                 
                 # Create a notebook instance
                 notebook = Notebook(
@@ -234,9 +263,10 @@ class NotebookManager:
                 
                 # Add to notebooks dict
                 self.notebooks[notebook_id] = notebook
+                logger.debug(f"Successfully loaded notebook {notebook_id}")
             
             except Exception as e:
-                print(f"Error loading notebook from {file_path}: {e}")
+                logger.error(f"Error loading notebook from {file_path}: {e}")
     
     def _delete_notebook_from_file(self, notebook_id: UUID) -> None:
         """
@@ -247,9 +277,17 @@ class NotebookManager:
         """
         directory = self.settings.notebook_file_storage_dir
         file_path = os.path.join(directory, f"{notebook_id}.json")
+        logger.debug(f"Deleting notebook file: {file_path}")
         
         if os.path.exists(file_path):
-            os.remove(file_path)
+            try:
+                os.remove(file_path)
+                logger.debug(f"Successfully deleted notebook file for {notebook_id}")
+            except Exception as e:
+                logger.error(f"Error deleting notebook file {file_path}: {e}")
+                raise
+        else:
+            logger.warning(f"Notebook file not found for deletion: {file_path}")
     
     async def _save_notebook_to_s3(self, notebook: Notebook) -> None:
         """
@@ -263,6 +301,7 @@ class NotebookManager:
             
             bucket = self.settings.notebook_s3_bucket
             key = f"{self.settings.notebook_s3_prefix}/{notebook.id}.json"
+            logger.debug(f"Saving notebook {notebook.id} to S3: {bucket}/{key}")
             
             session = aioboto3.Session(
                 aws_access_key_id=self.settings.aws_access_key_id,
@@ -277,9 +316,11 @@ class NotebookManager:
                 Body=json.dumps(notebook.serialize(), indent=2),
                 ContentType="application/json"
             )
+            logger.debug(f"Successfully saved notebook {notebook.id} to S3")
         
         except Exception as e:
-            print(f"Error saving notebook to S3: {e}")
+            logger.error(f"Error saving notebook {notebook.id} to S3: {e}")
+            raise
     
     async def _load_notebooks_from_s3(self) -> None:
         """Load notebooks from S3"""
@@ -288,6 +329,7 @@ class NotebookManager:
             
             bucket = self.settings.notebook_s3_bucket
             prefix = self.settings.notebook_s3_prefix
+            logger.info(f"Loading notebooks from S3: {bucket}/{prefix}")
             
             session = aioboto3.Session(
                 aws_access_key_id=self.settings.aws_access_key_id,
@@ -309,6 +351,8 @@ class NotebookManager:
                 if not key.endswith(".json"):
                     continue
                 
+                logger.debug(f"Loading notebook from S3: {bucket}/{key}")
+                
                 # Get the notebook file
                 response = await s3.get_object(
                     Bucket=bucket,
@@ -320,6 +364,7 @@ class NotebookManager:
                 data = json.loads(data)
                 
                 notebook_id = UUID(data.get("id"))
+                logger.debug(f"Creating notebook instance for ID: {notebook_id}")
                 
                 # Create a notebook instance
                 notebook = Notebook(
@@ -352,9 +397,11 @@ class NotebookManager:
                 
                 # Add to notebooks dict
                 self.notebooks[notebook_id] = notebook
+                logger.debug(f"Successfully loaded notebook {notebook_id} from S3")
         
         except Exception as e:
-            print(f"Error loading notebooks from S3: {e}")
+            logger.error(f"Error loading notebooks from S3: {e}")
+            raise
     
     async def _delete_notebook_from_s3(self, notebook_id: UUID) -> None:
         """
@@ -368,6 +415,7 @@ class NotebookManager:
             
             bucket = self.settings.notebook_s3_bucket
             key = f"{self.settings.notebook_s3_prefix}/{notebook_id}.json"
+            logger.debug(f"Deleting notebook from S3: {bucket}/{key}")
             
             session = aioboto3.Session(
                 aws_access_key_id=self.settings.aws_access_key_id,
@@ -380,6 +428,8 @@ class NotebookManager:
                 Bucket=bucket,
                 Key=key
             )
+            logger.debug(f"Successfully deleted notebook {notebook_id} from S3")
         
         except Exception as e:
-            print(f"Error deleting notebook from S3: {e}")
+            logger.error(f"Error deleting notebook {notebook_id} from S3: {e}")
+            raise

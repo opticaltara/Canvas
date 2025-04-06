@@ -6,6 +6,7 @@ Manages connections to data sources via MCP servers
 
 import asyncio
 import json
+import logging
 import os
 from typing import Dict, List, Optional, Type
 from uuid import UUID, uuid4
@@ -16,6 +17,8 @@ import aiofiles
 from backend.config import get_settings
 from backend.context.engine import get_context_engine
 
+# Configure logging
+logger = logging.getLogger(__name__)
 
 class ConnectionConfig(BaseModel):
     """Configuration for a connection"""
@@ -50,18 +53,23 @@ class ConnectionManager:
     
     async def initialize(self) -> None:
         """Initialize and load connections"""
+        logger.info("Initializing ConnectionManager")
         # Load connections from storage
         await self._load_connections()
+        logger.info("ConnectionManager initialized successfully")
     
     async def close(self) -> None:
         """Close all connections and cleanup resources"""
+        logger.info("Closing ConnectionManager and cleaning up resources")
         # Stop any running MCP servers
         for server_id, server in self.active_mcp_servers.items():
             if hasattr(server, 'stop') and callable(server.stop):
+                logger.debug(f"Stopping MCP server {server_id}")
                 await server.stop()
         
         # Close the context engine
         await self.context_engine.close()
+        logger.info("ConnectionManager closed successfully")
     
     def get_connection(self, connection_id: str) -> Optional[ConnectionConfig]:
         """
@@ -143,6 +151,7 @@ class ConnectionManager:
         Raises:
             ValueError: If connection validation fails
         """
+        logger.info(f"Creating new {type} connection: {name}")
         # Create a unique ID for the connection
         connection_id = str(uuid4())
         
@@ -155,8 +164,10 @@ class ConnectionManager:
         )
         
         # Validate the connection
+        logger.debug(f"Validating connection {name} ({connection_id})")
         is_valid = await self.test_connection(type, config)
         if not is_valid:
+            logger.error(f"Connection validation failed for {name} ({connection_id})")
             raise ValueError(f"Connection validation failed for {name}")
         
         # Add to connections
@@ -164,6 +175,7 @@ class ConnectionManager:
         
         # If this is the first connection for this type, set it as default
         if not self.get_default_connection(type):
+            logger.info(f"Setting {name} ({connection_id}) as default {type} connection")
             self.default_connections[type] = connection_id
         
         # Save connections
@@ -172,6 +184,7 @@ class ConnectionManager:
         # Index the connection schema/metadata for RAG
         await self._index_connection_for_rag(connection_id)
         
+        logger.info(f"Successfully created connection {name} ({connection_id})")
         return connection
     
     async def update_connection(self, connection_id: str, name: str, config: Dict) -> ConnectionConfig:
@@ -189,8 +202,10 @@ class ConnectionManager:
         Raises:
             ValueError: If the connection is not found or validation fails
         """
+        logger.info(f"Updating connection {connection_id} with new name: {name}")
         connection = self.get_connection(connection_id)
         if not connection:
+            logger.error(f"Connection not found for update: {connection_id}")
             raise ValueError(f"Connection not found: {connection_id}")
         
         # Update the connection
@@ -202,8 +217,10 @@ class ConnectionManager:
         )
         
         # Validate the connection
+        logger.debug(f"Validating updated connection {name} ({connection_id})")
         is_valid = await self.test_connection(connection.type, config)
         if not is_valid:
+            logger.error(f"Connection validation failed for update {name} ({connection_id})")
             raise ValueError(f"Connection validation failed for {name}")
         
         # Update the connection
@@ -215,6 +232,7 @@ class ConnectionManager:
         # Re-index the connection schema/metadata for RAG
         await self._index_connection_for_rag(connection_id)
         
+        logger.info(f"Successfully updated connection {name} ({connection_id})")
         return updated_connection
     
     async def delete_connection(self, connection_id: str) -> None:
@@ -227,8 +245,10 @@ class ConnectionManager:
         Raises:
             ValueError: If the connection is not found
         """
+        logger.info(f"Deleting connection {connection_id}")
         connection = self.get_connection(connection_id)
         if not connection:
+            logger.error(f"Connection not found for deletion: {connection_id}")
             raise ValueError(f"Connection not found: {connection_id}")
         
         # Remove the connection
@@ -237,15 +257,20 @@ class ConnectionManager:
         # Update default connections if needed
         for conn_type, default_id in list(self.default_connections.items()):
             if default_id == connection_id:
+                logger.info(f"Removing {connection_id} as default connection for type {conn_type}")
                 # Find another connection for this type
                 connections = self.get_connections_by_type(conn_type)
                 if connections:
-                    self.default_connections[conn_type] = connections[0].id
+                    new_default = connections[0].id
+                    logger.info(f"Setting new default connection for type {conn_type}: {new_default}")
+                    self.default_connections[conn_type] = new_default
                 else:
+                    logger.info(f"No remaining connections for type {conn_type}, removing default")
                     del self.default_connections[conn_type]
         
         # Save connections
         await self._save_connections()
+        logger.info(f"Successfully deleted connection {connection_id}")
     
     async def set_default_connection(self, connection_id: str) -> None:
         """
@@ -278,42 +303,50 @@ class ConnectionManager:
         Returns:
             True if the connection is valid, False otherwise
         """
+        logger.debug(f"Testing {connection_type} connection")
         try:
             # Basic validation for each type
             if connection_type == "grafana":
                 if not config.get("url") or not config.get("api_key"):
+                    logger.warning("Grafana connection missing required fields: url or api_key")
                     return False
                 
-                # TODO: Actually test the connection to Grafana
-                # For now, just return True if the required fields are present
-                return True
+                # Test connection by contacting MCP server
+                from backend.mcp.manager import get_mcp_server_manager
+                
+                # Create a temporary connection config to test
+                test_conn = ConnectionConfig(
+                    id=str(uuid4()),
+                    name="Test Connection", 
+                    type="grafana",
+                    config=config
+                )
+                
+                # Start MCP server for test connection
+                mcp_manager = get_mcp_server_manager()
+                try:
+                    server_addresses = await mcp_manager.start_mcp_servers([test_conn])
+                    if test_conn.id in server_addresses:
+                        # Successfully started MCP server
+                        await mcp_manager.stop_server(test_conn.id)
+                        return True
+                    return False
+                except Exception as e:
+                    logger.error(f"Failed to test Grafana connection: {str(e)}")
+                    return False
             
             elif connection_type == "postgres":
                 if not config.get("connection_string"):
+                    logger.warning("Postgres connection missing required field: connection_string")
                     return False
                 
                 # TODO: Actually test the connection to Postgres
                 # For now, just return True if the required fields are present
                 return True
             
-            elif connection_type == "prometheus":
-                if not config.get("url"):
-                    return False
-                
-                # TODO: Actually test the connection to Prometheus
-                # For now, just return True if the required fields are present
-                return True
-            
-            elif connection_type == "loki":
-                if not config.get("url"):
-                    return False
-                
-                # TODO: Actually test the connection to Loki
-                # For now, just return True if the required fields are present
-                return True
-            
             elif connection_type == "s3":
                 if not config.get("endpoint") or not config.get("access_key") or not config.get("secret_key"):
+                    logger.warning("S3 connection missing required fields: endpoint, access_key, or secret_key")
                     return False
                 
                 # TODO: Actually test the connection to S3
@@ -321,11 +354,11 @@ class ConnectionManager:
                 return True
             
             else:
-                # Unknown connection type
+                logger.error(f"Unknown connection type: {connection_type}")
                 return False
         
         except Exception as e:
-            print(f"Error testing connection: {e}")
+            logger.error(f"Error testing connection: {str(e)}")
             return False
     
     async def get_connection_schema(self, connection_id: str) -> Dict:
@@ -443,6 +476,7 @@ class ConnectionManager:
     
     async def _save_connections(self) -> None:
         """Save connections to storage"""
+        logger.debug("Saving connections to storage")
         # Convert to serializable format
         connections_data = {
             conn_id: {
@@ -462,47 +496,65 @@ class ConnectionManager:
         # Check storage type
         storage_type = self.settings.connection_storage_type
         
-        if storage_type == "file":
-            # Save to local file
-            await self._save_connections_to_file(data)
-        elif storage_type == "env":
-            # Connections are loaded from environment, no need to save
-            pass
-        else:
-            # Default to in-memory only (no persistence)
-            pass
+        try:
+            if storage_type == "file":
+                # Save to local file
+                logger.debug("Saving connections to file storage")
+                await self._save_connections_to_file(data)
+            elif storage_type == "env":
+                # Connections are loaded from environment, no need to save
+                logger.debug("Connections are loaded from environment, skipping save")
+                pass
+            else:
+                # Default to in-memory only (no persistence)
+                logger.debug("Using in-memory storage only, no persistence")
+                pass
+            logger.info("Successfully saved connections")
+        except Exception as e:
+            logger.error(f"Error saving connections: {str(e)}")
+            raise
     
     async def _load_connections(self) -> None:
         """Load connections from storage"""
+        logger.debug("Loading connections from storage")
         # Check storage type
         storage_type = self.settings.connection_storage_type
         
-        if storage_type == "file":
-            # Load from local file
-            data = await self._load_connections_from_file()
-        elif storage_type == "env":
-            # Load from environment variables
-            data = self._load_connections_from_env()
-        else:
-            # Default to empty
-            data = {"connections": {}, "default_connections": {}}
-        
-        # Convert to ConnectionConfig objects
-        self.connections = {
-            conn_id: ConnectionConfig(
-                id=conn["id"],
-                name=conn["name"],
-                type=conn["type"],
-                config=conn["config"]
-            )
-            for conn_id, conn in data.get("connections", {}).items()
-        }
-        
-        self.default_connections = data.get("default_connections", {})
-        
-        # Index all connections for RAG
-        for connection_id in self.connections:
-            await self._index_connection_for_rag(connection_id)
+        try:
+            if storage_type == "file":
+                # Load from local file
+                logger.debug("Loading connections from file storage")
+                data = await self._load_connections_from_file()
+            elif storage_type == "env":
+                # Load from environment variables
+                logger.debug("Loading connections from environment variables")
+                data = self._load_connections_from_env()
+            else:
+                # Default to empty
+                logger.debug("No storage type specified, starting with empty connections")
+                data = {"connections": {}, "default_connections": {}}
+            
+            # Convert to ConnectionConfig objects
+            self.connections = {
+                conn_id: ConnectionConfig(
+                    id=conn["id"],
+                    name=conn["name"],
+                    type=conn["type"],
+                    config=conn["config"]
+                )
+                for conn_id, conn in data.get("connections", {}).items()
+            }
+            
+            self.default_connections = data.get("default_connections", {})
+            
+            # Index all connections for RAG
+            for connection_id in self.connections:
+                await self._index_connection_for_rag(connection_id)
+            
+            logger.info(f"Successfully loaded {len(self.connections)} connections")
+        except Exception as e:
+            logger.error(f"Error loading connections: {str(e)}")
+            raise
     
     async def _save_connections_to_file(self, data: Dict) -> None:
         """Save connections to a local file"""

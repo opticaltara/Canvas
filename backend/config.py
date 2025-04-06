@@ -20,12 +20,12 @@ class Settings(BaseSettings):
     auth_enabled: bool = False
     
     # AI settings
-    anthropic_api_key: str = Field("", env="ANTHROPIC_API_KEY")
+    anthropic_api_key: str = Field(default="", validation_alias="ANTHROPIC_API_KEY")
     anthropic_model: str = "claude-3-7-sonnet-20250219"
     
     # Logging settings
-    logfire_token: str = Field("", env="LOGFIRE_TOKEN")
-    environment: str = Field("development", env="SHERLOG_ENV")
+    logfire_token: str = Field(default="", validation_alias="LOGFIRE_TOKEN")
+    environment: str = Field(default="development", validation_alias="SHERLOG_ENV")
     
     # Storage settings
     notebook_storage_type: str = "file"  # Options: file, s3, none
@@ -38,9 +38,9 @@ class Settings(BaseSettings):
     connection_file_path: str = "./data/connections.json"
     
     # AWS settings (for S3 storage)
-    aws_access_key_id: str = Field("", env="AWS_ACCESS_KEY_ID")
-    aws_secret_access_key: str = Field("", env="AWS_SECRET_ACCESS_KEY")
-    aws_region: str = Field("us-east-1", env="AWS_REGION")
+    aws_access_key_id: str = Field(default="", validation_alias="AWS_ACCESS_KEY_ID")
+    aws_secret_access_key: str = Field(default="", validation_alias="AWS_SECRET_ACCESS_KEY")
+    aws_region: str = Field(default="us-east-1", validation_alias="AWS_REGION")
     
     # Cell execution settings
     python_cell_timeout: int = 30  # seconds
@@ -50,9 +50,9 @@ class Settings(BaseSettings):
     default_query_timeout: int = 30  # seconds
     
     # Qdrant settings (for vector database)
-    qdrant_url: str = Field("localhost", env="QDRANT_URL")
-    qdrant_port: int = Field(6333, env="QDRANT_PORT") 
-    qdrant_api_key: Optional[str] = Field(None, env="QDRANT_API_KEY")
+    qdrant_url: str = Field(default="localhost", validation_alias="QDRANT_URL")
+    qdrant_port: int = Field(default=6333, validation_alias="QDRANT_PORT") 
+    qdrant_api_key: Optional[str] = Field(default=None, validation_alias="QDRANT_API_KEY")
     
     class Config:
         env_prefix = "SHERLOG_"
