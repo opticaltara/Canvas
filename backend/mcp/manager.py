@@ -421,20 +421,46 @@ class MCPServerManager:
         Returns:
             The MCP server address if successful, None otherwise
         """
+        correlation_id = str(uuid4())
+        mcp_logger.info(
+            "Starting Grafana MCP server",
+            extra={
+                'correlation_id': correlation_id,
+                'connection_id': connection.id,
+                'connection_name': connection.name
+            }
+        )
+        
         # Get configuration
         grafana_url = connection.config.get("url")
         api_key = connection.config.get("api_key")
         
         if not grafana_url or not api_key:
-            self.last_error[connection.id] = "Missing required configuration for Grafana MCP server"
-            print(f"Missing required configuration for Grafana MCP server: {connection.name}")
+            error_msg = "Missing required configuration for Grafana MCP server"
+            self.last_error[connection.id] = error_msg
+            mcp_logger.error(
+                error_msg,
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection.id,
+                    'connection_name': connection.name
+                }
+            )
             return None
             
         # Choose a port for local development (when not using Docker)
         port = self._find_free_port(9101, 9200)
         if not port:
-            self.last_error[connection.id] = f"Could not find a free port for Grafana MCP server"
-            print(f"Could not find a free port for Grafana MCP server: {connection.name}")
+            error_msg = "Could not find a free port for Grafana MCP server"
+            self.last_error[connection.id] = error_msg
+            mcp_logger.error(
+                error_msg,
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection.id,
+                    'connection_name': connection.name
+                }
+            )
             return None
             
         # Set environment variables
@@ -458,15 +484,51 @@ class MCPServerManager:
                 host = "sherlog-canvas-mcp-grafana"
                 port = 8000
                 address = f"{host}:{port}"
+                mcp_logger.info(
+                    "Using Docker MCP server",
+                    extra={
+                        'correlation_id': correlation_id,
+                        'connection_id': connection.id,
+                        'host': host,
+                        'port': port
+                    }
+                )
             else:
                 # Use localhost when running outside Docker
                 address = f"localhost:{port}"
+                mcp_logger.info(
+                    "Using local MCP server",
+                    extra={
+                        'correlation_id': correlation_id,
+                        'connection_id': connection.id,
+                        'port': port
+                    }
+                )
                 
-            print(f"Started Grafana MCP server for {connection.name} at {address}")
+            mcp_logger.info(
+                "Started Grafana MCP server",
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection.id,
+                    'connection_name': connection.name,
+                    'address': address
+                }
+            )
             return address
         
         except Exception as e:
-            print(f"Error starting Grafana MCP server: {e}")
+            error_msg = f"Error starting Grafana MCP server: {e}"
+            self.last_error[connection.id] = error_msg
+            mcp_logger.error(
+                error_msg,
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection.id,
+                    'error': str(e),
+                    'error_type': type(e).__name__
+                },
+                exc_info=True
+            )
             return None
     
     async def _start_kubernetes_mcp(self, connection: ConnectionConfig) -> Optional[str]:
@@ -878,11 +940,25 @@ class MCPServerManager:
 
 # Singleton instance
 _mcp_server_manager_instance = None
+_manager_lock = asyncio.Lock()
 
+async def get_mcp_server_manager_async():
+    """Get the singleton MCPServerManager instance asynchronously with locking"""
+    global _mcp_server_manager_instance, _manager_lock
+    
+    async with _manager_lock:
+        if _mcp_server_manager_instance is None:
+            _mcp_server_manager_instance = MCPServerManager()
+            mcp_logger.info("Created new MCPServerManager instance")
+        return _mcp_server_manager_instance
 
 def get_mcp_server_manager():
     """Get the singleton MCPServerManager instance"""
     global _mcp_server_manager_instance
+    
     if _mcp_server_manager_instance is None:
+        # In a synchronous context, just create it directly
         _mcp_server_manager_instance = MCPServerManager()
+        mcp_logger.info("Created new MCPServerManager instance (sync)")
+    
     return _mcp_server_manager_instance

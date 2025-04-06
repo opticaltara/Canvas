@@ -294,8 +294,8 @@ async def startup_event():
         notebook_manager.set_notify_callback(websocket_manager.broadcast)
         
         # Initialize MCP server manager but don't start servers automatically
-        from backend.mcp.manager import get_mcp_server_manager
-        mcp_manager = get_mcp_server_manager()
+        from backend.mcp.manager import get_mcp_server_manager_async
+        mcp_manager = await get_mcp_server_manager_async()
         app.state.mcp_manager = mcp_manager
         app_logger.info(
             "MCP server manager initialized",

@@ -585,22 +585,108 @@ async def start_mcp_server(
     Returns:
         Status information for the MCP server
     """
+    correlation_id = str(uuid4())
+    connection_logger.info(
+        "Starting MCP server for connection",
+        extra={
+            'correlation_id': correlation_id,
+            'connection_id': connection_id
+        }
+    )
+    
     try:
+        # Ensure mcp_manager is available
+        if not hasattr(request.app.state, "mcp_manager"):
+            connection_logger.error(
+                "MCP manager not initialized",
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection_id
+                }
+            )
+            raise HTTPException(status_code=500, detail="MCP manager not initialized")
+        
         # Get the MCP server manager from the application state
         mcp_manager = request.app.state.mcp_manager
         
+        # Ensure connection_manager is available
+        if not hasattr(request.app.state, "connection_manager"):
+            connection_logger.error(
+                "Connection manager not initialized",
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection_id
+                }
+            )
+            raise HTTPException(status_code=500, detail="Connection manager not initialized")
+        
         # Get the connection manager to get the connection
         connection_manager = request.app.state.connection_manager
-        connection = connection_manager.get_connection(connection_id)
         
+        # Get the connection
+        connection = connection_manager.get_connection(connection_id)
         if not connection:
+            connection_logger.error(
+                "Connection not found",
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection_id
+                }
+            )
             raise HTTPException(status_code=404, detail=f"Connection {connection_id} not found")
         
+        connection_logger.info(
+            "Found connection, starting MCP server",
+            extra={
+                'correlation_id': correlation_id,
+                'connection_id': connection_id,
+                'connection_name': connection.name,
+                'connection_type': connection.type
+            }
+        )
+        
         # Start the MCP server
-        address = await mcp_manager.start_mcp_server(connection)
+        try:
+            address = await mcp_manager.start_mcp_server(connection)
+            if not address:
+                # Get the error from the status
+                status = mcp_manager.get_server_status(connection_id)
+                error_detail = status.get("error", "Failed to start MCP server")
+                connection_logger.error(
+                    "Failed to start MCP server",
+                    extra={
+                        'correlation_id': correlation_id,
+                        'connection_id': connection_id,
+                        'error': error_detail
+                    }
+                )
+                raise HTTPException(status_code=500, detail=error_detail)
+        except Exception as e:
+            connection_logger.error(
+                "Exception starting MCP server",
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection_id,
+                    'error': str(e),
+                    'error_type': type(e).__name__
+                },
+                exc_info=True
+            )
+            raise HTTPException(status_code=500, detail=f"Error starting MCP server: {str(e)}")
         
         # Get the updated status
         status = mcp_manager.get_server_status(connection_id)
+        
+        connection_logger.info(
+            "MCP server started successfully",
+            extra={
+                'correlation_id': correlation_id,
+                'connection_id': connection_id,
+                'connection_name': connection.name,
+                'address': status["address"],
+                'status': status["status"]
+            }
+        )
         
         return {
             "connection_id": connection_id,
@@ -610,8 +696,21 @@ async def start_mcp_server(
             "address": status["address"],
             "error": status["error"]
         }
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        connection_logger.error(
+            "Unexpected error starting MCP server",
+            extra={
+                'correlation_id': correlation_id,
+                'connection_id': connection_id,
+                'error': str(e),
+                'error_type': type(e).__name__
+            },
+            exc_info=True
+        )
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 
 @router.post("/{connection_id}/mcp/stop")
