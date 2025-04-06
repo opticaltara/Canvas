@@ -26,8 +26,23 @@ class CorrelationIdFilter(logging.Filter):
             record.correlation_id = 'N/A'
         return True
 
-# Add the filter to our logger
+# Add the filter to our logger if not already added by server.py
 mcp_logger.addFilter(CorrelationIdFilter())
+
+# Ensure at least a basic console handler is attached if none exists
+# This is a safeguard in case this module is imported before logging is configured
+if not mcp_logger.handlers:
+    # Check if logger has a parent with handlers
+    has_parent_handlers = mcp_logger.parent and hasattr(mcp_logger.parent, 'handlers') and mcp_logger.parent.handlers
+    
+    if not has_parent_handlers:
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - [%(correlation_id)s] - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        ))
+        mcp_logger.addHandler(console_handler)
+        mcp_logger.setLevel(logging.INFO)
 
 class MCPServerStatus:
     """Status of an MCP server"""

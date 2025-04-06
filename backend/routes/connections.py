@@ -25,6 +25,21 @@ class CorrelationIdFilter(logging.Filter):
 
 connection_logger.addFilter(CorrelationIdFilter())
 
+# Ensure at least a basic console handler is attached if none exists
+# This is a safeguard in case this module is imported before logging is configured
+if not connection_logger.handlers:
+    # Check if logger has a parent with handlers
+    has_parent_handlers = connection_logger.parent and hasattr(connection_logger.parent, 'handlers') and connection_logger.parent.handlers
+    
+    if not has_parent_handlers:
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - [%(correlation_id)s] - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        ))
+        connection_logger.addHandler(console_handler)
+        connection_logger.setLevel(logging.INFO)
+
 router = APIRouter()
 
 

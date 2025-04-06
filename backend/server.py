@@ -4,7 +4,7 @@ import os
 import logging
 import time
 from logging.handlers import RotatingFileHandler
-from typing import Dict, Set
+from typing import Dict, Set, Union, Optional
 from uuid import UUID, uuid4
 
 import uvicorn
@@ -29,10 +29,22 @@ class CorrelationIdFilter(logging.Filter):
             record.correlation_id = 'N/A'
         return True
 
+# Function to get log level from environment variable
+def get_log_level() -> int:
+    """Get log level from environment variable LOG_LEVEL, defaults to INFO"""
+    log_level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
+    return getattr(logging, log_level_name, logging.INFO)
+
 # Enhanced logging configuration
 def setup_logging():
     # Create logs directory if it doesn't exist
     os.makedirs('logs', exist_ok=True)
+    
+    # Determine if we're running in Docker
+    is_docker = os.path.exists('/.dockerenv')
+    
+    # Get log level from environment
+    log_level = get_log_level()
     
     # Define formatter and filter
     log_formatter = logging.Formatter(
@@ -48,29 +60,56 @@ def setup_logging():
         backupCount=5
     )
     file_handler.setFormatter(log_formatter)
-    file_handler.setLevel(logging.INFO) # Handler level
+    file_handler.setLevel(log_level)
+    
+    # Create console handler for Docker/development environment
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(log_formatter)
+    console_handler.setLevel(log_level)
 
-    # Loggers to configure
-    app_logger_names = ['app', 'request', 'websocket', 'execution', 'notebook', 'connection']
-    uvicorn_logger_names = ["uvicorn", "uvicorn.error", "uvicorn.access"]
-    all_logger_names = app_logger_names + uvicorn_logger_names
+    # Loggers to configure - make sure to include more loggers
+    app_logger_names = ['app', 'request', 'websocket', 'execution', 'notebook', 'connection', 'mcp', 'routes.connections']
+    # Include all uvicorn loggers 
+    uvicorn_logger_names = ["uvicorn", "uvicorn.error", "uvicorn.access", "uvicorn.asgi"]
+    # Include fastapi loggers
+    fastapi_logger_names = ["fastapi"]
+    # Include other third-party libraries that might log
+    third_party_logger_names = ["asyncio"]
+    
+    all_logger_names = app_logger_names + uvicorn_logger_names + fastapi_logger_names + third_party_logger_names
+    
+    # Also configure the root logger to catch any unconfigured loggers
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+    root_logger.addFilter(correlation_filter)
+    root_logger.setLevel(log_level)
 
     app_loggers = {}
 
     # Configure all loggers
     for name in all_logger_names:
         logger = logging.getLogger(name)
-        # Remove existing handlers to prevent duplicate logs from Uvicorn's defaults
+        # Remove existing handlers to prevent duplicate logs
         logger.handlers.clear()
+        # Add both handlers for all environments
         logger.addHandler(file_handler)
+        logger.addHandler(console_handler)
         logger.addFilter(correlation_filter)
-        logger.setLevel(logging.INFO) # Logger level
-        logger.propagate = False # Prevent forwarding to root logger
-
+        logger.setLevel(log_level)
+        # Enable propagation only for third-party loggers
         if name in app_logger_names:
+            logger.propagate = False
             app_loggers[name] = logger
 
-    return app_loggers # Return only app loggers as used by the rest of the script
+    if is_docker:
+        # In Docker, log this important environment information
+        root_logger.info(f"Running in Docker environment, logs will be sent to console and file. Log level: {logging.getLevelName(log_level)}")
+    else:
+        root_logger.info(f"Running in local environment, logs will be sent to console and {os.path.abspath('logs/sherlog_canvas.log')}. Log level: {logging.getLevelName(log_level)}")
+
+    return app_loggers
 
 # Initialize loggers
 loggers = setup_logging()
@@ -621,4 +660,20 @@ async def websocket_endpoint(websocket: WebSocket, notebook_id: UUID):
 
 
 if __name__ == "__main__":
-    uvicorn.run("backend.server:app", host="0.0.0.0", port=8000, reload=True)
+    # Get configuration from environment variables
+    host = os.environ.get("SHERLOG_API_HOST", "0.0.0.0")
+    port = int(os.environ.get("SHERLOG_API_PORT", "8000"))
+    reload_mode = os.environ.get("SHERLOG_DEBUG", "false").lower() == "true"
+    log_level_name = os.environ.get("LOG_LEVEL", "info").lower()
+    
+    # Configure Uvicorn with log settings to ensure it uses our configuration
+    uvicorn.run(
+        "backend.server:app", 
+        host=host,
+        port=port,
+        reload=reload_mode,
+        log_config=None,  # Disable Uvicorn's default logging config
+        log_level=log_level_name,
+        access_log=True,  # Enable access logs
+        use_colors=True,  # Colorized output on terminals
+    )
