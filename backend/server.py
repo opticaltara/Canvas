@@ -13,61 +13,12 @@ from fastapi.middleware.cors import CORSMiddleware
 # import logfire
 
 from backend.config import get_settings
-from backend.core.cell import Cell, CellType
+from backend.core.cell import CellType
 from backend.core.execution import CellExecutor, ExecutionQueue
-from backend.core.notebook import Notebook
 from backend.routes.connections import router as connections_router
 from backend.routes.notebooks import router as notebooks_router
 from backend.services.connection_manager import ConnectionManager
 from backend.services.notebook_manager import NotebookManager
-
-# Enhanced logging configuration
-def setup_logging():
-    # Create logs directory if it doesn't exist
-    os.makedirs('logs', exist_ok=True)
-    
-    # Configure root logger
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    
-    # Add file handler for detailed logging
-    file_handler = RotatingFileHandler(
-        'logs/sherlog_canvas.log',
-        maxBytes=10*1024*1024,  # 10MB
-        backupCount=5
-    )
-    file_handler.setFormatter(
-        logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    )
-    
-    # Create loggers for different components
-    loggers = {
-        'app': logging.getLogger('app'),
-        'request': logging.getLogger('request'),
-        'websocket': logging.getLogger('websocket'),
-        'execution': logging.getLogger('execution'),
-        'notebook': logging.getLogger('notebook'),
-        'connection': logging.getLogger('connection')
-    }
-    
-    # Configure all loggers
-    for logger in loggers.values():
-        logger.addHandler(file_handler)
-        logger.setLevel(logging.INFO)
-    
-    return loggers
-
-# Initialize loggers
-loggers = setup_logging()
-app_logger = loggers['app']
-request_logger = loggers['request']
-websocket_logger = loggers['websocket']
-execution_logger = loggers['execution']
-notebook_logger = loggers['notebook']
-connection_logger = loggers['connection']
 
 # Add correlation ID to log records
 class CorrelationIdFilter(logging.Filter):
@@ -78,6 +29,59 @@ class CorrelationIdFilter(logging.Filter):
             record.correlation_id = 'N/A'
         return True
 
+# Enhanced logging configuration
+def setup_logging():
+    # Create logs directory if it doesn't exist
+    os.makedirs('logs', exist_ok=True)
+    
+    # Define formatter and filter
+    log_formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - [%(correlation_id)s] - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    correlation_filter = CorrelationIdFilter()
+
+    # Create shared file handler
+    file_handler = RotatingFileHandler(
+        'logs/sherlog_canvas.log',
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5
+    )
+    file_handler.setFormatter(log_formatter)
+    file_handler.setLevel(logging.INFO) # Handler level
+
+    # Loggers to configure
+    app_logger_names = ['app', 'request', 'websocket', 'execution', 'notebook', 'connection']
+    uvicorn_logger_names = ["uvicorn", "uvicorn.error", "uvicorn.access"]
+    all_logger_names = app_logger_names + uvicorn_logger_names
+
+    app_loggers = {}
+
+    # Configure all loggers
+    for name in all_logger_names:
+        logger = logging.getLogger(name)
+        # Remove existing handlers to prevent duplicate logs from Uvicorn's defaults
+        logger.handlers.clear()
+        logger.addHandler(file_handler)
+        logger.addFilter(correlation_filter)
+        logger.setLevel(logging.INFO) # Logger level
+        logger.propagate = False # Prevent forwarding to root logger
+
+        if name in app_logger_names:
+            app_loggers[name] = logger
+
+    return app_loggers # Return only app loggers as used by the rest of the script
+
+# Initialize loggers
+loggers = setup_logging()
+app_logger = loggers['app']
+request_logger = loggers['request']
+websocket_logger = loggers['websocket']
+execution_logger = loggers['execution']
+notebook_logger = loggers['notebook']
+connection_logger = loggers['connection']
+
+# Apply filter - MOVED INSIDE setup_logging
 for logger in loggers.values():
     logger.addFilter(CorrelationIdFilter())
 

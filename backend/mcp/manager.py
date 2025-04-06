@@ -117,10 +117,30 @@ class MCPServerManager:
         self.status[connection.id] = MCPServerStatus.STARTING
         self.last_error[connection.id] = None
 
+        correlation_id = str(uuid4())
+        mcp_logger.info(
+            f"Starting MCP server for connection",
+            extra={
+                'correlation_id': correlation_id,
+                'connection_id': connection.id,
+                'connection_name': connection.name,
+                'connection_type': connection.type
+            }
+        )
+
         try:
             # Start the appropriate server based on connection type
             server_type = connection.type.lower()
             address = None
+
+            mcp_logger.info(
+                f"Using MCP server type",
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection.id,
+                    'server_type': server_type
+                }
+            )
 
             if server_type == "grafana":
                 address = await self._start_grafana_mcp(connection)
@@ -128,20 +148,58 @@ class MCPServerManager:
                 address = await self._start_kubernetes_mcp(connection)
             elif server_type == "python":
                 address = await self._start_python_mcp(connection)
+            else:
+                error_msg = f"Unsupported MCP server type: {server_type}"
+                mcp_logger.error(
+                    error_msg,
+                    extra={
+                        'correlation_id': correlation_id,
+                        'connection_id': connection.id
+                    }
+                )
+                self.last_error[connection.id] = error_msg
 
             if address:
                 self.servers[connection.id] = address
                 self.status[connection.id] = MCPServerStatus.RUNNING
+                mcp_logger.info(
+                    "MCP server started successfully",
+                    extra={
+                        'correlation_id': correlation_id,
+                        'connection_id': connection.id,
+                        'server_address': address
+                    }
+                )
                 return address
             else:
                 self.status[connection.id] = MCPServerStatus.FAILED
                 if not self.last_error.get(connection.id):
                     self.last_error[connection.id] = f"Failed to start {server_type} MCP server"
+                
+                mcp_logger.error(
+                    "Failed to start MCP server",
+                    extra={
+                        'correlation_id': correlation_id,
+                        'connection_id': connection.id,
+                        'error': self.last_error.get(connection.id)
+                    }
+                )
                 return None
 
         except Exception as e:
             self.status[connection.id] = MCPServerStatus.FAILED
             self.last_error[connection.id] = str(e)
+            
+            mcp_logger.error(
+                "Exception starting MCP server",
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection.id,
+                    'error': str(e),
+                    'error_type': type(e).__name__
+                },
+                exc_info=True
+            )
             return None
     
     async def stop_all_servers(self) -> None:
@@ -421,21 +479,56 @@ class MCPServerManager:
         Returns:
             The MCP server address if successful, None otherwise
         """
+        correlation_id = str(uuid4())
+        mcp_logger.info(
+            "Starting Kubernetes MCP server",
+            extra={
+                'correlation_id': correlation_id,
+                'connection_id': connection.id,
+                'connection_name': connection.name
+            }
+        )
+        
         # Get configuration
         kubeconfig = connection.config.get("kubeconfig")
         context = connection.config.get("context")
         
         if not kubeconfig:
-            self.last_error[connection.id] = "Missing required kubeconfig for Kubernetes MCP server"
-            print(f"Missing required kubeconfig for Kubernetes MCP server: {connection.name}")
+            error_msg = "Missing required kubeconfig for Kubernetes MCP server"
+            self.last_error[connection.id] = error_msg
+            mcp_logger.error(
+                error_msg,
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection.id,
+                    'connection_name': connection.name
+                }
+            )
             return None
         
         # Choose a port
         port = self._find_free_port(9301, 9400)
         if not port:
-            self.last_error[connection.id] = f"Could not find a free port for Kubernetes MCP server"
-            print(f"Could not find a free port for Kubernetes MCP server: {connection.name}")
+            error_msg = "Could not find a free port for Kubernetes MCP server"
+            self.last_error[connection.id] = error_msg
+            mcp_logger.error(
+                error_msg,
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection.id,
+                    'connection_name': connection.name
+                }
+            )
             return None
+        
+        mcp_logger.info(
+            "Using port for Kubernetes MCP server",
+            extra={
+                'correlation_id': correlation_id,
+                'connection_id': connection.id,
+                'port': port
+            }
+        )
         
         # Set environment variables
         env = os.environ.copy()
@@ -450,13 +543,37 @@ class MCPServerManager:
             with os.fdopen(kubeconfig_fd, 'w') as f:
                 f.write(kubeconfig)
             env["KUBECONFIG"] = kubeconfig_path
+            mcp_logger.info(
+                "Created temporary kubeconfig file",
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection.id,
+                    'kubeconfig_path': kubeconfig_path
+                }
+            )
         else:
             # This is a path to the kubeconfig file
             env["KUBECONFIG"] = os.path.expanduser(kubeconfig)
+            mcp_logger.info(
+                "Using existing kubeconfig file",
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection.id,
+                    'kubeconfig_path': env["KUBECONFIG"]
+                }
+            )
             
         # Set context if provided
         if context:
             env["KUBE_CONTEXT"] = context
+            mcp_logger.info(
+                "Using Kubernetes context",
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection.id,
+                    'context': context
+                }
+            )
             
         # Start the MCP server using the kubernetes MCP package
         try:
@@ -468,33 +585,115 @@ class MCPServerManager:
             # Add port as an environment variable
             env["PORT"] = str(port)
             
+            mcp_logger.info(
+                "Starting Kubernetes MCP process",
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection.id,
+                    'command': ' '.join(cmd),
+                    'port': port
+                }
+            )
+            
+            # Create a process with pipes for stdout and stderr
             process = subprocess.Popen(
                 cmd,
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                bufsize=1  # Line buffered
             )
             
+            # Store the process
             self.processes[connection.id] = process
             
+            # Create async tasks to read stdout and stderr in real-time
+            async def read_stream(stream, is_error=False):
+                while True:
+                    line = stream.readline()
+                    if not line:
+                        break
+                    
+                    line = line.strip()
+                    if line:
+                        if is_error:
+                            mcp_logger.error(
+                                f"Kubernetes MCP stderr: {line}",
+                                extra={
+                                    'correlation_id': correlation_id,
+                                    'connection_id': connection.id,
+                                    'stream': 'stderr'
+                                }
+                            )
+                        else:
+                            mcp_logger.info(
+                                f"Kubernetes MCP stdout: {line}",
+                                extra={
+                                    'correlation_id': correlation_id,
+                                    'connection_id': connection.id,
+                                    'stream': 'stdout'
+                                }
+                            )
+            
+            # Start background tasks to read the output streams
+            asyncio.create_task(read_stream(process.stdout))
+            asyncio.create_task(read_stream(process.stderr, is_error=True))
+            
             # Wait for server to start
+            mcp_logger.info(
+                "Waiting for Kubernetes MCP server to start",
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection.id,
+                    'wait_time_sec': 2
+                }
+            )
             await asyncio.sleep(2)
             
             # Check if process is still running
             if process.poll() is not None:
-                stderr = ""
+                exit_code = process.poll()
+                stderr_output = ""
+                
+                # Try to capture any remaining stderr output
                 if process.stderr:
-                    stderr = process.stderr.read() or ""
-                self.last_error[connection.id] = f"Kubernetes MCP server failed to start: {stderr}"
-                print(f"Kubernetes MCP server failed to start: {stderr}")
+                    stderr_output = process.stderr.read() or ""
+                
+                error_msg = f"Kubernetes MCP server failed to start (exit code: {exit_code}): {stderr_output}"
+                self.last_error[connection.id] = error_msg
+                
+                mcp_logger.error(
+                    "Kubernetes MCP server process exited prematurely",
+                    extra={
+                        'correlation_id': correlation_id,
+                        'connection_id': connection.id,
+                        'exit_code': exit_code,
+                        'stderr': stderr_output
+                    }
+                )
                 
                 # Clean up the temp file if we created one
                 if kubeconfig_path and kubeconfig.startswith(("{", "apiVersion:")):
                     try:
                         os.unlink(kubeconfig_path)
-                    except:
-                        pass
+                        mcp_logger.info(
+                            "Cleaned up temporary kubeconfig file",
+                            extra={
+                                'correlation_id': correlation_id,
+                                'connection_id': connection.id,
+                                'kubeconfig_path': kubeconfig_path
+                            }
+                        )
+                    except Exception as cleanup_error:
+                        mcp_logger.error(
+                            "Error cleaning up temporary kubeconfig file",
+                            extra={
+                                'correlation_id': correlation_id,
+                                'connection_id': connection.id,
+                                'error': str(cleanup_error)
+                            }
+                        )
                         
                 return None
             
@@ -507,25 +706,77 @@ class MCPServerManager:
                 host = "sherlog-canvas-mcp-kubernetes"
                 # The internal port is 8000, not our dynamic port
                 port = 8000
+                mcp_logger.info(
+                    "Running in Docker, using container hostname",
+                    extra={
+                        'correlation_id': correlation_id,
+                        'connection_id': connection.id,
+                        'host': host,
+                        'port': port
+                    }
+                )
             else:
                 # Use localhost when running outside Docker
                 host = "localhost" 
                 # Use the dynamically assigned port
-                
+                mcp_logger.info(
+                    "Running locally, using localhost",
+                    extra={
+                        'correlation_id': correlation_id,
+                        'connection_id': connection.id,
+                        'host': host,
+                        'port': port
+                    }
+                )
+            
             address = f"{host}:{port}"
-            print(f"Started Kubernetes MCP server for {connection.name} at {address}")
+            mcp_logger.info(
+                "Kubernetes MCP server started successfully",
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection.id,
+                    'connection_name': connection.name,
+                    'address': address
+                }
+            )
             return address
         
         except Exception as e:
-            self.last_error[connection.id] = f"Error starting Kubernetes MCP server: {str(e)}"
-            print(f"Error starting Kubernetes MCP server: {e}")
+            error_msg = f"Error starting Kubernetes MCP server: {str(e)}"
+            self.last_error[connection.id] = error_msg
+            
+            mcp_logger.error(
+                "Exception starting Kubernetes MCP server",
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection.id,
+                    'error': str(e),
+                    'error_type': type(e).__name__
+                },
+                exc_info=True
+            )
             
             # Clean up the temp file if we created one
             if kubeconfig_path and kubeconfig.startswith(("{", "apiVersion:")):
                 try:
                     os.unlink(kubeconfig_path)
-                except:
-                    pass
+                    mcp_logger.info(
+                        "Cleaned up temporary kubeconfig file",
+                        extra={
+                            'correlation_id': correlation_id,
+                            'connection_id': connection.id,
+                            'kubeconfig_path': kubeconfig_path
+                        }
+                    )
+                except Exception as cleanup_error:
+                    mcp_logger.error(
+                        "Error cleaning up temporary kubeconfig file",
+                        extra={
+                            'correlation_id': correlation_id,
+                            'connection_id': connection.id,
+                            'error': str(cleanup_error)
+                        }
+                    )
                     
             return None
             
