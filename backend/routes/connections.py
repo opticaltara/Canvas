@@ -18,10 +18,25 @@ connection_logger = logging.getLogger("routes.connections")
 router = APIRouter()
 
 
+class ConnectionConfig(BaseModel):
+    """Configuration for a connection"""
+    id: str
+    name: str
+    type: str  # "grafana", "sql", "prometheus", "loki", "s3", "kubernetes", etc.
+    config: Dict[str, str]  # Configuration details (API keys, URLs, etc.)
+
+
+class ConnectionRequest(BaseModel):
+    """Request to create a new connection"""
+    name: str
+    type: str  # "grafana", "sql", "prometheus", "loki", "s3", "kubernetes", etc.
+    config: Dict[str, str]
+
+
 class ConnectionCreate(BaseModel):
     """Parameters for creating a connection"""
     name: str
-    type: str  # "grafana", "postgres", "prometheus", "loki", "s3", etc.
+    type: str  # "grafana", "sql", "prometheus", "loki", "s3", "kubernetes", etc.
     config: Dict
 
 
@@ -33,7 +48,7 @@ class ConnectionUpdate(BaseModel):
 
 class ConnectionTest(BaseModel):
     """Parameters for testing a connection"""
-    type: str  # "grafana", "postgres", "prometheus", "loki", "s3", etc.
+    type: str  # "grafana", "sql", "prometheus", "loki", "s3", "kubernetes", etc.
     config: Dict
 
 
@@ -87,7 +102,7 @@ async def list_connection_types(
     try:
         # Return supported connection types
         # Data connection types
-        data_connections = ["grafana", "postgres", "s3", "kubernetes"]
+        data_connections = ["grafana", "sql", "s3", "kubernetes"]
         # Utility connection types
         utility_connections = ["python"]
         

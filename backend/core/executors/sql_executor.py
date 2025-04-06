@@ -39,7 +39,7 @@ async def execute_sql_cell(cell: Cell, context: ExecutionContext) -> SQLQueryRes
         connection = connection_manager.get_connection(connection_id)
     else:
         # Get default SQL connection
-        connection = connection_manager.get_default_connection("postgres")
+        connection = connection_manager.get_default_connection("sql")
     
     if not connection:
         return SQLQueryResult(

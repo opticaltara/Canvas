@@ -49,11 +49,6 @@ class Settings(BaseSettings):
     # Query execution settings
     default_query_timeout: int = 30  # seconds
     
-    # Qdrant settings (for vector database)
-    qdrant_url: str = Field(default="localhost", validation_alias="QDRANT_URL")
-    qdrant_port: int = Field(default=6333, validation_alias="QDRANT_PORT") 
-    qdrant_api_key: Optional[str] = Field(default=None, validation_alias="QDRANT_API_KEY")
-    
     class Config:
         env_prefix = "SHERLOG_"
         env_file = ".env"

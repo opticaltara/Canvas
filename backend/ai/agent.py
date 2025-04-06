@@ -23,7 +23,6 @@ from pydantic_ai import Agent
 from pydantic_ai.mcp import MCPServerHTTP
 
 from backend.config import get_settings
-from backend.context.engine import get_context_engine
 from backend.core.cell import AIQueryCell, CellType, create_cell
 from backend.core.execution import ExecutionContext
 from backend.core.notebook import Notebook
@@ -94,16 +93,6 @@ class S3QueryParams(BaseModel):
     )
 
 
-class DataSourceContextParams(BaseModel):
-    """Parameters for retrieving data source context"""
-    query: str = Field(description="Query to find relevant context for")
-    source_type: Optional[str] = Field(
-        description="Optional source type filter (sql, prometheus, loki, s3)",
-        default=None
-    )
-    limit: int = Field(description="Maximum number of context items to retrieve", default=5)
-
-
 class InvestigationStepModel(BaseModel):
     """A single step in an investigation plan"""
     step_id: int = Field(description="Unique ID for this step")
@@ -143,7 +132,6 @@ class AIAgent:
         self.settings = get_settings()
         self.api_key = self.settings.anthropic_api_key
         self.model = self.settings.anthropic_model
-        self.context_engine = get_context_engine()
         self.mcp_servers = mcp_servers or []
         
         # Initialize agents with MCP servers
@@ -168,9 +156,6 @@ class AIAgent:
             - Include markdown cells to explain your approach and findings
             - Consider which steps depend on others and set dependencies appropriately
             - Think step by step and be thorough in your approach
-            - Utilize context about data sources when provided
-            - Use the get_data_source_context tool when you need information about database schemas,
-              available metrics, log formats, etc.
 
             Think carefully about the logical sequence of investigation. What data do you need first?
             How will you analyze it? What conclusions can you draw?
@@ -255,15 +240,6 @@ class AIAgent:
         )
         
         try:
-            # Get contextual information about data sources
-            context_engine = get_context_engine()
-            context_items = await context_engine.retrieve_context(query, None, 5)
-            context_str = context_engine.build_context_for_ai(context_items)
-            
-            # Add context to the query if available
-            if context_str and not context_str.startswith("Error") and not context_str.startswith("No relevant"):
-                dependencies.user_query = f"{query}\n\n{context_str}"
-            
             # Run the agent with MCP servers context manager
             async with self.investigation_planner.run_mcp_servers():
                 result = await self.investigation_planner.run(

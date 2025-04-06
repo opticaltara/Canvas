@@ -34,7 +34,7 @@ function App() {
   const [isConnectionDialogOpen, setIsConnectionDialogOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [newConnectionName, setNewConnectionName] = useState('');
-  const [newConnectionType, setNewConnectionType] = useState('postgres');
+  const [newConnectionType, setNewConnectionType] = useState('grafana');
   const [newConnectionConfig, setNewConnectionConfig] = useState<Record<string, string>>({
     connection_string: '',
     host: '',
@@ -143,70 +143,60 @@ function App() {
   const handleCreateConnection = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (!newConnectionName.trim()) return;
+    // Process the connection configuration
+    let connectionConfig: Record<string, string> = {};
     
-    setIsCreatingConnection(true);
-    
-    // Filter the config to only include fields relevant to the connection type
-    let configToSend: Record<string, string> = {};
-    
-    if (newConnectionType === 'postgres') {
-      configToSend = {
-        connection_string: newConnectionConfig.connection_string || 
-          `postgresql://${newConnectionConfig.username}:${newConnectionConfig.password}@${newConnectionConfig.host}:${newConnectionConfig.port}/${newConnectionConfig.database}`
+    if (newConnectionType === 'grafana') {
+      connectionConfig = {
+        url: newConnectionConfig.url || '',
+        api_key: newConnectionConfig.api_key || ''
       };
-    } else if (newConnectionType === 'grafana') {
-      configToSend = {
-        url: newConnectionConfig.url,
-        api_key: newConnectionConfig.api_key
+    } else if (newConnectionType === 'kubernetes') {
+      connectionConfig = {
+        kubeconfig: newConnectionConfig.kubeconfig || '',
+        context: newConnectionConfig.context || ''
+      };
+    } else if (newConnectionType === 's3') {
+      connectionConfig = {
+        bucket: newConnectionConfig.bucket || '',
+        prefix: newConnectionConfig.prefix || '',
+        region: newConnectionConfig.region || ''
       };
     }
     
+    // Create the connection object
+    const connection = {
+      name: newConnectionName,
+      type: newConnectionType,
+      config: connectionConfig
+    };
+    
+    // Send the connection to the API
     try {
       const response = await fetch(`${BACKEND_URL}/api/connections`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
+          'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          name: newConnectionName,
-          type: newConnectionType,
-          config: configToSend
-        }),
+        body: JSON.stringify(connection)
       });
       
       if (!response.ok) {
-        throw new Error(`Error ${response.status}: ${response.statusText}`);
+        throw new Error('Failed to create connection');
       }
       
+      // Refresh the connections list
       const newConnection = await response.json();
+      setConnections((prev) => [...prev, newConnection]);
       
-      // Update connections list
-      setConnections((prev) => [...prev, {
-        id: newConnection.id,
-        name: newConnection.name,
-        type: newConnection.type,
-        config: newConnection.config
-      }]);
-      
-      // Reset form
+      // Reset the form
       setNewConnectionName('');
-      setNewConnectionType('postgres');
-      setNewConnectionConfig({
-        connection_string: '',
-        host: '',
-        port: '',
-        username: '',
-        password: '',
-        database: '',
-        url: '',
-        api_key: ''
-      });
-      setIsCreatingConnection(false);
+      setNewConnectionConfig({});
+      setNewConnectionType('grafana');
       setIsConnectionDialogOpen(false);
-    } catch (err: any) {
-      setError(err.message);
-      setIsCreatingConnection(false);
+    } catch (error) {
+      console.error('Error creating connection:', error);
+      // TODO: Show error message to user
     }
   };
 
@@ -417,96 +407,11 @@ function App() {
                                     onChange={(e) => setNewConnectionType(e.target.value)}
                                     className="w-full p-2 border rounded-md"
                                   >
-                                    <option value="postgres">PostgreSQL</option>
                                     <option value="grafana">Grafana</option>
                                     <option value="kubernetes">Kubernetes</option>
                                     <option value="s3">S3</option>
                                   </select>
                                 </div>
-                                
-                                {newConnectionType === 'postgres' && (
-                                  <div className="space-y-4 border p-3 rounded-md">
-                                    <div className="space-y-2">
-                                      <label htmlFor="connection_string" className="text-sm font-medium">
-                                        Connection String (Optional)
-                                      </label>
-                                      <Input
-                                        id="connection_string"
-                                        value={newConnectionConfig.connection_string}
-                                        onChange={(e) => setNewConnectionConfig({...newConnectionConfig, connection_string: e.target.value})}
-                                        placeholder="postgresql://username:password@localhost:5432/database"
-                                      />
-                                      <p className="text-xs text-muted-foreground">
-                                        Or fill in the details below
-                                      </p>
-                                    </div>
-                                    
-                                    <div className="grid grid-cols-2 gap-3">
-                                      <div className="space-y-2">
-                                        <label htmlFor="host" className="text-sm font-medium">
-                                          Host
-                                        </label>
-                                        <Input
-                                          id="host"
-                                          value={newConnectionConfig.host}
-                                          onChange={(e) => setNewConnectionConfig({...newConnectionConfig, host: e.target.value})}
-                                          placeholder="localhost"
-                                        />
-                                      </div>
-                                      
-                                      <div className="space-y-2">
-                                        <label htmlFor="port" className="text-sm font-medium">
-                                          Port
-                                        </label>
-                                        <Input
-                                          id="port"
-                                          value={newConnectionConfig.port}
-                                          onChange={(e) => setNewConnectionConfig({...newConnectionConfig, port: e.target.value})}
-                                          placeholder="5432"
-                                        />
-                                      </div>
-                                    </div>
-                                    
-                                    <div className="space-y-2">
-                                      <label htmlFor="database" className="text-sm font-medium">
-                                        Database
-                                      </label>
-                                      <Input
-                                        id="database"
-                                        value={newConnectionConfig.database}
-                                        onChange={(e) => setNewConnectionConfig({...newConnectionConfig, database: e.target.value})}
-                                        placeholder="postgres"
-                                      />
-                                    </div>
-                                    
-                                    <div className="grid grid-cols-2 gap-3">
-                                      <div className="space-y-2">
-                                        <label htmlFor="username" className="text-sm font-medium">
-                                          Username
-                                        </label>
-                                        <Input
-                                          id="username"
-                                          value={newConnectionConfig.username}
-                                          onChange={(e) => setNewConnectionConfig({...newConnectionConfig, username: e.target.value})}
-                                          placeholder="postgres"
-                                        />
-                                      </div>
-                                      
-                                      <div className="space-y-2">
-                                        <label htmlFor="password" className="text-sm font-medium">
-                                          Password
-                                        </label>
-                                        <Input
-                                          id="password"
-                                          type="password"
-                                          value={newConnectionConfig.password}
-                                          onChange={(e) => setNewConnectionConfig({...newConnectionConfig, password: e.target.value})}
-                                          placeholder="••••••••"
-                                        />
-                                      </div>
-                                    </div>
-                                  </div>
-                                )}
                                 
                                 {newConnectionType === 'grafana' && (
                                   <div className="space-y-4 border p-3 rounded-md">
@@ -666,24 +571,21 @@ function App() {
                             {connections.map((connection) => (
                               <Card key={connection.id}>
                                 <CardHeader className="pb-2 flex flex-row items-center space-x-4">
-                                  <div className={`bg-${connection.type === 'postgres' ? 'blue' : connection.type === 'grafana' ? 'orange' : 'gray'}-100 p-2 rounded-full h-12 w-12 flex items-center justify-center`}>
-                                    {connection.type === 'postgres' && (
-                                      <svg viewBox="0 0 24 24" className="h-8 w-8 text-blue-600" xmlns="http://www.w3.org/2000/svg">
-                                        <path fill="currentColor" d="M12 0C8.922 0 6.642.18 5.129.962c-1.512.783-2.3 1.946-2.3 3.297 0 .784.479 2.082 1.285 3.92 1.37 3.133 3.432 7.077 5.344 9.892 1.048 1.54 2.096 2.78 3.035 3.668.47.443.925.76 1.356.998.43.237.838.38 1.3.38.463 0 .872-.143 1.302-.381.431-.237.886-.555 1.355-.998.94-.887 1.988-2.127 3.036-3.667 1.912-2.815 3.974-6.76 5.343-9.893.807-1.837 1.286-3.135 1.286-3.92 0-1.35-.788-2.514-2.3-3.296C17.357.18 15.078 0 12 0zm0 1.923c2.92 0 4.97.173 6.154.807 1.184.634 1.602 1.398 1.602 2.02 0 .47-.417 1.582-1.147 3.27-1.303 2.98-3.304 6.787-5.075 9.389-.886 1.303-1.846 2.437-2.636 3.188-.395.375-.754.628-1.034.772-.28.145-.498.208-.71.208-.211 0-.43-.063-.71-.208-.28-.144-.64-.397-1.034-.772-.79-.75-1.75-1.885-2.636-3.188-1.771-2.602-3.772-6.408-5.075-9.388-.73-1.689-1.147-2.8-1.147-3.271 0-.621.418-1.385 1.602-2.02C7.03 2.097 9.08 1.923 12 1.923zm0 2.981c-1.198 0-2.198.997-2.198 2.193 0 1.197.998 2.194 2.198 2.194 1.199 0 2.199-.997 2.199-2.194 0-1.196-1-2.193-2.199-2.193zm-5.252 3.47c-1.145 0-2.093.95-2.093 2.095s.947 2.096 2.093 2.096c1.146 0 2.094-.95 2.094-2.096 0-1.146-.948-2.096-2.094-2.096zm10.504 0c-1.146 0-2.094.95-2.094 2.095s.948 2.096 2.094 2.096c1.145 0 2.093-.95 2.093-2.096 0-1.146-.948-2.096-2.093-2.096zM12 10.981c-1.147 0-2.094.95-2.094 2.096s.948 2.096 2.094 2.096c1.146 0 2.094-.95 2.094-2.096 0-1.146-.947-2.096-2.094-2.096zm-6.276 4.24c-1.147 0-2.094.948-2.094 2.095 0 1.146.947 2.095 2.094 2.095s2.093-.949 2.093-2.095c0-1.147-.946-2.096-2.093-2.096zm12.552 0c-1.147 0-2.094.948-2.094 2.095 0 1.146.947 2.095 2.094 2.095 1.146 0 2.093-.949 2.093-2.095 0-1.147-.947-2.096-2.093-2.096z"/>
-                                      </svg>
-                                    )}
+                                  <div className={`bg-${connection.type === 'grafana' ? 'orange' : connection.type === 'kubernetes' ? 'green' : 'gray'}-100 p-2 rounded-full h-12 w-12 flex items-center justify-center`}>
                                     {connection.type === 'grafana' && (
                                       <svg viewBox="0 0 24 24" className="h-8 w-8 text-orange-600" xmlns="http://www.w3.org/2000/svg">
                                         <path fill="currentColor" d="M11.982 0A12 12 0 0 0 0 11.978a12 12 0 0 0 11.982 12.044 12 12 0 0 0 12.018-12.044A12 12 0 0 0 11.982 0zM2.87 16.243c.463 1.587 1.3 2.923 2.632 3.995l-1.373-.65a6.525 6.525 0 0 1-1.259-3.345zm14.465-8.425c.177.76.277 1.613.392 2.523.116.91.29 1.858.262 2.818a71.881 71.881 0 0 0-.187 2.523c-.06 2.464-.026 4.765-.026 6.963h-1.95c.145-2.195.31-4.298.481-6.316.026-.262.042-.525.059-.787-.154.262-.321.516-.489.759a10.33 10.33 0 0 1-1.185 1.4 4.706 4.706 0 0 1-1.678.759 2.484 2.484 0 0 1-1.865-.341c-1.167-.802-1.865-1.867-2.065-3.226a10.568 10.568 0 0 1 .025-3.778c.196-.958.554-1.848 1.175-2.612.622-.759 1.426-1.288 2.368-1.4 1.016-.116 1.875.171 2.645.828.77.656 1.327 1.493 1.737 2.424.137.307.262.622.379.933.138-.17.275-.35.413-.532.574-.744 1.067-1.553 1.31-2.477.145-.533.222-1.074.196-1.627a2.605 2.605 0 0 0-.583-1.688 2.242 2.242 0 0 0-1.515-.724 6.673 6.673 0 0 0-1.934.2c-1.287.333-2.551.81-3.754 1.484-.239.137-.477.274-.714.411.051-.316.116-.631.187-.943a5 5 0 0 1 .642-1.628c.275-.461.787-.828 1.293-1.1a12.28 12.28 0 0 1 3.482-1.168 12.282 12.282 0 0 1 3.772-.072c1.356.204 2.287.958 2.705 2.305a6.583 6.583 0 0 1 .234 1.799 8.66 8.66 0 0 1-.73 3.226 21.93 21.93 0 0 1-1.444 2.833zm-9.328.186c.592-2.047 1.864-3.247 3.942-3.558.178-.03.361-.043.55-.053a2.295 2.295 0 0 0-1.866 1.002 3.795 3.795 0 0 0-.626 1.535 10.14 10.14 0 0 0-.232 2.022c0 .787.115 1.564.31 2.33.026.118.075.229.11.332.145-.502.202-1.022.273-1.536.08-.581.15-1.162.247-1.743a5.797 5.797 0 0 1 .533-1.662c.622-1.203 1.893-1.27 2.626-.154.418.64.714 1.349.958 2.068.307.904.582 1.816.893 2.717.127.366.267.726.4 1.098.138-1.223.196-2.445.275-3.668.085-1.3.196-2.591.463-3.873.044-.198.102-.393.153-.59l.152.034c.051.35.11.65.162.1.034.599.06 1.202.066 1.81a42.67 42.67 0 0 1-.463 6.365 3.642 3.642 0 0 1-.488 1.425c-.453.76-1.133.904-1.841.386-.532-.392-.893-.938-1.23-1.501a67.92 67.92 0 0 1-1.018-1.816c-.209-.41-.412-.82-.617-1.229-.2.324-.403.648-.599.973-.533.859-1.082 1.708-1.71 2.5a2.981 2.981 0 0 1-.941.81c-.59.306-1.184.213-1.674-.273a2.435 2.435 0 0 1-.55-.837c-.473-1.066-.79-2.175-.96-3.318a16.08 16.08 0 0 1-.17-2.168c.002-.963.062-1.914.296-2.859z"/>
                                       </svg>
                                     )}
                                     {connection.type === 'kubernetes' && (
-                                      <svg viewBox="0 0 24 24" className="h-8 w-8 text-blue-500" xmlns="http://www.w3.org/2000/svg">
+                                      <svg viewBox="0 0 24 24" className="h-8 w-8 text-green-500" xmlns="http://www.w3.org/2000/svg">
                                         <path fill="currentColor" d="M10.204 14.35l.007.01-.999 2.413a5.171 5.171 0 0 1-2.075-2.597l2.578-.437.013.06a.525.525 0 0 0 .476.55zm-.198-1.153a.525.525 0 0 0-.578-.32l-2.825.48a5.203 5.203 0 0 1-.096-1.307l2.708-1.25a.528.528 0 0 0 .109.205c.38.475.568.974.479.815a.524.524 0 0 0 .204-.623zm.811-1.924a.524.524 0 0 0-.775.152l-1.648 2.647a5.2 5.2 0 0 1-.99-.847l1.907-2.27a.525.525 0 0 0 .072-.11.525.525 0 0 0 .20.152c.777.439.915.561 1.057.637a.397.397 0 0 1 .122.103c.018.026.044.076.055.119M12 8.1c.18 0 .355.026.523.047l.963-2.842a.525.525 0 0 0-.128-.504.526.526 0 0 0-.476-.153C11.386 4.93 9.64 5.46 9.64 5.46a5.18 5.18 0 0 1 2.36-1.36zM8.277 8.8a5.18 5.18 0 0 1 1.74-1.654l.658 2.946a.525.525 0 0 0-.076.172.525.525 0 0 0-.131-.213c-.164-.163-1.003-1.145-1.48-1.628a.526.526 0 0 0-.715.378zm5.484.929c.051-.21.093-.424.122-.642l3.01-.573a.525.525 0 0 0 .126-.035c.002.023.006.046.008.069a5.181 5.181 0 0 1-.616 3.06c-.964-1.922-1.845-1.195-2.65-1.879zm.106 5.101a5.2 5.2 0 0 1-1.609.926l-.387-3.013a.526.526 0 0 0 .483-.574.526.526 0 0 0 .245.508c.323.214 1.935.271 1.268 2.153zm.446-1.747a.525.525 0 0 0 .266-.447.526.526 0 0 0-.351-.487c-.544-.225-1.407-1.581-.697-2.615a5.185 5.185 0 0 1 1.526 2.446l-.744 1.103zm4.241-8.723c.053.273-.165.32-.232.773-.031.213-.285 2.363-.32 2.598a.525.525 0 0 0 .329.542.525.525 0 0 0-.585-.144c-.483.219-1.464 1.254-3.17-.33a5.17 5.17 0 0 1 3.978-3.439zM12 3.53a8.47 8.47 0 1 0 0 16.94 8.47 8.47 0 0 0 0-16.94zm7.045 9.67a7.28 7.28 0 0 1-.43 1.569.525.525 0 0 0-.519-.05.525.525 0 0 0-.27.43l-.336 3.307a7.384 7.384 0 0 1-11.077-1.305l1.123-2.702a.525.525 0 0 0 .273-.363.526.526 0 0 0-.607-.038 7.28 7.28 0 0 1-.932-1.316l2.86-.485a.525.525 0 0 0 .396-.318.526.526 0 0 0-.19-.615L7.18 9.391a7.367 7.367 0 0 1 .773-1.334l1.972 2.34a.526.526 0 0 0 .561.15.526.526 0 0 0 .353-.454l.44-2.958c.397-.154.81-.268 1.23-.346l.51 3.143a.525.525 0 0 0 .3.394.525.525 0 0 0 .501-.03l2.46-1.474c.2.373.367.766.495 1.17l-2.593 1.268a.526.526 0 0 0-.184.743c.507.778.507.778.614.943l.276.433 1.257-1.86a7.284 7.284 0 0 1 .276 1.63l-2.523.48a.526.526 0 0 0-.18.924l1.887 1.664a7.284 7.284 0 0 1-.638 1.498z"/>
                                       </svg>
                                     )}
-                                    {!['postgres', 'grafana', 'kubernetes'].includes(connection.type) && (
-                                      <div className="h-8 w-8 text-gray-600">DB</div>
+                                    {!['grafana', 'kubernetes'].includes(connection.type) && (
+                                      <svg viewBox="0 0 24 24" className="h-8 w-8 text-gray-600" xmlns="http://www.w3.org/2000/svg">
+                                        <path fill="currentColor" d="M18.88 14.88c.08-.79.12-1.79.12-3 0-1.33-.04-2.33-.12-3-.08-.79-.31-1.52-.69-2.2-.37-.69-.9-1.23-1.56-1.62s-1.4-.59-2.19-.59c-.48 0-.96.09-1.46.26s-.96.43-1.4.77c-.4.32-.72.61-.97.88-.24.28-.52.58-.82.97l-1.39 1.65 1.39 1.65c.3.39.58.69.82.97.25.27.57.56.97.88.44.34.9.6 1.4.77s.98.26 1.46.26c.79 0 1.52-.2 2.19-.59s1.19-.93 1.56-1.61c.38-.68.61-1.41.69-2.19zm-7.29.79L9.5 17.76c-.05.06-.09.12-.15.17s-.2.09-.38.09H6.03l3.95-9.76h2.92l.16.43 1.97 4.8-1.93 2.28c-.05.17.01-.05-.41-.8z"/>
+                                      </svg>
                                     )}
                                   </div>
                                   <div>
@@ -741,54 +643,6 @@ function App() {
                             ))}
                             
                             {/* Show default connections if API didn't return them */}
-                            {connections.find(c => c.type === 'postgres') === undefined && (
-                              <Card>
-                                <CardHeader className="pb-2 flex flex-row items-center space-x-4">
-                                  <div className="bg-blue-100 p-2 rounded-full h-12 w-12 flex items-center justify-center">
-                                    <svg viewBox="0 0 24 24" className="h-8 w-8 text-blue-600" xmlns="http://www.w3.org/2000/svg">
-                                      <path fill="currentColor" d="M12 0C8.922 0 6.642.18 5.129.962c-1.512.783-2.3 1.946-2.3 3.297 0 .784.479 2.082 1.285 3.92 1.37 3.133 3.432 7.077 5.344 9.892 1.048 1.54 2.096 2.78 3.035 3.668.47.443.925.76 1.356.998.43.237.838.38 1.3.38.463 0 .872-.143 1.302-.381.431-.237.886-.555 1.355-.998.94-.887 1.988-2.127 3.036-3.667 1.912-2.815 3.974-6.76 5.343-9.893.807-1.837 1.286-3.135 1.286-3.92 0-1.35-.788-2.514-2.3-3.296C17.357.18 15.078 0 12 0zm0 1.923c2.92 0 4.97.173 6.154.807 1.184.634 1.602 1.398 1.602 2.02 0 .47-.417 1.582-1.147 3.27-1.303 2.98-3.304 6.787-5.075 9.389-.886 1.303-1.846 2.437-2.636 3.188-.395.375-.754.628-1.034.772-.28.145-.498.208-.71.208-.211 0-.43-.063-.71-.208-.28-.144-.64-.397-1.034-.772-.79-.75-1.75-1.885-2.636-3.188-1.771-2.602-3.772-6.408-5.075-9.388-.73-1.689-1.147-2.8-1.147-3.271 0-.621.418-1.385 1.602-2.02C7.03 2.097 9.08 1.923 12 1.923zm0 2.981c-1.198 0-2.198.997-2.198 2.193 0 1.197.998 2.194 2.198 2.194 1.199 0 2.199-.997 2.199-2.194 0-1.196-1-2.193-2.199-2.193zm-5.252 3.47c-1.145 0-2.093.95-2.093 2.095s.947 2.096 2.093 2.096c1.146 0 2.094-.95 2.094-2.096 0-1.146-.948-2.096-2.094-2.096zm10.504 0c-1.146 0-2.094.95-2.094 2.095s.948 2.096 2.094 2.096c1.145 0 2.093-.95 2.093-2.096 0-1.146-.948-2.096-2.093-2.096zM12 10.981c-1.147 0-2.094.95-2.094 2.096s.948 2.096 2.094 2.096c1.146 0 2.094-.95 2.094-2.096 0-1.146-.947-2.096-2.094-2.096zm-6.276 4.24c-1.147 0-2.094.948-2.094 2.095 0 1.146.947 2.095 2.094 2.095s2.093-.949 2.093-2.095c0-1.147-.946-2.096-2.093-2.096zm12.552 0c-1.147 0-2.094.948-2.094 2.095 0 1.146.947 2.095 2.094 2.095 1.146 0 2.093-.949 2.093-2.095 0-1.147-.947-2.096-2.093-2.096z"/>
-                                    </svg>
-                                  </div>
-                                  <div>
-                                    <CardTitle className="text-lg">PostgreSQL</CardTitle>
-                                    <CardDescription>Connect to your PostgreSQL databases</CardDescription>
-                                  </div>
-                                </CardHeader>
-                                <CardContent>
-                                  <div className="text-sm mb-4">
-                                    <div className="flex items-center mb-2">
-                                      <p className="mr-2">Connection Status:</p>
-                                      <span className="text-green-600 font-medium">Available</span>
-                                    </div>
-                                    <div className="flex items-center">
-                                      <p className="mr-2">MCP Server:</p>
-                                      <MCPServerStatus connectionId="postgres-default" showControls={true} />
-                                    </div>
-                                  </div>
-                                  <div className="text-sm">
-                                    <p><span className="font-medium">Server:</span> pg-mcp:8000</p>
-                                    <p><span className="font-medium">Host:</span> localhost</p>
-                                    <p><span className="font-medium">Port:</span> 9211</p>
-                                  </div>
-                                </CardContent>
-                                <CardFooter className="bg-muted/50 flex justify-between">
-                                  <Button variant="outline" size="sm" onClick={() => {
-                                    setNewConnectionName("PostgreSQL");
-                                    setNewConnectionType("postgres");
-                                    setIsConnectionDialogOpen(true);
-                                  }}>
-                                    Edit
-                                  </Button>
-                                  <Button variant="secondary" size="sm" onClick={() => {
-                                    // TODO: Test the connection
-                                    alert("Connection test successful!");
-                                  }}>
-                                    Test Connection
-                                  </Button>
-                                </CardFooter>
-                              </Card>
-                            )}
-                            
                             {connections.find(c => c.type === 'grafana') === undefined && (
                               <Card>
                                 <CardHeader className="pb-2 flex flex-row items-center space-x-4">
@@ -846,7 +700,7 @@ function App() {
                                 </p>
                                 <Button variant="outline" onClick={() => {
                                   setNewConnectionName("");
-                                  setNewConnectionType("postgres");
+                                  setNewConnectionType("grafana");
                                   setIsConnectionDialogOpen(true);
                                 }}>
                                   Add Connection

@@ -56,9 +56,6 @@ check_git
 # Create directories needed for volumes
 mkdir -p data
 
-# pg-mcp is now included in the project directly
-echo "Using local PostgreSQL MCP implementation"
-
 # Print steps as they execute
 set -x
 
@@ -86,7 +83,6 @@ echo "Sherlog Canvas is now running!"
 echo "Original Frontend: http://localhost:3000"
 echo "Backend API: http://localhost:8080"
 echo "Next.js App: http://localhost:3003"
-echo "PostgreSQL MCP: http://localhost:9211"
 echo "Grafana MCP: http://localhost:9110"
 echo ""
 echo "To stop all services, run:"

@@ -12,8 +12,6 @@ services:
       - SHERLOG_DEBUG=true
       - SHERLOG_ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - SHERLOG_ANTHROPIC_MODEL=claude-3-7-sonnet-20250219
-      - SHERLOG_QDRANT_URL=qdrant
-      - SHERLOG_QDRANT_PORT=6333
       # Optional AWS credentials for S3 storage
       - SHERLOG_NOTEBOOK_STORAGE_TYPE=file
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
@@ -26,8 +24,6 @@ services:
     ports:
       - "9091:8000"
     depends_on:
-      - qdrant
-      - pg-mcp
       - mcp-grafana
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
@@ -48,41 +44,6 @@ services:
     environment:
       - WDS_SOCKET_PORT=3001
     restart: unless-stopped
-
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: sherlog-canvas-qdrant
-    volumes:
-      - qdrant_data:/qdrant/storage
-    ports:
-      - "6343:6333"
-      - "6344:6334"
-    restart: unless-stopped
-    
-  pg-mcp:
-    build:
-      context: ./pg-mcp
-      dockerfile: Dockerfile
-    container_name: sherlog-canvas-pg-mcp
-    ports:
-      - "9211:8000"
-    environment:
-      - LOG_LEVEL=INFO  # Reduced logging in standby mode
-      - PYTHONUNBUFFERED=1
-      - PG_CONNECTION_STRING=${PG_CONNECTION_STRING:-postgresql://user:pass@localhost/dbname}
-      - STANDBY_MODE=true  # Begin in standby mode (low resource usage)
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-    deploy:
-      resources:
-        limits:
-          cpus: '0.50'  # Limit CPU usage when in standby
-          memory: 256M  # Limit memory usage when in standby
     
   mcp-grafana:
     # Using a custom build instead of the official image
@@ -136,6 +97,4 @@ services:
 
 volumes:
   data:
-    driver: local
-  qdrant_data:
     driver: local

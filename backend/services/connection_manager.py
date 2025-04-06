@@ -8,24 +8,23 @@ import asyncio
 import json
 import logging
 import os
-from typing import Dict, List, Optional, Type
+from typing import Dict, List, Optional, Type, Tuple
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 import aiofiles
 
 from backend.config import get_settings
-from backend.context.engine import get_context_engine
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
 class ConnectionConfig(BaseModel):
-    """Configuration for a connection"""
+    """Connection configuration"""
     id: str
     name: str
-    type: str  # "grafana", "postgres", "prometheus", "loki", "s3", etc.
-    config: Dict[str, str]  # Configuration details (API keys, URLs, etc.)
+    type: str  # "grafana", "sql", "prometheus", "loki", "s3", "kubernetes", etc.
+    config: Dict[str, str] = Field(default_factory=dict)
 
 
 # Singleton instance
@@ -48,7 +47,6 @@ class ConnectionManager:
         self.connections: Dict[str, ConnectionConfig] = {}
         self.default_connections: Dict[str, str] = {}
         self.settings = get_settings()
-        self.context_engine = get_context_engine()
         self.active_mcp_servers = {}
     
     async def initialize(self) -> None:
@@ -67,8 +65,6 @@ class ConnectionManager:
                 logger.debug(f"Stopping MCP server {server_id}")
                 await server.stop()
         
-        # Close the context engine
-        await self.context_engine.close()
         logger.info("ConnectionManager closed successfully")
     
     def get_connection(self, connection_id: str) -> Optional[ConnectionConfig]:
@@ -117,23 +113,30 @@ class ConnectionManager:
     
     def get_default_connection(self, connection_type: str) -> Optional[ConnectionConfig]:
         """
-        Get the default connection for a type
+        Get the default connection for a given type
         
         Args:
-            connection_type: The type of connection
+            connection_type: The connection type to find
             
         Returns:
-            The default connection, or None if not found
+            The default connection or None if not found
         """
-        connection_id = self.default_connections.get(connection_type)
-        if connection_id:
-            return self.get_connection(connection_id)
+        # Check environment variables for default connection
+        env_var_name = f"SHERLOG_CONNECTION_DEFAULT_{connection_type.upper()}"
+        default_conn_name = os.environ.get(env_var_name)
         
-        # If no default is set, try to find any connection for this type
-        connections = self.get_connections_by_type(connection_type)
-        if connections:
-            return connections[0]
+        # If we have a default connection name, try to get it
+        if default_conn_name:
+            for connection in self.connections.values():
+                if connection.type == connection_type and connection.name == default_conn_name:
+                    return connection
         
+        # Otherwise, try to return the first connection of the type
+        for connection in self.connections.values():
+            if connection.type == connection_type:
+                return connection
+                
+        # No connection found
         return None
     
     async def create_connection(self, name: str, type: str, config: Dict) -> ConnectionConfig:
@@ -165,10 +168,10 @@ class ConnectionManager:
         
         # Validate the connection
         logger.debug(f"Validating connection {name} ({connection_id})")
-        is_valid = await self.test_connection(type, config)
+        is_valid, message = self._validate_and_prepare_connection(connection_id, type, config)
         if not is_valid:
-            logger.error(f"Connection validation failed for {name} ({connection_id})")
-            raise ValueError(f"Connection validation failed for {name}")
+            logger.error(f"Connection validation failed for {name} ({connection_id}): {message}")
+            raise ValueError(message)
         
         # Add to connections
         self.connections[connection_id] = connection
@@ -180,9 +183,6 @@ class ConnectionManager:
         
         # Save connections
         await self._save_connections()
-        
-        # Index the connection schema/metadata for RAG
-        await self._index_connection_for_rag(connection_id)
         
         logger.info(f"Successfully created connection {name} ({connection_id})")
         return connection
@@ -218,19 +218,16 @@ class ConnectionManager:
         
         # Validate the connection
         logger.debug(f"Validating updated connection {name} ({connection_id})")
-        is_valid = await self.test_connection(connection.type, config)
+        is_valid, message = self._validate_and_prepare_connection(connection_id, connection.type, config)
         if not is_valid:
-            logger.error(f"Connection validation failed for update {name} ({connection_id})")
-            raise ValueError(f"Connection validation failed for {name}")
+            logger.error(f"Connection validation failed for update {name} ({connection_id}): {message}")
+            raise ValueError(message)
         
         # Update the connection
         self.connections[connection_id] = updated_connection
         
         # Save connections
         await self._save_connections()
-        
-        # Re-index the connection schema/metadata for RAG
-        await self._index_connection_for_rag(connection_id)
         
         logger.info(f"Successfully updated connection {name} ({connection_id})")
         return updated_connection
@@ -335,22 +332,20 @@ class ConnectionManager:
                     logger.error(f"Failed to test Grafana connection: {str(e)}")
                     return False
             
-            elif connection_type == "postgres":
-                if not config.get("connection_string"):
-                    logger.warning("Postgres connection missing required field: connection_string")
+            elif connection_type == "kubernetes":
+                if not config.get("kubeconfig"):
+                    logger.warning("Kubernetes connection missing required field: kubeconfig")
                     return False
-                
-                # TODO: Actually test the connection to Postgres
-                # For now, just return True if the required fields are present
+                    
+                # TODO: Verify the kubeconfig is valid
                 return True
             
             elif connection_type == "s3":
-                if not config.get("endpoint") or not config.get("access_key") or not config.get("secret_key"):
-                    logger.warning("S3 connection missing required fields: endpoint, access_key, or secret_key")
+                if not config.get("bucket"):
+                    logger.warning("S3 connection missing required field: bucket")
                     return False
-                
-                # TODO: Actually test the connection to S3
-                # For now, just return True if the required fields are present
+                    
+                # TODO: Verify the S3 bucket is accessible
                 return True
             
             else:
@@ -361,95 +356,65 @@ class ConnectionManager:
             logger.error(f"Error testing connection: {str(e)}")
             return False
     
+    def _validate_and_prepare_connection(self, connection_id, connection_type, config) -> Tuple[bool, str]:
+        """
+        Validate a connection configuration
+        """
+        try:
+            if connection_type == "grafana":
+                if not config.get("url") or not config.get("api_key"):
+                    logger.warning("Grafana connection missing required fields: url, api_key")
+                    return False, "Grafana connection missing required fields: url, api_key"
+                
+                # TODO: Actually test the connection to Grafana
+                return True, "Connection validated"
+            elif connection_type == "kubernetes":
+                if not config.get("kubeconfig"):
+                    logger.warning("Kubernetes connection missing required field: kubeconfig")
+                    return False, "Kubernetes connection missing required field: kubeconfig"
+                    
+                # TODO: Verify the kubeconfig is valid
+                return True, "Connection validated"
+            elif connection_type == "s3":
+                if not config.get("bucket"):
+                    logger.warning("S3 connection missing required field: bucket")
+                    return False, "S3 connection missing required field: bucket"
+                    
+                # TODO: Verify the S3 bucket is accessible
+                return True, "Connection validated"
+            else:
+                return True, "Connection type not validated"
+                
+        except Exception as e:
+            logger.error(f"Error validating connection: {e}")
+            return False, f"Error validating connection: {str(e)}"
+
     async def get_connection_schema(self, connection_id: str) -> Dict:
         """
-        Get the schema for a connection
+        Get the schema for a connection (tables, fields, etc.)
         
         Args:
-            connection_id: The ID of the connection
+            connection_id: The connection ID
             
         Returns:
-            The schema information
-            
-        Raises:
-            ValueError: If the connection is not found
+            The connection schema or an error message
         """
         connection = self.get_connection(connection_id)
         if not connection:
-            raise ValueError(f"Connection not found: {connection_id}")
-        
-        # Placeholder schema extraction logic
-        # In a real implementation, this would connect to the MCP server
-        # and retrieve the schema information
-        
-        if connection.type == "grafana":
-            return {"message": "Grafana schema retrieval not implemented yet"}
-        
-        elif connection.type == "postgres":
-            return {"message": "Postgres schema retrieval not implemented yet"}
-        
-        elif connection.type == "prometheus":
-            return {"message": "Prometheus schema retrieval not implemented yet"}
-        
-        elif connection.type == "loki":
-            return {"message": "Loki schema retrieval not implemented yet"}
-        
-        elif connection.type == "s3":
-            return {"message": "S3 schema retrieval not implemented yet"}
-        
-        else:
-            return {"message": f"Unknown connection type: {connection.type}"}
-    
-    async def _index_connection_for_rag(self, connection_id: str) -> None:
-        """
-        Index connection schema/metadata for RAG
-        
-        Args:
-            connection_id: The ID of the connection
-        """
+            return {"error": f"Connection not found: {connection_id}"}
+            
         try:
-            connection = self.get_connection(connection_id)
-            if not connection:
-                return
-            
-            # Placeholder for schema extraction and indexing
-            # Note: A real implementation would extract the schema and
-            # use the context engine to index it
-            
-            # Get schema data (placeholder)
-            schema_data = await self.get_connection_schema(connection_id)
-            
-            # Index based on connection type
-            if connection.type == "postgres" or connection.type == "sql":
-                # Convert schema to expected format and index
-                sql_schema = {"tables": {}}  # Placeholder
-                await self.context_engine.index_sql_schema(
-                    connection_id, connection.name, sql_schema
-                )
-            
-            elif connection.type == "prometheus":
-                # Convert schema to expected format and index
-                prometheus_data = {"metrics": []}  # Placeholder
-                await self.context_engine.index_prometheus_metrics(
-                    connection_id, connection.name, prometheus_data
-                )
-            
-            elif connection.type == "loki":
-                # Convert schema to expected format and index
-                loki_data = {"labels": []}  # Placeholder
-                await self.context_engine.index_loki_logs(
-                    connection_id, connection.name, loki_data
-                )
-            
-            elif connection.type == "s3":
-                # Convert schema to expected format and index
-                s3_data = {"buckets": []}  # Placeholder
-                await self.context_engine.index_s3_buckets(
-                    connection_id, connection.name, s3_data
-                )
-            
+            if connection.type == "grafana":
+                # Fetch dashboards and datasources from Grafana
+                return {"message": "Grafana schema retrieval not implemented yet"}
+            elif connection.type == "kubernetes":
+                # Fetch list of resources 
+                return {"message": "Kubernetes schema retrieval not implemented yet"}
+            else:
+                return {"message": f"Schema retrieval not implemented for {connection.type} connections"}
         except Exception as e:
-            print(f"Error indexing connection for RAG: {e}")
+            logger.error(f"Error retrieving schema: {e}")
+            return {"error": f"Error retrieving schema: {str(e)}"}
     
     def _redact_sensitive_fields(self, config: Dict) -> Dict:
         """
@@ -547,10 +512,6 @@ class ConnectionManager:
             
             self.default_connections = data.get("default_connections", {})
             
-            # Index all connections for RAG
-            for connection_id in self.connections:
-                await self._index_connection_for_rag(connection_id)
-            
             logger.info(f"Successfully loaded {len(self.connections)} connections")
         except Exception as e:
             logger.error(f"Error loading connections: {str(e)}")
@@ -645,3 +606,17 @@ class ConnectionManager:
             "connections": connections,
             "default_connections": default_connections
         }
+
+    def can_execute_sql(self, connection: ConnectionConfig) -> bool:
+        """
+        Check if a connection can execute SQL
+        
+        Args:
+            connection: The connection to check
+            
+        Returns:
+            True if the connection can execute SQL, False otherwise
+        """
+        if connection.type == "sql":
+            return True
+        return False

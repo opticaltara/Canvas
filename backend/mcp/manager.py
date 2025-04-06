@@ -84,115 +84,52 @@ class MCPServerManager:
     
     async def start_mcp_server(self, connection: ConnectionConfig) -> Optional[str]:
         """
-        Start an MCP server for a specific connection
-        
+        Start an appropriate MCP server for the given connection
+
         Args:
             connection: The connection configuration
-            
+
         Returns:
             The MCP server address if successful, None otherwise
         """
-        start_time = time.time()
-        
+        if not connection or not connection.id or not connection.type:
+            return None
+
         # Check if server is already running for this connection
-        if connection.id in self.servers and self.status.get(connection.id) == MCPServerStatus.RUNNING:
-            mcp_logger.info(
-                "MCP server already running",
-                extra={
-                    'connection_id': connection.id,
-                    'connection_name': connection.name,
-                    'server_address': self.servers[connection.id]
-                }
-            )
-            return self.servers[connection.id]
-        
+        status = self.get_server_status(connection.id)["status"]
+        if status == MCPServerStatus.RUNNING:
+            # Server is already running, return the address
+            return self.servers.get(connection.id)
+
         # Set status to starting
         self.status[connection.id] = MCPServerStatus.STARTING
         self.last_error[connection.id] = None
-        
-        server_type = connection.type
-        config = connection.config
-        
+
         try:
-            mcp_logger.info(
-                "Starting MCP server",
-                extra={
-                    'connection_id': connection.id,
-                    'connection_name': connection.name,
-                    'server_type': server_type
-                }
-            )
-            
+            # Start the appropriate server based on connection type
+            server_type = connection.type.lower()
+            address = None
+
             if server_type == "grafana":
                 address = await self._start_grafana_mcp(connection)
-            elif server_type == "postgres":
-                address = await self._start_postgres_mcp(connection)
             elif server_type == "kubernetes":
                 address = await self._start_kubernetes_mcp(connection)
             elif server_type == "python":
                 address = await self._start_python_mcp(connection)
-            else:
-                error_msg = f"Unsupported MCP server type: {server_type}"
-                self.last_error[connection.id] = error_msg
-                self.status[connection.id] = MCPServerStatus.FAILED
-                mcp_logger.error(
-                    "Unsupported server type",
-                    extra={
-                        'connection_id': connection.id,
-                        'connection_name': connection.name,
-                        'server_type': server_type
-                    }
-                )
-                return None
-            
-            process_time = time.time() - start_time
-            
+
             if address:
                 self.servers[connection.id] = address
                 self.status[connection.id] = MCPServerStatus.RUNNING
-                mcp_logger.info(
-                    "MCP server started successfully",
-                    extra={
-                        'connection_id': connection.id,
-                        'connection_name': connection.name,
-                        'server_type': server_type,
-                        'server_address': address,
-                        'processing_time_ms': round(process_time * 1000, 2)
-                    }
-                )
                 return address
             else:
                 self.status[connection.id] = MCPServerStatus.FAILED
-                if connection.id not in self.last_error or not self.last_error[connection.id]:
-                    self.last_error[connection.id] = "Failed to start MCP server"
-                mcp_logger.error(
-                    "Failed to start MCP server",
-                    extra={
-                        'connection_id': connection.id,
-                        'connection_name': connection.name,
-                        'server_type': server_type,
-                        'error': self.last_error[connection.id],
-                        'processing_time_ms': round(process_time * 1000, 2)
-                    }
-                )
-            
-            return None
+                if not self.last_error.get(connection.id):
+                    self.last_error[connection.id] = f"Failed to start {server_type} MCP server"
+                return None
+
         except Exception as e:
-            process_time = time.time() - start_time
             self.status[connection.id] = MCPServerStatus.FAILED
             self.last_error[connection.id] = str(e)
-            mcp_logger.error(
-                "Error starting MCP server",
-                extra={
-                    'connection_id': connection.id,
-                    'connection_name': connection.name,
-                    'server_type': server_type,
-                    'error': str(e),
-                    'error_type': type(e).__name__,
-                    'processing_time_ms': round(process_time * 1000, 2)
-                },
-                exc_info=True
-            )
             return None
     
     async def stop_all_servers(self) -> None:
@@ -415,54 +352,34 @@ class MCPServerManager:
             The MCP server address if successful, None otherwise
         """
         # Get configuration
-        url = connection.config.get("url")
+        grafana_url = connection.config.get("url")
         api_key = connection.config.get("api_key")
         
-        if not url or not api_key:
+        if not grafana_url or not api_key:
+            self.last_error[connection.id] = "Missing required configuration for Grafana MCP server"
             print(f"Missing required configuration for Grafana MCP server: {connection.name}")
             return None
-        
-        # Choose a port
-        port = self._find_free_port(9100, 9200)
+            
+        # Choose a port for local development (when not using Docker)
+        port = self._find_free_port(9101, 9200)
         if not port:
+            self.last_error[connection.id] = f"Could not find a free port for Grafana MCP server"
             print(f"Could not find a free port for Grafana MCP server: {connection.name}")
             return None
-        
+            
         # Set environment variables
         env = os.environ.copy()
-        env["GRAFANA_URL"] = url
+        env["GRAFANA_URL"] = grafana_url
         env["GRAFANA_API_KEY"] = api_key
-        
-        # Start the MCP server
+            
         try:
-            cmd = [
-                "mcp-grafana", 
-                "--port", str(port)
-            ]
-            
-            process = subprocess.Popen(
-                cmd,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            
-            self.processes[connection.id] = process
-            
-            # Wait for server to start
-            await asyncio.sleep(2)
-            
-            # Check if process is still running
-            if process.poll() is not None:
-                stderr = ""
-                if process.stderr:
-                    stderr = process.stderr.read() or ""
-                print(f"Grafana MCP server failed to start: {stderr}")
-                return None
-            
+            # When running in Docker, no need to start a process
             # Check if we're running in Docker
             is_docker = os.path.exists('/.dockerenv')
+            
+            # For Docker, we don't need to start a process
+            # Just record a placeholder in the processes dict for cleanup tracking
+            self.processes[connection.id] = None
             
             # Get the host name based on environment
             if is_docker:
@@ -482,67 +399,6 @@ class MCPServerManager:
             print(f"Error starting Grafana MCP server: {e}")
             return None
     
-    async def _start_postgres_mcp(self, connection: ConnectionConfig) -> Optional[str]:
-        """
-        Start a Postgres MCP server
-        
-        Args:
-            connection: The Postgres connection configuration
-            
-        Returns:
-            The MCP server address if successful, None otherwise
-        """
-        # Get configuration
-        connection_string = connection.config.get("connection_string")
-        
-        if not connection_string:
-            print(f"Missing required configuration for Postgres MCP server: {connection.name}")
-            return None
-        
-        # Choose a port
-        port = self._find_free_port(9201, 9300)
-        if not port:
-            print(f"Could not find a free port for Postgres MCP server: {connection.name}")
-            return None
-        
-        # Set environment variables
-        env = os.environ.copy()
-        env["PG_CONNECTION_STRING"] = connection_string
-        
-        # Use the Docker container instead of launching a new process
-        try:
-            # The PostgreSQL MCP server is already running in Docker
-            # We don't need to start a new process, just return the address
-            # When using Docker Compose, we use the service name and internal port
-            # External port: 9201, Internal port: 8000
-            port = 8000
-            
-            # We don't need to start a process as it's running in Docker
-            # Just record a placeholder in the processes dict for cleanup tracking
-            self.processes[connection.id] = None
-            
-            # In Docker Compose, use the service name as the host
-            # This works when running in Docker, but localhost is needed when running locally
-            # Let's check if we're running in Docker
-            is_docker = os.path.exists('/.dockerenv')
-            
-            # Get the host name based on environment
-            if is_docker:
-                # Use the Docker Compose service name
-                host = "sherlog-canvas-pg-mcp"
-            else:
-                # Use localhost with external port when running outside Docker
-                host = "localhost"
-                port = 9201
-            
-            address = f"{host}:{port}"
-            print(f"Started Postgres MCP server for {connection.name} at {address}")
-            return address
-        
-        except Exception as e:
-            print(f"Error starting Postgres MCP server: {e}")
-            return None
-
     async def _start_kubernetes_mcp(self, connection: ConnectionConfig) -> Optional[str]:
         """
         Start a Kubernetes MCP server

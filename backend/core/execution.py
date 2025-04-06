@@ -362,7 +362,7 @@ class CellExecutor:
             # Get relevant connections based on cell type
             connection_type = None
             if cell.type == CellType.SQL:
-                connection_type = "postgres"
+                connection_type = "sql"
             elif cell.type == CellType.LOG or cell.type == CellType.METRIC:
                 connection_type = "grafana"
             elif cell.type == CellType.S3:
