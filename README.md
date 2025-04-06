@@ -8,7 +8,6 @@ Sherlog Canvas is a reactive notebook interface for software engineering investi
 - **Multi-Agent AI System**: Creates investigation plans and generates cells based on user queries
 - **Multiple Data Source Integration**: Connect to SQL databases, Prometheus, Loki, Grafana, and S3
 - **Specialized Cell Types**: SQL, log queries, metrics, Python code, and more
-- **Context Engine with RAG**: Uses vector embeddings to provide AI with data source schema understanding
 - **Collaborative Investigation Environment**: AI and users work together to solve problems
 
 ## Architecture
@@ -20,8 +19,6 @@ Sherlog Canvas consists of:
    - Dependency tracking system for reactivity
    - MCP server integration for data sources
    - AI orchestration for query planning
-   - Context engine with RAG for data source understanding
-   - Qdrant vector database for storing schema embeddings
 
 2. **Frontend**:
    - Vite.js + React-based UI
@@ -57,7 +54,6 @@ Sherlog Canvas now includes a convenient startup script that handles all compone
 5. Access the application at http://localhost:5173
 
 The start script handles:
-- Starting Qdrant vector database in Docker
 - Starting PostgreSQL MCP server in Docker
 - Starting Grafana MCP server in Docker
 - Starting the backend API server in Docker
@@ -94,8 +90,7 @@ Sherlog Canvas uses Machine-Callable Package (MCP) servers for data source integ
 Sherlog Canvas will:
 1. Store your connection details securely
 2. Start the appropriate MCP server for each connection
-3. Index schema information for AI context
-4. Automatically connect your AI agents to these data sources
+3. Automatically connect your AI agents to these data sources
 
 ### Manual MCP Server Setup
 
@@ -135,7 +130,7 @@ If you prefer to start components individually:
 - Node.js 16+
 - Go 1.18+ (for mcp-grafana)
 - Git (for cloning repositories)
-- Docker and Docker Compose (for Qdrant and pg-mcp)
+- Docker and Docker Compose (for pg-mcp)
 - Access to data sources (PostgreSQL, Grafana, etc.)
 
 ### Backend Setup
@@ -147,9 +142,6 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
-
-# Start Qdrant
-docker run -d --name sherlog-canvas-qdrant -p 6333:6333 qdrant/qdrant:latest
 
 # Start the backend server
 python -m uvicorn backend.server:app --reload --host 0.0.0.0 --port 8000
