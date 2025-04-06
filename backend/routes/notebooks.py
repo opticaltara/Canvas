@@ -2,6 +2,8 @@
 Notebook API Endpoints
 """
 
+import logging
+import time
 from typing import Dict, List, Optional
 from uuid import UUID
 
@@ -12,6 +14,9 @@ from backend.core.cell import CellType
 from backend.core.notebook import Notebook
 from backend.services.notebook_manager import NotebookManager, get_notebook_manager
 from backend.core.cell import CellStatus
+
+# Initialize logger
+route_logger = logging.getLogger("routes.notebooks")
 
 router = APIRouter()
 

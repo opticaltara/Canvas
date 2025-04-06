@@ -9,6 +9,9 @@ from backend.core.cell import Cell, CellStatus
 from backend.core.notebook import Notebook
 import logging
 
+# Initialize loggers
+execution_logger = logging.getLogger("execution")
+cell_executor_logger = logging.getLogger("cell_executor")
 
 @dataclass
 class ExecutionContext:
@@ -30,29 +33,61 @@ class ExecutionQueue:
         self._running = False
         self._task = None
         self.active_tasks: Set[UUID] = set()
-        self.logger = logging.getLogger("execution")
+        self.logger = execution_logger
     
     async def add_cell(self, notebook_id: UUID, cell_id: UUID, executor: 'CellExecutor') -> None:
         """Add a cell to the execution queue"""
+        correlation_id = str(uuid4())
+        
         if cell_id in self.active_tasks:
-            self.logger.warning(f"Cell already in execution queue notebook_id={str(notebook_id)} cell_id={str(cell_id)}")
+            self.logger.warning(
+                "Cell already in execution queue",
+                extra={
+                    'correlation_id': correlation_id,
+                    'notebook_id': str(notebook_id),
+                    'cell_id': str(cell_id)
+                }
+            )
             return
         
-        self.logger.info(f"Adding cell to execution queue notebook_id={str(notebook_id)} cell_id={str(cell_id)}")
-        await self.queue.put((notebook_id, cell_id, executor))
+        self.logger.info(
+            "Adding cell to execution queue",
+            extra={
+                'correlation_id': correlation_id,
+                'notebook_id': str(notebook_id),
+                'cell_id': str(cell_id),
+                'queue_size': self.queue.qsize()
+            }
+        )
+        await self.queue.put((notebook_id, cell_id, executor, correlation_id))
     
     async def start(self) -> None:
         """Start processing the execution queue"""
+        correlation_id = str(uuid4())
+        
         if self._running:
+            self.logger.warning(
+                "Execution queue already running",
+                extra={'correlation_id': correlation_id}
+            )
             return
         
         self._running = True
         self._task = asyncio.create_task(self._process_queue())
-        self.logger.info("Execution queue started")
+        self.logger.info(
+            "Execution queue started",
+            extra={'correlation_id': correlation_id}
+        )
     
     async def stop(self) -> None:
         """Stop processing the execution queue"""
+        correlation_id = str(uuid4())
+        
         if not self._running:
+            self.logger.warning(
+                "Execution queue already stopped",
+                extra={'correlation_id': correlation_id}
+            )
             return
         
         self._running = False
@@ -64,33 +99,79 @@ class ExecutionQueue:
                 pass
             finally:
                 self._task = None
-        self.logger.info("Execution queue stopped")
+        
+        self.logger.info(
+            "Execution queue stopped",
+            extra={
+                'correlation_id': correlation_id,
+                'active_tasks': len(self.active_tasks),
+                'remaining_queue_size': self.queue.qsize()
+            }
+        )
     
     async def _process_queue(self) -> None:
         """Process items in the execution queue"""
         while self._running:
             try:
                 # Get the next cell to execute
-                notebook_id, cell_id, executor = await self.queue.get()
+                notebook_id, cell_id, executor, correlation_id = await self.queue.get()
                 
                 # Skip if cell is already being processed
                 if cell_id in self.active_tasks:
-                    self.logger.warning(f"Cell already being processed, skipping notebook_id={str(notebook_id)} cell_id={str(cell_id)}")
+                    self.logger.warning(
+                        "Cell already being processed, skipping",
+                        extra={
+                            'correlation_id': correlation_id,
+                            'notebook_id': str(notebook_id),
+                            'cell_id': str(cell_id)
+                        }
+                    )
                     self.queue.task_done()
                     continue
                 
                 # Track active task
                 self.active_tasks.add(cell_id)
+                start_time = time.time()
                 
                 try:
-                    self.logger.info(f"Starting cell execution notebook_id={str(notebook_id)} cell_id={str(cell_id)}")
+                    self.logger.info(
+                        "Starting cell execution",
+                        extra={
+                            'correlation_id': correlation_id,
+                            'notebook_id': str(notebook_id),
+                            'cell_id': str(cell_id),
+                            'active_tasks': len(self.active_tasks),
+                            'queue_size': self.queue.qsize()
+                        }
+                    )
                     
                     # Execute the cell
-                    await executor.execute_cell(notebook_id, cell_id)
+                    await executor.execute_cell(notebook_id, cell_id, correlation_id)
                     
-                    self.logger.info(f"Cell execution completed notebook_id={str(notebook_id)} cell_id={str(cell_id)}")
+                    process_time = time.time() - start_time
+                    self.logger.info(
+                        "Cell execution completed",
+                        extra={
+                            'correlation_id': correlation_id,
+                            'notebook_id': str(notebook_id),
+                            'cell_id': str(cell_id),
+                            'execution_time_ms': round(process_time * 1000, 2)
+                        }
+                    )
                 except Exception as e:
-                    self.logger.error(f"Cell execution failed notebook_id={str(notebook_id)} cell_id={str(cell_id)} error={str(e)}")
+                    process_time = time.time() - start_time
+                    self.logger.error(
+                        "Cell execution failed",
+                        extra={
+                            'correlation_id': correlation_id,
+                            'notebook_id': str(notebook_id),
+                            'cell_id': str(cell_id),
+                            'error': str(e),
+                            'error_type': type(e).__name__,
+                            'execution_time_ms': round(process_time * 1000, 2)
+                        },
+                        exc_info=True
+                    )
                 finally:
                     # Remove from active tasks
                     self.active_tasks.remove(cell_id)
@@ -100,8 +181,15 @@ class ExecutionQueue:
                 # Queue processing has been cancelled
                 break
             except Exception as e:
-                # Unexpected error, log and continue
-                self.logger.error(f"Error in execution queue processing error={str(e)}")
+                self.logger.error(
+                    "Error in execution queue processing",
+                    extra={
+                        'correlation_id': str(uuid4()),
+                        'error': str(e),
+                        'error_type': type(e).__name__
+                    },
+                    exc_info=True
+                )
                 await asyncio.sleep(1)  # Prevent tight loop on error
 
 
@@ -112,19 +200,22 @@ class CellExecutor:
     """
     def __init__(self, notebook_manager):
         self.notebook_manager = notebook_manager
-        self.logger = logging.getLogger("cell_executor")
+        self.logger = cell_executor_logger
     
-    async def execute_cell(self, notebook_id: UUID, cell_id: UUID) -> Any:
+    async def execute_cell(self, notebook_id: UUID, cell_id: UUID, correlation_id: Optional[str] = None) -> Any:
         """
         Execute a cell and update its state
         
         Args:
             notebook_id: ID of the notebook containing the cell
             cell_id: ID of the cell to execute
+            correlation_id: Optional correlation ID for tracing execution
             
         Returns:
             The result of the cell execution
         """
+        correlation_id = correlation_id if correlation_id else str(uuid4())
+        
         notebook = self.notebook_manager.get_notebook(notebook_id)
         cell = notebook.get_cell(cell_id)
         
@@ -139,8 +230,16 @@ class CellExecutor:
         result = None
         error = None
         
-        execution_id = str(uuid4())
-        self.logger.info(f"Executing cell notebook_id={str(notebook_id)} cell_id={str(cell_id)} cell_type={cell.type.value} execution_id={execution_id}")
+        self.logger.info(
+            "Starting cell execution",
+            extra={
+                'correlation_id': correlation_id,
+                'notebook_id': str(notebook_id),
+                'cell_id': str(cell_id),
+                'cell_type': cell.type.value,
+                'dependencies_count': len(cell.dependencies) if hasattr(cell, 'dependencies') else 0
+            }
+        )
         
         try:
             # Create execution context
@@ -149,31 +248,79 @@ class CellExecutor:
             if hasattr(cell, 'settings') and cell.settings:
                 settings = cell.settings
             
+            # Get dependencies
+            dependency_start = time.time()
+            variables = self._get_dependency_results(notebook, cell_id)
+            dependency_time = time.time() - dependency_start
+            
+            self.logger.debug(
+                "Dependencies resolved",
+                extra={
+                    'correlation_id': correlation_id,
+                    'notebook_id': str(notebook_id),
+                    'cell_id': str(cell_id),
+                    'dependency_count': len(variables),
+                    'resolution_time_ms': round(dependency_time * 1000, 2)
+                }
+            )
+            
             context = ExecutionContext(
                 notebook=notebook,
                 cell_id=cell_id,
-                variables=self._get_dependency_results(notebook, cell_id),
+                variables=variables,
                 settings=settings
             )
             
             # Execute the cell based on its type
+            execution_start = time.time()
             result = await self._execute_by_type(cell, context)
+            execution_time = time.time() - execution_start
+            
+            self.logger.info(
+                "Cell execution successful",
+                extra={
+                    'correlation_id': correlation_id,
+                    'notebook_id': str(notebook_id),
+                    'cell_id': str(cell_id),
+                    'execution_time_ms': round(execution_time * 1000, 2)
+                }
+            )
             
         except Exception as e:
             # Capture execution error
             error = str(e)
-            print(f"Error executing cell {cell_id}: {error}")
+            self.logger.error(
+                "Cell execution failed",
+                extra={
+                    'correlation_id': correlation_id,
+                    'notebook_id': str(notebook_id),
+                    'cell_id': str(cell_id),
+                    'error': str(e),
+                    'error_type': type(e).__name__
+                },
+                exc_info=True
+            )
         
-        # Calculate execution time
-        execution_time = time.time() - start_time
+        # Calculate total execution time
+        total_execution_time = time.time() - start_time
         
         # Update cell status and result
-        cell.set_result(result, error, execution_time)
+        cell.set_result(result, error, total_execution_time)
         
         # Notify that the cell has been updated
         await self.notebook_manager.notify_cell_update(notebook_id, cell_id)
         
-        self.logger.info(f"Cell execution completed notebook_id={str(notebook_id)} cell_id={str(cell_id)} execution_id={execution_id} execution_time={execution_time}")
+        self.logger.info(
+            "Cell processing completed",
+            extra={
+                'correlation_id': correlation_id,
+                'notebook_id': str(notebook_id),
+                'cell_id': str(cell_id),
+                'status': cell.status.value,
+                'total_time_ms': round(total_execution_time * 1000, 2),
+                'has_error': error is not None
+            }
+        )
         
         return result
     

@@ -5,6 +5,7 @@ Manages the lifecycle of MCP servers for various data sources.
 """
 
 import asyncio
+import logging
 import os
 import subprocess
 import sys
@@ -13,6 +14,8 @@ from typing import Dict, List, Optional
 
 from backend.services.connection_manager import ConnectionConfig
 
+# Initialize logger
+mcp_logger = logging.getLogger("mcp")
 
 class MCPServerStatus:
     """Status of an MCP server"""
@@ -30,6 +33,12 @@ class MCPServerManager:
         self.processes = {}  # Maps connection_id to process
         self.status = {}  # Maps connection_id to server status
         self.last_error = {}  # Maps connection_id to last error message
+        mcp_logger.info(
+            "MCP Server Manager initialized",
+            extra={
+                'active_servers': len(self.servers)
+            }
+        )
     
     async def start_mcp_servers(self, connections: List[ConnectionConfig]) -> Dict[str, str]:
         """
@@ -41,6 +50,7 @@ class MCPServerManager:
         Returns:
             Dictionary mapping connection IDs to MCP server addresses
         """
+        start_time = time.time()
         server_addresses = {}
         
         for connection in connections:
@@ -49,7 +59,26 @@ class MCPServerManager:
                 if address:
                     server_addresses[connection.id] = address
             except Exception as e:
-                print(f"Error starting MCP server for {connection.name}: {e}")
+                mcp_logger.error(
+                    "Error starting MCP server",
+                    extra={
+                        'connection_id': connection.id,
+                        'connection_name': connection.name,
+                        'error': str(e),
+                        'error_type': type(e).__name__
+                    },
+                    exc_info=True
+                )
+        
+        process_time = time.time() - start_time
+        mcp_logger.info(
+            "MCP servers startup complete",
+            extra={
+                'total_connections': len(connections),
+                'successful_starts': len(server_addresses),
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
         
         return server_addresses
     
@@ -63,8 +92,18 @@ class MCPServerManager:
         Returns:
             The MCP server address if successful, None otherwise
         """
+        start_time = time.time()
+        
         # Check if server is already running for this connection
         if connection.id in self.servers and self.status.get(connection.id) == MCPServerStatus.RUNNING:
+            mcp_logger.info(
+                "MCP server already running",
+                extra={
+                    'connection_id': connection.id,
+                    'connection_name': connection.name,
+                    'server_address': self.servers[connection.id]
+                }
+            )
             return self.servers[connection.id]
         
         # Set status to starting
@@ -75,6 +114,15 @@ class MCPServerManager:
         config = connection.config
         
         try:
+            mcp_logger.info(
+                "Starting MCP server",
+                extra={
+                    'connection_id': connection.id,
+                    'connection_name': connection.name,
+                    'server_type': server_type
+                }
+            )
+            
             if server_type == "grafana":
                 address = await self._start_grafana_mcp(connection)
             elif server_type == "postgres":
@@ -84,34 +132,88 @@ class MCPServerManager:
             elif server_type == "python":
                 address = await self._start_python_mcp(connection)
             else:
-                self.last_error[connection.id] = f"Unsupported MCP server type: {server_type}"
+                error_msg = f"Unsupported MCP server type: {server_type}"
+                self.last_error[connection.id] = error_msg
                 self.status[connection.id] = MCPServerStatus.FAILED
-                print(self.last_error[connection.id])
+                mcp_logger.error(
+                    "Unsupported server type",
+                    extra={
+                        'connection_id': connection.id,
+                        'connection_name': connection.name,
+                        'server_type': server_type
+                    }
+                )
                 return None
+            
+            process_time = time.time() - start_time
             
             if address:
                 self.servers[connection.id] = address
                 self.status[connection.id] = MCPServerStatus.RUNNING
+                mcp_logger.info(
+                    "MCP server started successfully",
+                    extra={
+                        'connection_id': connection.id,
+                        'connection_name': connection.name,
+                        'server_type': server_type,
+                        'server_address': address,
+                        'processing_time_ms': round(process_time * 1000, 2)
+                    }
+                )
                 return address
             else:
                 self.status[connection.id] = MCPServerStatus.FAILED
                 if connection.id not in self.last_error or not self.last_error[connection.id]:
                     self.last_error[connection.id] = "Failed to start MCP server"
+                mcp_logger.error(
+                    "Failed to start MCP server",
+                    extra={
+                        'connection_id': connection.id,
+                        'connection_name': connection.name,
+                        'server_type': server_type,
+                        'error': self.last_error[connection.id],
+                        'processing_time_ms': round(process_time * 1000, 2)
+                    }
+                )
             
             return None
         except Exception as e:
+            process_time = time.time() - start_time
             self.status[connection.id] = MCPServerStatus.FAILED
             self.last_error[connection.id] = str(e)
-            print(f"Error starting MCP server for {connection.name}: {e}")
+            mcp_logger.error(
+                "Error starting MCP server",
+                extra={
+                    'connection_id': connection.id,
+                    'connection_name': connection.name,
+                    'server_type': server_type,
+                    'error': str(e),
+                    'error_type': type(e).__name__,
+                    'processing_time_ms': round(process_time * 1000, 2)
+                },
+                exc_info=True
+            )
             return None
     
     async def stop_all_servers(self) -> None:
         """Stop all running MCP servers"""
+        start_time = time.time()
+        stopped_count = 0
+        error_count = 0
+        
         for connection_id, process in self.processes.items():
             try:
                 if process is None:
                     # Skip Docker-based processes - they're managed separately
                     continue
+                
+                mcp_logger.info(
+                    "Stopping MCP server",
+                    extra={
+                        'connection_id': connection_id,
+                        'server_address': self.servers.get(connection_id)
+                    }
+                )
                 
                 # Send SIGTERM to the process
                 process.terminate()
@@ -122,17 +224,51 @@ class MCPServerManager:
                 # If still running, force kill
                 if process.poll() is None:
                     process.kill()
+                    mcp_logger.warning(
+                        "Force killed MCP server process",
+                        extra={
+                            'connection_id': connection_id
+                        }
+                    )
                 
                 # Update status
                 self.status[connection_id] = MCPServerStatus.STOPPED
+                stopped_count += 1
+                
+                mcp_logger.info(
+                    "MCP server stopped successfully",
+                    extra={
+                        'connection_id': connection_id
+                    }
+                )
             except Exception as e:
+                error_count += 1
                 self.last_error[connection_id] = str(e)
-                print(f"Error stopping MCP server for {connection_id}: {e}")
+                mcp_logger.error(
+                    "Error stopping MCP server",
+                    extra={
+                        'connection_id': connection_id,
+                        'error': str(e),
+                        'error_type': type(e).__name__
+                    },
+                    exc_info=True
+                )
         
         # Clear all server data
         self.processes = {}
         self.servers = {}
         
+        process_time = time.time() - start_time
+        mcp_logger.info(
+            "All MCP servers stopped",
+            extra={
+                'total_servers': stopped_count + error_count,
+                'successful_stops': stopped_count,
+                'failed_stops': error_count,
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
+    
     async def stop_server(self, connection_id: str) -> bool:
         """
         Stop a specific MCP server
@@ -143,8 +279,16 @@ class MCPServerManager:
         Returns:
             True if stopped successfully, False otherwise
         """
+        start_time = time.time()
+        
         if connection_id not in self.processes:
             self.status[connection_id] = MCPServerStatus.STOPPED
+            mcp_logger.info(
+                "MCP server already stopped",
+                extra={
+                    'connection_id': connection_id
+                }
+            )
             return True
             
         process = self.processes[connection_id]
@@ -156,7 +300,21 @@ class MCPServerManager:
                 del self.processes[connection_id]
                 if connection_id in self.servers:
                     del self.servers[connection_id]
+                mcp_logger.info(
+                    "Docker-based MCP server marked as stopped",
+                    extra={
+                        'connection_id': connection_id
+                    }
+                )
                 return True
+            
+            mcp_logger.info(
+                "Stopping MCP server",
+                extra={
+                    'connection_id': connection_id,
+                    'server_address': self.servers.get(connection_id)
+                }
+            )
             
             # Send SIGTERM to the process
             process.terminate()
@@ -167,6 +325,12 @@ class MCPServerManager:
             # If still running, force kill
             if process.poll() is None:
                 process.kill()
+                mcp_logger.warning(
+                    "Force killed MCP server process",
+                    extra={
+                        'connection_id': connection_id
+                    }
+                )
             
             # Update status
             self.status[connection_id] = MCPServerStatus.STOPPED
@@ -175,11 +339,30 @@ class MCPServerManager:
             del self.processes[connection_id]
             if connection_id in self.servers:
                 del self.servers[connection_id]
+            
+            process_time = time.time() - start_time
+            mcp_logger.info(
+                "MCP server stopped successfully",
+                extra={
+                    'connection_id': connection_id,
+                    'processing_time_ms': round(process_time * 1000, 2)
+                }
+            )
                 
             return True
         except Exception as e:
+            process_time = time.time() - start_time
             self.last_error[connection_id] = str(e)
-            print(f"Error stopping MCP server for {connection_id}: {e}")
+            mcp_logger.error(
+                "Error stopping MCP server",
+                extra={
+                    'connection_id': connection_id,
+                    'error': str(e),
+                    'error_type': type(e).__name__,
+                    'processing_time_ms': round(process_time * 1000, 2)
+                },
+                exc_info=True
+            )
             return False
             
     def get_server_status(self, connection_id: str) -> Dict:
@@ -192,11 +375,22 @@ class MCPServerManager:
         Returns:
             Dictionary with status information
         """
-        return {
+        status_info = {
             "status": self.status.get(connection_id, MCPServerStatus.STOPPED),
             "address": self.servers.get(connection_id),
             "error": self.last_error.get(connection_id)
         }
+        
+        mcp_logger.debug(
+            "Retrieved server status",
+            extra={
+                'connection_id': connection_id,
+                'status': status_info["status"],
+                'has_error': status_info["error"] is not None
+            }
+        )
+        
+        return status_info
         
     def get_all_server_statuses(self) -> Dict[str, Dict]:
         """

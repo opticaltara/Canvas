@@ -17,11 +17,15 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from datetime import datetime
 from enum import Enum
+import logging
+import time
 from typing import Any, Dict, List, Optional, Set, Union
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, validator
 
+# Initialize logger
+cell_logger = logging.getLogger("cell")
 
 class CellStatus(str, Enum):
     """
@@ -117,17 +121,45 @@ class Cell(BaseModel):
     # Settings for cell execution
     settings: Dict[str, Any] = Field(default_factory=dict)
     
+    def __init__(self, **data):
+        super().__init__(**data)
+        cell_logger.info(
+            "Cell initialized",
+            extra={
+                'cell_id': str(self.id),
+                'cell_type': str(self.type),
+                'connection_id': self.connection_id
+            }
+        )
+    
     @validator('connection_id')
     def validate_connection_id(cls, v):
         if v is not None and v not in [0, 1]:
+            cell_logger.error(
+                "Invalid connection_id",
+                extra={
+                    'connection_id': v,
+                    'error': 'connection_id must be either 0 or 1'
+                }
+            )
             raise ValueError('connection_id must be either 0 or 1')
         return v
     
     def mark_stale(self) -> None:
         """Mark this cell as stale (needs re-execution)"""
+        start_time = time.time()
         if self.status != CellStatus.STALE:
             self.status = CellStatus.STALE
             self.updated_at = datetime.utcnow()
+            process_time = time.time() - start_time
+            cell_logger.info(
+                "Cell marked as stale",
+                extra={
+                    'cell_id': str(self.id),
+                    'cell_type': str(self.type),
+                    'processing_time_ms': round(process_time * 1000, 2)
+                }
+            )
     
     def update_content(self, content: str) -> None:
         """
@@ -136,9 +168,20 @@ class Cell(BaseModel):
         Args:
             content: The new content for the cell
         """
+        start_time = time.time()
         self.content = content
         self.updated_at = datetime.utcnow()
         self.mark_stale()
+        process_time = time.time() - start_time
+        cell_logger.info(
+            "Cell content updated",
+            extra={
+                'cell_id': str(self.id),
+                'cell_type': str(self.type),
+                'content_length': len(content),
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
     
     def set_result(self, result: Any, error: Optional[str] = None, execution_time: float = 0.0) -> None:
         """
@@ -149,6 +192,7 @@ class Cell(BaseModel):
             error: Optional error message
             execution_time: Time taken to execute the cell
         """
+        start_time = time.time()
         self.result = CellResult(
             content=result,
             error=error,
@@ -157,6 +201,29 @@ class Cell(BaseModel):
         )
         self.status = CellStatus.ERROR if error else CellStatus.SUCCESS
         self.updated_at = datetime.utcnow()
+        
+        process_time = time.time() - start_time
+        cell_logger.info(
+            "Cell result set",
+            extra={
+                'cell_id': str(self.id),
+                'cell_type': str(self.type),
+                'status': str(self.status),
+                'execution_time': execution_time,
+                'has_error': error is not None,
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
+        
+        if error:
+            cell_logger.error(
+                "Cell execution error",
+                extra={
+                    'cell_id': str(self.id),
+                    'cell_type': str(self.type),
+                    'error': error
+                }
+            )
     
     def add_dependency(self, cell_id: UUID) -> None:
         """
@@ -165,7 +232,19 @@ class Cell(BaseModel):
         Args:
             cell_id: ID of the cell this cell depends on
         """
+        start_time = time.time()
         self.dependencies.add(cell_id)
+        process_time = time.time() - start_time
+        cell_logger.info(
+            "Added cell dependency",
+            extra={
+                'cell_id': str(self.id),
+                'cell_type': str(self.type),
+                'dependency_id': str(cell_id),
+                'total_dependencies': len(self.dependencies),
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
     
     def add_dependent(self, cell_id: UUID) -> None:
         """
@@ -174,7 +253,19 @@ class Cell(BaseModel):
         Args:
             cell_id: ID of the dependent cell
         """
+        start_time = time.time()
         self.dependents.add(cell_id)
+        process_time = time.time() - start_time
+        cell_logger.info(
+            "Added cell dependent",
+            extra={
+                'cell_id': str(self.id),
+                'cell_type': str(self.type),
+                'dependent_id': str(cell_id),
+                'total_dependents': len(self.dependents),
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
     
     def remove_dependency(self, cell_id: UUID) -> None:
         """
@@ -183,8 +274,31 @@ class Cell(BaseModel):
         Args:
             cell_id: ID of the dependency to remove
         """
+        start_time = time.time()
         if cell_id in self.dependencies:
             self.dependencies.remove(cell_id)
+            process_time = time.time() - start_time
+            cell_logger.info(
+                "Removed cell dependency",
+                extra={
+                    'cell_id': str(self.id),
+                    'cell_type': str(self.type),
+                    'dependency_id': str(cell_id),
+                    'total_dependencies': len(self.dependencies),
+                    'processing_time_ms': round(process_time * 1000, 2)
+                }
+            )
+        else:
+            process_time = time.time() - start_time
+            cell_logger.warning(
+                "Attempted to remove non-existent dependency",
+                extra={
+                    'cell_id': str(self.id),
+                    'cell_type': str(self.type),
+                    'dependency_id': str(cell_id),
+                    'processing_time_ms': round(process_time * 1000, 2)
+                }
+            )
     
     def remove_dependent(self, cell_id: UUID) -> None:
         """
@@ -193,12 +307,47 @@ class Cell(BaseModel):
         Args:
             cell_id: ID of the dependent to remove
         """
+        start_time = time.time()
         if cell_id in self.dependents:
             self.dependents.remove(cell_id)
+            process_time = time.time() - start_time
+            cell_logger.info(
+                "Removed cell dependent",
+                extra={
+                    'cell_id': str(self.id),
+                    'cell_type': str(self.type),
+                    'dependent_id': str(cell_id),
+                    'total_dependents': len(self.dependents),
+                    'processing_time_ms': round(process_time * 1000, 2)
+                }
+            )
+        else:
+            process_time = time.time() - start_time
+            cell_logger.warning(
+                "Attempted to remove non-existent dependent",
+                extra={
+                    'cell_id': str(self.id),
+                    'cell_type': str(self.type),
+                    'dependent_id': str(cell_id),
+                    'processing_time_ms': round(process_time * 1000, 2)
+                }
+            )
     
     def clear_dependencies(self) -> None:
         """Clear all dependencies"""
+        start_time = time.time()
+        num_dependencies = len(self.dependencies)
         self.dependencies.clear()
+        process_time = time.time() - start_time
+        cell_logger.info(
+            "Cleared all dependencies",
+            extra={
+                'cell_id': str(self.id),
+                'cell_type': str(self.type),
+                'dependencies_cleared': num_dependencies,
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
 
 
 class AIQueryCell(Cell):
@@ -215,6 +364,35 @@ class AIQueryCell(Cell):
     type: CellType = CellType.AI_QUERY
     thinking: Optional[str] = None
     generated_cells: List[UUID] = Field(default_factory=list)
+    
+    def set_thinking(self, thinking: str) -> None:
+        """Set the AI's thinking process text"""
+        start_time = time.time()
+        self.thinking = thinking
+        process_time = time.time() - start_time
+        cell_logger.info(
+            "AI thinking process updated",
+            extra={
+                'cell_id': str(self.id),
+                'thinking_length': len(thinking),
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
+    
+    def add_generated_cell(self, cell_id: UUID) -> None:
+        """Add a cell ID to the list of generated cells"""
+        start_time = time.time()
+        self.generated_cells.append(cell_id)
+        process_time = time.time() - start_time
+        cell_logger.info(
+            "Generated cell added to AI query",
+            extra={
+                'cell_id': str(self.id),
+                'generated_cell_id': str(cell_id),
+                'total_generated_cells': len(self.generated_cells),
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
 
 
 class SQLCell(Cell):
@@ -224,6 +402,16 @@ class SQLCell(Cell):
     This cell type executes SQL against connected databases.
     """
     type: CellType = CellType.SQL
+    
+    def __init__(self, **data):
+        super().__init__(**data)
+        cell_logger.info(
+            "SQL cell initialized",
+            extra={
+                'cell_id': str(self.id),
+                'connection_id': self.connection_id
+            }
+        )
     
     class Config:
         schema_extra = {
@@ -245,6 +433,34 @@ class PythonCell(Cell):
         dependencies: Python package dependencies for the sandboxed environment
     """
     type: CellType = CellType.PYTHON
+    use_sandbox: bool = True
+    package_dependencies: List[str] = Field(default_factory=list)
+    
+    def __init__(self, **data):
+        super().__init__(**data)
+        cell_logger.info(
+            "Python cell initialized",
+            extra={
+                'cell_id': str(self.id),
+                'use_sandbox': self.use_sandbox,
+                'package_dependencies_count': len(self.package_dependencies)
+            }
+        )
+    
+    def add_package_dependency(self, package: str) -> None:
+        """Add a Python package dependency"""
+        start_time = time.time()
+        self.package_dependencies.append(package)
+        process_time = time.time() - start_time
+        cell_logger.info(
+            "Package dependency added to Python cell",
+            extra={
+                'cell_id': str(self.id),
+                'package': package,
+                'total_dependencies': len(self.package_dependencies),
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
     
     class Config:
         schema_extra = {
@@ -269,6 +485,16 @@ class MarkdownCell(Cell):
     """
     type: CellType = CellType.MARKDOWN
     
+    def __init__(self, **data):
+        super().__init__(**data)
+        cell_logger.info(
+            "Markdown cell initialized",
+            extra={
+                'cell_id': str(self.id),
+                'content_length': len(self.content)
+            }
+        )
+    
     class Config:
         schema_extra = {
             "example": {
@@ -291,14 +517,31 @@ class LogCell(Cell):
     source: str = "loki"  # Default to Loki, could be other log sources
     time_range: Optional[Dict[str, str]] = None
     
-    class Config:
-        schema_extra = {
-            "example": {
-                "content": '{app="backend"} |= "error" | logfmt | rate[5m]',
-                "source": "loki",
-                "time_range": {"start": "2023-01-01T00:00:00Z", "end": "2023-01-02T00:00:00Z"}
+    def __init__(self, **data):
+        super().__init__(**data)
+        cell_logger.info(
+            "Log query cell initialized",
+            extra={
+                'cell_id': str(self.id),
+                'source': self.source,
+                'has_time_range': self.time_range is not None
             }
-        }
+        )
+    
+    def set_time_range(self, start: str, end: str) -> None:
+        """Set the time range for the log query"""
+        start_time = time.time()
+        self.time_range = {"start": start, "end": end}
+        process_time = time.time() - start_time
+        cell_logger.info(
+            "Log query time range set",
+            extra={
+                'cell_id': str(self.id),
+                'start_time': start,
+                'end_time': end,
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
 
 
 class MetricCell(Cell):
@@ -315,14 +558,31 @@ class MetricCell(Cell):
     source: str = "prometheus"
     time_range: Optional[Dict[str, str]] = None
     
-    class Config:
-        schema_extra = {
-            "example": {
-                "content": 'rate(http_requests_total{status="500"}[5m])',
-                "source": "prometheus",
-                "time_range": {"start": "2023-01-01T00:00:00Z", "end": "2023-01-02T00:00:00Z"}
+    def __init__(self, **data):
+        super().__init__(**data)
+        cell_logger.info(
+            "Metric query cell initialized",
+            extra={
+                'cell_id': str(self.id),
+                'source': self.source,
+                'has_time_range': self.time_range is not None
             }
-        }
+        )
+    
+    def set_time_range(self, start: str, end: str) -> None:
+        """Set the time range for the metric query"""
+        start_time = time.time()
+        self.time_range = {"start": start, "end": end}
+        process_time = time.time() - start_time
+        cell_logger.info(
+            "Metric query time range set",
+            extra={
+                'cell_id': str(self.id),
+                'start_time': start,
+                'end_time': end,
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
 
 
 class S3Cell(Cell):
@@ -339,53 +599,85 @@ class S3Cell(Cell):
     bucket: str
     prefix: Optional[str] = None
     
-    class Config:
-        schema_extra = {
-            "example": {
-                "content": "SELECT * FROM s3object s WHERE s._1 LIKE '%ERROR%'",
-                "bucket": "logs-bucket",
-                "prefix": "app/logs/2023/01/01/"
+    def __init__(self, **data):
+        super().__init__(**data)
+        cell_logger.info(
+            "S3 query cell initialized",
+            extra={
+                'cell_id': str(self.id),
+                'bucket': self.bucket,
+                'prefix': self.prefix
             }
-        }
+        )
+    
+    def set_prefix(self, prefix: str) -> None:
+        """Set the object key prefix"""
+        start_time = time.time()
+        self.prefix = prefix
+        process_time = time.time() - start_time
+        cell_logger.info(
+            "S3 query prefix set",
+            extra={
+                'cell_id': str(self.id),
+                'bucket': self.bucket,
+                'prefix': prefix,
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
 
 
 def create_cell(cell_type: CellType, content: str, **kwargs) -> Cell:
     """
-    Factory function to create cells of different types
+    Create a new cell of the specified type
     
     Args:
         cell_type: The type of cell to create
-        content: The content for the cell
-        **kwargs: Additional arguments for the specific cell type
+        content: Initial content for the cell
+        **kwargs: Additional arguments to pass to the cell constructor
         
     Returns:
-        A cell instance of the specified type
-        
-    Raises:
-        ValueError: If an unknown cell type is specified
+        A new cell instance of the appropriate type
     """
-    cell_classes = {
-        CellType.AI_QUERY: AIQueryCell,
-        CellType.SQL: SQLCell,
-        CellType.PYTHON: PythonCell,
-        CellType.MARKDOWN: MarkdownCell,
-        CellType.LOG: LogCell,
-        CellType.METRIC: MetricCell,
-        CellType.S3: S3Cell,
-    }
+    start_time = time.time()
     
-    cell_class = cell_classes.get(cell_type)
-    if not cell_class:
-        raise ValueError(f"Unknown cell type: {cell_type}")
-    
-    # Extract connection_id from kwargs if present
-    connection_id = kwargs.pop('connection_id', None)
-    
-    # Create the cell
-    cell = cell_class(content=content, **kwargs)
-    
-    # Set connection_id if provided
-    if connection_id is not None:
-        cell.connection_id = connection_id
-    
-    return cell
+    try:
+        # Map cell types to their classes
+        cell_classes = {
+            CellType.AI_QUERY: AIQueryCell,
+            CellType.SQL: SQLCell,
+            CellType.PYTHON: PythonCell,
+            CellType.MARKDOWN: MarkdownCell,
+            CellType.LOG: LogCell,
+            CellType.METRIC: MetricCell,
+            CellType.S3: S3Cell
+        }
+        
+        # Create the cell
+        cell_class = cell_classes[cell_type]
+        cell = cell_class(content=content, **kwargs)
+        
+        process_time = time.time() - start_time
+        cell_logger.info(
+            "Cell created",
+            extra={
+                'cell_id': str(cell.id),
+                'cell_type': str(cell_type),
+                'content_length': len(content),
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
+        
+        return cell
+    except Exception as e:
+        process_time = time.time() - start_time
+        cell_logger.error(
+            "Error creating cell",
+            extra={
+                'cell_type': str(cell_type),
+                'error': str(e),
+                'error_type': type(e).__name__,
+                'processing_time_ms': round(process_time * 1000, 2)
+            },
+            exc_info=True
+        )
+        raise
