@@ -11,11 +11,23 @@ import subprocess
 import sys
 import time
 from typing import Dict, List, Optional
+from uuid import uuid4
 
 from backend.services.connection_manager import ConnectionConfig
 
 # Initialize logger
 mcp_logger = logging.getLogger("mcp")
+
+# Make sure correlation_id is set for all logs
+class CorrelationIdFilter(logging.Filter):
+    def filter(self, record):
+        # Instead of requiring correlation_id, just add it if missing
+        if not hasattr(record, 'correlation_id'):
+            record.correlation_id = 'N/A'
+        return True
+
+# Add the filter to our logger
+mcp_logger.addFilter(CorrelationIdFilter())
 
 class MCPServerStatus:
     """Status of an MCP server"""

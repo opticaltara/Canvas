@@ -16,6 +16,17 @@ from backend.core.notebook import Notebook, NotebookMetadata
 # Configure logging
 logger = logging.getLogger(__name__)
 
+# Make sure correlation_id is set for all logs
+class CorrelationIdFilter(logging.Filter):
+    def filter(self, record):
+        # Instead of requiring correlation_id, just add it if missing
+        if not hasattr(record, 'correlation_id'):
+            record.correlation_id = 'N/A'
+        return True
+
+# Add the filter to our logger
+logger.addFilter(CorrelationIdFilter())
+
 # Singleton instance
 _notebook_manager_instance = None
 
@@ -33,6 +44,7 @@ class NotebookManager:
     Manages notebook instances and their persistence
     """
     def __init__(self):
+        correlation_id = str(uuid4())
         self.notebooks: Dict[UUID, Notebook] = {}
         self.settings = get_settings()
         self.notify_callback: Optional[Callable] = None
@@ -61,8 +73,9 @@ class NotebookManager:
         Returns:
             The created notebook
         """
+        correlation_id = str(uuid4())
         notebook_id = uuid4()
-        logger.info(f"Creating new notebook with ID {notebook_id} and name '{name}'")
+        logger.info(f"Creating new notebook with ID {notebook_id} and name '{name}'", extra={'correlation_id': correlation_id})
         
         notebook = Notebook(
             id=notebook_id,
@@ -76,12 +89,12 @@ class NotebookManager:
         
         # Update metadata if provided
         if metadata:
-            logger.debug(f"Updating metadata for notebook {notebook_id}")
+            logger.debug(f"Updating metadata for notebook {notebook_id}", extra={'correlation_id': correlation_id})
             notebook.update_metadata(metadata)
         
         self.notebooks[notebook_id] = notebook
         self.save_notebook(notebook_id)
-        logger.info(f"Successfully created and saved notebook {notebook_id}")
+        logger.info(f"Successfully created and saved notebook {notebook_id}", extra={'correlation_id': correlation_id})
         
         return notebook
     
@@ -175,15 +188,17 @@ class NotebookManager:
     
     def _load_notebooks(self) -> None:
         """Load notebooks from storage"""
+        correlation_id = str(uuid4())
         storage_type = self.settings.notebook_storage_type
-        logger.info(f"Loading notebooks from storage type: {storage_type}")
+        logger.info(f"Loading notebooks from storage type: {storage_type}", extra={'correlation_id': correlation_id})
         
         if storage_type == "file":
             self._load_notebooks_from_file()
         elif storage_type == "s3":
             asyncio.create_task(self._load_notebooks_from_s3())
         else:
-            logger.warning("No persistent storage configured, starting with empty notebook set")
+            logger.warning("No persistent storage configured, starting with empty notebook set", 
+                          extra={'correlation_id': correlation_id})
             # In-memory only, nothing to load
             pass
     
@@ -210,12 +225,13 @@ class NotebookManager:
     
     def _load_notebooks_from_file(self) -> None:
         """Load notebooks from files"""
+        correlation_id = str(uuid4())
         directory = self.settings.notebook_file_storage_dir
-        logger.info(f"Loading notebooks from directory: {directory}")
+        logger.info(f"Loading notebooks from directory: {directory}", extra={'correlation_id': correlation_id})
         
         if not os.path.exists(directory):
             os.makedirs(directory, exist_ok=True)
-            logger.info(f"Created notebook storage directory: {directory}")
+            logger.info(f"Created notebook storage directory: {directory}", extra={'correlation_id': correlation_id})
             return
         
         for filename in os.listdir(directory):

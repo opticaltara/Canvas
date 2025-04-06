@@ -19,6 +19,17 @@ from backend.config import get_settings
 # Configure logging
 logger = logging.getLogger(__name__)
 
+# Make sure correlation_id is set for all logs
+class CorrelationIdFilter(logging.Filter):
+    def filter(self, record):
+        # Instead of requiring correlation_id, just add it if missing
+        if not hasattr(record, 'correlation_id'):
+            record.correlation_id = 'N/A'
+        return True
+
+# Add the filter to our logger
+logger.addFilter(CorrelationIdFilter())
+
 class ConnectionConfig(BaseModel):
     """Connection configuration"""
     id: str
@@ -51,21 +62,23 @@ class ConnectionManager:
     
     async def initialize(self) -> None:
         """Initialize and load connections"""
-        logger.info("Initializing ConnectionManager")
+        correlation_id = str(uuid4())
+        logger.info("Initializing ConnectionManager", extra={'correlation_id': correlation_id})
         # Load connections from storage
         await self._load_connections()
-        logger.info("ConnectionManager initialized successfully")
+        logger.info("ConnectionManager initialized successfully", extra={'correlation_id': correlation_id})
     
     async def close(self) -> None:
         """Close all connections and cleanup resources"""
-        logger.info("Closing ConnectionManager and cleaning up resources")
+        correlation_id = str(uuid4())
+        logger.info("Closing ConnectionManager and cleaning up resources", extra={'correlation_id': correlation_id})
         # Stop any running MCP servers
         for server_id, server in self.active_mcp_servers.items():
             if hasattr(server, 'stop') and callable(server.stop):
-                logger.debug(f"Stopping MCP server {server_id}")
+                logger.debug(f"Stopping MCP server {server_id}", extra={'correlation_id': correlation_id})
                 await server.stop()
         
-        logger.info("ConnectionManager closed successfully")
+        logger.info("ConnectionManager closed successfully", extra={'correlation_id': correlation_id})
     
     def get_connection(self, connection_id: str) -> Optional[ConnectionConfig]:
         """
@@ -154,7 +167,8 @@ class ConnectionManager:
         Raises:
             ValueError: If connection validation fails
         """
-        logger.info(f"Creating new {type} connection: {name}")
+        correlation_id = str(uuid4())
+        logger.info(f"Creating new {type} connection: {name}", extra={'correlation_id': correlation_id})
         # Create a unique ID for the connection
         connection_id = str(uuid4())
         
@@ -167,10 +181,10 @@ class ConnectionManager:
         )
         
         # Validate the connection
-        logger.debug(f"Validating connection {name} ({connection_id})")
+        logger.debug(f"Validating connection {name} ({connection_id})", extra={'correlation_id': correlation_id})
         is_valid, message = self._validate_and_prepare_connection(connection_id, type, config)
         if not is_valid:
-            logger.error(f"Connection validation failed for {name} ({connection_id}): {message}")
+            logger.error(f"Connection validation failed for {name} ({connection_id}): {message}", extra={'correlation_id': correlation_id})
             raise ValueError(message)
         
         # Add to connections
@@ -178,13 +192,13 @@ class ConnectionManager:
         
         # If this is the first connection for this type, set it as default
         if not self.get_default_connection(type):
-            logger.info(f"Setting {name} ({connection_id}) as default {type} connection")
+            logger.info(f"Setting {name} ({connection_id}) as default {type} connection", extra={'correlation_id': correlation_id})
             self.default_connections[type] = connection_id
         
         # Save connections
         await self._save_connections()
         
-        logger.info(f"Successfully created connection {name} ({connection_id})")
+        logger.info(f"Successfully created connection {name} ({connection_id})", extra={'correlation_id': correlation_id})
         return connection
     
     async def update_connection(self, connection_id: str, name: str, config: Dict) -> ConnectionConfig:
@@ -441,80 +455,50 @@ class ConnectionManager:
     
     async def _save_connections(self) -> None:
         """Save connections to storage"""
-        logger.debug("Saving connections to storage")
-        # Convert to serializable format
-        connections_data = {
-            conn_id: {
-                "id": conn.id,
-                "name": conn.name,
-                "type": conn.type,
-                "config": conn.config
-            }
-            for conn_id, conn in self.connections.items()
-        }
-        
-        data = {
-            "connections": connections_data,
-            "default_connections": self.default_connections
-        }
-        
-        # Check storage type
-        storage_type = self.settings.connection_storage_type
-        
+        correlation_id = str(uuid4())
         try:
-            if storage_type == "file":
-                # Save to local file
-                logger.debug("Saving connections to file storage")
-                await self._save_connections_to_file(data)
-            elif storage_type == "env":
-                # Connections are loaded from environment, no need to save
-                logger.debug("Connections are loaded from environment, skipping save")
-                pass
-            else:
-                # Default to in-memory only (no persistence)
-                logger.debug("Using in-memory storage only, no persistence")
-                pass
-            logger.info("Successfully saved connections")
+            # Prepare connection data for saving
+            data = {
+                "connections": {conn_id: conn.dict() for conn_id, conn in self.connections.items()},
+                "defaults": self.default_connections
+            }
+            
+            await self._save_connections_to_file(data)
+            logger.info("Successfully saved connections", extra={'correlation_id': correlation_id})
         except Exception as e:
-            logger.error(f"Error saving connections: {str(e)}")
+            logger.error(f"Error saving connections: {str(e)}", extra={'correlation_id': correlation_id})
             raise
     
     async def _load_connections(self) -> None:
         """Load connections from storage"""
-        logger.debug("Loading connections from storage")
-        # Check storage type
-        storage_type = self.settings.connection_storage_type
-        
+        correlation_id = str(uuid4())
         try:
+            # Check storage strategy from configuration
+            storage_type = os.environ.get("SHERLOG_CONNECTION_STORAGE", "file").lower()
+            logger.info(f"Loading connections from storage type: {storage_type}", extra={'correlation_id': correlation_id})
+            
             if storage_type == "file":
                 # Load from local file
-                logger.debug("Loading connections from file storage")
                 data = await self._load_connections_from_file()
+                if data:
+                    self.connections = {
+                        conn_id: ConnectionConfig(**conn_data)
+                        for conn_id, conn_data in data.get("connections", {}).items()
+                    }
+                    self.default_connections = data.get("defaults", {})
             elif storage_type == "env":
                 # Load from environment variables
-                logger.debug("Loading connections from environment variables")
-                data = self._load_connections_from_env()
-            else:
-                # Default to empty
-                logger.debug("No storage type specified, starting with empty connections")
-                data = {"connections": {}, "default_connections": {}}
-            
-            # Convert to ConnectionConfig objects
-            self.connections = {
-                conn_id: ConnectionConfig(
-                    id=conn["id"],
-                    name=conn["name"],
-                    type=conn["type"],
-                    config=conn["config"]
-                )
-                for conn_id, conn in data.get("connections", {}).items()
-            }
-            
-            self.default_connections = data.get("default_connections", {})
-            
-            logger.info(f"Successfully loaded {len(self.connections)} connections")
+                connection_data = self._load_connections_from_env()
+                if connection_data:
+                    self.connections = {
+                        conn_id: ConnectionConfig(**conn_data)
+                        for conn_id, conn_data in connection_data.get("connections", {}).items()
+                    }
+                    self.default_connections = connection_data.get("defaults", {})
+                    
+            logger.info(f"Successfully loaded {len(self.connections)} connections", extra={'correlation_id': correlation_id})
         except Exception as e:
-            logger.error(f"Error loading connections: {str(e)}")
+            logger.error(f"Error loading connections: {str(e)}", extra={'correlation_id': correlation_id})
             raise
     
     async def _save_connections_to_file(self, data: Dict) -> None:
@@ -531,7 +515,7 @@ class ConnectionManager:
         file_path = self.settings.connection_file_path
         
         if not os.path.exists(file_path):
-            return {"connections": {}, "default_connections": {}}
+            return {"connections": {}, "defaults": {}}
         
         # Load from file (use async file operations)
         try:
@@ -540,7 +524,7 @@ class ConnectionManager:
                 return json.loads(content)
         except Exception as e:
             print(f"Error loading connections from file: {e}")
-            return {"connections": {}, "default_connections": {}}
+            return {"connections": {}, "defaults": {}}
     
     def _load_connections_from_env(self) -> Dict:
         """Load connections from environment variables"""
@@ -604,7 +588,7 @@ class ConnectionManager:
         
         return {
             "connections": connections,
-            "default_connections": default_connections
+            "defaults": default_connections
         }
 
     def can_execute_sql(self, connection: ConnectionConfig) -> bool:

@@ -15,6 +15,16 @@ import logging
 # Initialize logger
 connection_logger = logging.getLogger("routes.connections")
 
+# Add correlation ID filter to the connection logger
+class CorrelationIdFilter(logging.Filter):
+    def filter(self, record):
+        # Instead of requiring correlation_id, just add it if missing
+        if not hasattr(record, 'correlation_id'):
+            record.correlation_id = 'N/A'
+        return True
+
+connection_logger.addFilter(CorrelationIdFilter())
+
 router = APIRouter()
 
 

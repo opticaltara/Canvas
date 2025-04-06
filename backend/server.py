@@ -29,7 +29,7 @@ def setup_logging():
     # Configure root logger
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - [%(correlation_id)s] %(message)s',
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     
@@ -40,7 +40,7 @@ def setup_logging():
         backupCount=5
     )
     file_handler.setFormatter(
-        logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - [%(correlation_id)s] %(message)s')
+        logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     )
     
     # Create loggers for different components
@@ -72,6 +72,8 @@ connection_logger = loggers['connection']
 # Add correlation ID to log records
 class CorrelationIdFilter(logging.Filter):
     def filter(self, record):
+        # Instead of requiring correlation_id, we'll provide a default if it's missing
+        # This will allow logs that don't have it to still work properly
         if not hasattr(record, 'correlation_id'):
             record.correlation_id = 'N/A'
         return True

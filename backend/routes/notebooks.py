@@ -18,6 +18,16 @@ from backend.core.cell import CellStatus
 # Initialize logger
 route_logger = logging.getLogger("routes.notebooks")
 
+# Add correlation ID filter to the route logger
+class CorrelationIdFilter(logging.Filter):
+    def filter(self, record):
+        # Instead of requiring correlation_id, just add it if missing
+        if not hasattr(record, 'correlation_id'):
+            record.correlation_id = 'N/A'
+        return True
+
+route_logger.addFilter(CorrelationIdFilter())
+
 router = APIRouter()
 
 
