@@ -2,7 +2,7 @@
 Connection API Endpoints
 """
 
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Any
 from uuid import UUID, uuid4
 import time
 
@@ -224,6 +224,42 @@ async def get_connection(
             )
             raise HTTPException(status_code=404, detail=f"Connection {connection_id} not found")
         
+        # Convert to type-specific configuration
+        specific_config = connection.to_specific_config()
+        
+        # Create response based on connection type
+        response: Dict[str, Any] = {
+            "id": connection.id,
+            "name": connection.name,
+            "type": connection.type
+        }
+        
+        # Add type-specific fields based on connection type
+        if isinstance(specific_config, GrafanaConnectionConfig):
+            response["url"] = specific_config.url
+            response["api_key"] = "********" if specific_config.api_key else ""
+        elif isinstance(specific_config, KubernetesConnectionConfig):
+            response["kubeconfig"] = "********" if specific_config.kubeconfig else ""
+            response["context"] = specific_config.context or ""
+        elif isinstance(specific_config, S3ConnectionConfig):
+            response["bucket"] = specific_config.bucket
+            response["region"] = specific_config.region or ""
+            response["aws_access_key_id"] = specific_config.aws_access_key_id or ""
+            response["aws_secret_access_key"] = "********" if specific_config.aws_secret_access_key else ""
+            response["endpoint"] = specific_config.endpoint or ""
+        elif isinstance(specific_config, PostgresConnectionConfig):
+            response["host"] = specific_config.host
+            response["port"] = specific_config.port
+            response["database"] = specific_config.database
+            response["username"] = specific_config.username
+            response["password"] = "********" if specific_config.password else ""
+        elif isinstance(specific_config, GenericConnectionConfig):
+            # For GenericConnectionConfig, include the full config dictionary
+            response["config"] = connection_manager._redact_sensitive_fields(specific_config.config)
+        else:
+            # Ultimate fallback - use the original config
+            response["config"] = connection_manager._redact_sensitive_fields(connection.config)
+        
         process_time = time.time() - start_time
         connection_logger.info(
             "Retrieved connection",
@@ -235,12 +271,7 @@ async def get_connection(
             }
         )
         
-        return {
-            "id": connection.id,
-            "name": connection.name,
-            "type": connection.type,
-            "config": connection_manager._redact_sensitive_fields(connection.config)
-        }
+        return response
     except HTTPException:
         raise
     except Exception as e:
