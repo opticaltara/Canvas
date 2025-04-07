@@ -131,8 +131,6 @@ app = FastAPI(
     title="Sherlog Canvas",
     description="Reactive notebook for software engineering investigations",
     version="0.1.0",
-    # Disable automatic redirects for trailing slashes to prevent 307 redirects
-    redirect_slashes=False
 )
 # logfire.instrument_fastapi(app)
 
