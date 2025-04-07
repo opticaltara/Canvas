@@ -142,43 +142,62 @@ function App() {
   // Create a new connection
   const handleCreateConnection = async (e: React.FormEvent) => {
     e.preventDefault();
+    setIsCreatingConnection(true);
     
-    // Process the connection configuration
-    let connectionConfig: Record<string, string> = {};
-    
-    if (newConnectionType === 'grafana') {
-      connectionConfig = {
-        url: newConnectionConfig.url || '',
-        api_key: newConnectionConfig.api_key || ''
-      };
-    } else if (newConnectionType === 'kubernetes') {
-      connectionConfig = {
-        kubeconfig: newConnectionConfig.kubeconfig || '',
-        context: newConnectionConfig.context || ''
-      };
-    } else if (newConnectionType === 's3') {
-      connectionConfig = {
-        bucket: newConnectionConfig.bucket || '',
-        prefix: newConnectionConfig.prefix || '',
-        region: newConnectionConfig.region || ''
-      };
-    }
-    
-    // Create the connection object
-    const connection = {
-      name: newConnectionName,
-      type: newConnectionType,
-      config: connectionConfig
-    };
-    
-    // Send the connection to the API
     try {
-      const response = await fetch(`${BACKEND_URL}/api/connections`, {
+      let endpoint = `${BACKEND_URL}/api/connections`;
+      let connectionData: any = {};
+      
+      // Use type-specific endpoints and data structures based on connection type
+      if (newConnectionType === 'grafana') {
+        endpoint = `${BACKEND_URL}/api/connections/grafana`;
+        connectionData = {
+          name: newConnectionName,
+          url: newConnectionConfig.url || '',
+          api_key: newConnectionConfig.api_key || ''
+        };
+      } else if (newConnectionType === 'kubernetes') {
+        endpoint = `${BACKEND_URL}/api/connections/kubernetes`;
+        connectionData = {
+          name: newConnectionName,
+          kubeconfig: newConnectionConfig.kubeconfig || '',
+          context: newConnectionConfig.context || ''
+        };
+      } else if (newConnectionType === 's3') {
+        endpoint = `${BACKEND_URL}/api/connections/s3`;
+        connectionData = {
+          name: newConnectionName,
+          bucket: newConnectionConfig.bucket || '',
+          aws_access_key_id: newConnectionConfig.aws_access_key_id || '',
+          aws_secret_access_key: newConnectionConfig.aws_secret_access_key || '',
+          region: newConnectionConfig.region || '',
+          endpoint: newConnectionConfig.endpoint || ''
+        };
+      } else if (newConnectionType === 'postgres') {
+        endpoint = `${BACKEND_URL}/api/connections/postgres`;
+        connectionData = {
+          name: newConnectionName,
+          host: newConnectionConfig.host || '',
+          port: newConnectionConfig.port || '',
+          database: newConnectionConfig.database || '',
+          username: newConnectionConfig.username || '',
+          password: newConnectionConfig.password || ''
+        };
+      } else {
+        // Fallback to generic endpoint with type+config structure
+        connectionData = {
+          name: newConnectionName,
+          type: newConnectionType,
+          config: newConnectionConfig
+        };
+      }
+      
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify(connection)
+        body: JSON.stringify(connectionData)
       });
       
       if (!response.ok) {
@@ -197,6 +216,8 @@ function App() {
     } catch (error) {
       console.error('Error creating connection:', error);
       // TODO: Show error message to user
+    } finally {
+      setIsCreatingConnection(false);
     }
   };
 
@@ -410,6 +431,7 @@ function App() {
                                     <option value="grafana">Grafana</option>
                                     <option value="kubernetes">Kubernetes</option>
                                     <option value="s3">S3</option>
+                                    <option value="postgres">PostgreSQL</option>
                                   </select>
                                 </div>
                                 
@@ -525,6 +547,148 @@ function App() {
                                         value={newConnectionConfig.namespace || ''}
                                         onChange={(e) => setNewConnectionConfig({...newConnectionConfig, namespace: e.target.value})}
                                         placeholder="default"
+                                      />
+                                    </div>
+                                  </div>
+                                )}
+                                
+                                {newConnectionType === 's3' && (
+                                  <div className="space-y-4 border p-3 rounded-md">
+                                    <div className="space-y-2">
+                                      <label htmlFor="bucket" className="text-sm font-medium">
+                                        S3 Bucket Name
+                                      </label>
+                                      <Input
+                                        id="bucket"
+                                        value={newConnectionConfig.bucket || ''}
+                                        onChange={(e) => setNewConnectionConfig({...newConnectionConfig, bucket: e.target.value})}
+                                        placeholder="my-bucket"
+                                        required
+                                      />
+                                    </div>
+                                    
+                                    <div className="space-y-2">
+                                      <label htmlFor="region" className="text-sm font-medium">
+                                        AWS Region (Optional)
+                                      </label>
+                                      <Input
+                                        id="region"
+                                        value={newConnectionConfig.region || ''}
+                                        onChange={(e) => setNewConnectionConfig({...newConnectionConfig, region: e.target.value})}
+                                        placeholder="us-east-1"
+                                      />
+                                    </div>
+                                    
+                                    <div className="space-y-2">
+                                      <label htmlFor="aws_access_key_id" className="text-sm font-medium">
+                                        AWS Access Key ID (Optional)
+                                      </label>
+                                      <Input
+                                        id="aws_access_key_id"
+                                        value={newConnectionConfig.aws_access_key_id || ''}
+                                        onChange={(e) => setNewConnectionConfig({...newConnectionConfig, aws_access_key_id: e.target.value})}
+                                        placeholder="AKIAIOSFODNN7EXAMPLE"
+                                      />
+                                      <p className="text-xs text-muted-foreground">
+                                        Leave blank to use environment credentials
+                                      </p>
+                                    </div>
+                                    
+                                    <div className="space-y-2">
+                                      <label htmlFor="aws_secret_access_key" className="text-sm font-medium">
+                                        AWS Secret Access Key (Optional)
+                                      </label>
+                                      <Input
+                                        id="aws_secret_access_key"
+                                        type="password"
+                                        value={newConnectionConfig.aws_secret_access_key || ''}
+                                        onChange={(e) => setNewConnectionConfig({...newConnectionConfig, aws_secret_access_key: e.target.value})}
+                                        placeholder="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+                                      />
+                                    </div>
+                                    
+                                    <div className="space-y-2">
+                                      <label htmlFor="endpoint" className="text-sm font-medium">
+                                        Custom Endpoint URL (Optional)
+                                      </label>
+                                      <Input
+                                        id="endpoint"
+                                        value={newConnectionConfig.endpoint || ''}
+                                        onChange={(e) => setNewConnectionConfig({...newConnectionConfig, endpoint: e.target.value})}
+                                        placeholder="https://s3.example.com"
+                                      />
+                                      <p className="text-xs text-muted-foreground">
+                                        For S3-compatible storage like MinIO or custom endpoints
+                                      </p>
+                                    </div>
+                                  </div>
+                                )}
+                                
+                                {newConnectionType === 'postgres' && (
+                                  <div className="space-y-4 border p-3 rounded-md">
+                                    <div className="space-y-2">
+                                      <label htmlFor="host" className="text-sm font-medium">
+                                        Host
+                                      </label>
+                                      <Input
+                                        id="host"
+                                        value={newConnectionConfig.host || ''}
+                                        onChange={(e) => setNewConnectionConfig({...newConnectionConfig, host: e.target.value})}
+                                        placeholder="localhost"
+                                        required
+                                      />
+                                    </div>
+                                    
+                                    <div className="space-y-2">
+                                      <label htmlFor="port" className="text-sm font-medium">
+                                        Port
+                                      </label>
+                                      <Input
+                                        id="port"
+                                        value={newConnectionConfig.port || ''}
+                                        onChange={(e) => setNewConnectionConfig({...newConnectionConfig, port: e.target.value})}
+                                        placeholder="5432"
+                                        required
+                                      />
+                                    </div>
+                                    
+                                    <div className="space-y-2">
+                                      <label htmlFor="database" className="text-sm font-medium">
+                                        Database
+                                      </label>
+                                      <Input
+                                        id="database"
+                                        value={newConnectionConfig.database || ''}
+                                        onChange={(e) => setNewConnectionConfig({...newConnectionConfig, database: e.target.value})}
+                                        placeholder="postgres"
+                                        required
+                                      />
+                                    </div>
+                                    
+                                    <div className="space-y-2">
+                                      <label htmlFor="username" className="text-sm font-medium">
+                                        Username
+                                      </label>
+                                      <Input
+                                        id="username"
+                                        value={newConnectionConfig.username || ''}
+                                        onChange={(e) => setNewConnectionConfig({...newConnectionConfig, username: e.target.value})}
+                                        placeholder="postgres"
+                                        required
+                                      />
+                                    </div>
+                                    
+                                    <div className="space-y-2">
+                                      <label htmlFor="password" className="text-sm font-medium">
+                                        Password
+                                      </label>
+                                      <Input
+                                        id="password"
+                                        type="password"
+                                        value={newConnectionConfig.password || ''}
+                                        onChange={(e) => setNewConnectionConfig({...newConnectionConfig, password: e.target.value})}
+                                        placeholder="Enter password"
+                                        required
                                       />
                                     </div>
                                   </div>

@@ -2,14 +2,22 @@
 Connection API Endpoints
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 from uuid import UUID, uuid4
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from backend.services.connection_manager import ConnectionManager, get_connection_manager
+from backend.services.connection_manager import (
+    ConnectionManager, 
+    get_connection_manager,
+    GrafanaConnectionConfig,
+    KubernetesConnectionConfig,
+    S3ConnectionConfig,
+    PostgresConnectionConfig,
+    GenericConnectionConfig
+)
 import logging
 
 # Initialize logger
@@ -58,6 +66,38 @@ class ConnectionRequest(BaseModel):
     config: Dict[str, str]
 
 
+# Type-specific connection creation models
+class GrafanaConnectionCreate(BaseModel):
+    """Grafana connection creation parameters"""
+    name: str
+    url: str
+    api_key: str
+
+class KubernetesConnectionCreate(BaseModel):
+    """Kubernetes connection creation parameters"""
+    name: str
+    kubeconfig: str
+    context: Optional[str] = None
+
+class PostgresConnectionCreate(BaseModel):
+    """PostgreSQL connection creation parameters"""
+    name: str
+    host: str
+    port: str
+    database: str
+    username: str
+    password: str
+
+class S3ConnectionCreate(BaseModel):
+    """S3 connection creation parameters"""
+    name: str
+    bucket: str
+    aws_access_key_id: Optional[str] = None
+    aws_secret_access_key: Optional[str] = None
+    region: Optional[str] = None
+    endpoint: Optional[str] = None
+
+# Generic fallback for connection create
 class ConnectionCreate(BaseModel):
     """Parameters for creating a connection"""
     name: str
@@ -218,13 +258,312 @@ async def get_connection(
         raise
 
 
+@router.post("/grafana")
+async def create_grafana_connection(
+    connection_data: GrafanaConnectionCreate,
+    connection_manager: ConnectionManager = Depends(get_connection_manager)
+) -> Dict:
+    """
+    Create a new Grafana connection
+    
+    Args:
+        connection_data: Parameters for creating the Grafana connection
+        
+    Returns:
+        The created connection information
+    """
+    start_time = time.time()
+    try:
+        # Convert to the generic format used by connection manager
+        config = {
+            "url": connection_data.url,
+            "api_key": connection_data.api_key
+        }
+        
+        connection = await connection_manager.create_connection(
+            name=connection_data.name,
+            type="grafana",
+            config=config
+        )
+        
+        process_time = time.time() - start_time
+        connection_logger.info(
+            "Created Grafana connection",
+            extra={
+                'connection_id': connection.id,
+                'connection_name': connection.name,
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
+        
+        return {
+            "id": connection.id,
+            "name": connection.name,
+            "type": connection.type,
+            "config": connection_manager._redact_sensitive_fields(connection.config)
+        }
+    except ValueError as e:
+        process_time = time.time() - start_time
+        connection_logger.error(
+            "Error creating Grafana connection",
+            extra={
+                'connection_name': connection_data.name,
+                'error': str(e),
+                'error_type': type(e).__name__,
+                'processing_time_ms': round(process_time * 1000, 2)
+            },
+            exc_info=True
+        )
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        process_time = time.time() - start_time
+        connection_logger.error(
+            "Error creating Grafana connection",
+            extra={
+                'connection_name': connection_data.name,
+                'error': str(e),
+                'error_type': type(e).__name__,
+                'processing_time_ms': round(process_time * 1000, 2)
+            },
+            exc_info=True
+        )
+        raise
+
+@router.post("/kubernetes")
+async def create_kubernetes_connection(
+    connection_data: KubernetesConnectionCreate,
+    connection_manager: ConnectionManager = Depends(get_connection_manager)
+) -> Dict:
+    """
+    Create a new Kubernetes connection
+    
+    Args:
+        connection_data: Parameters for creating the Kubernetes connection
+        
+    Returns:
+        The created connection information
+    """
+    start_time = time.time()
+    try:
+        # Convert to the generic format used by connection manager
+        config = {
+            "kubeconfig": connection_data.kubeconfig
+        }
+        
+        if connection_data.context:
+            config["context"] = connection_data.context
+        
+        connection = await connection_manager.create_connection(
+            name=connection_data.name,
+            type="kubernetes",
+            config=config
+        )
+        
+        process_time = time.time() - start_time
+        connection_logger.info(
+            "Created Kubernetes connection",
+            extra={
+                'connection_id': connection.id,
+                'connection_name': connection.name,
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
+        
+        return {
+            "id": connection.id,
+            "name": connection.name,
+            "type": connection.type,
+            "config": connection_manager._redact_sensitive_fields(connection.config)
+        }
+    except ValueError as e:
+        process_time = time.time() - start_time
+        connection_logger.error(
+            "Error creating Kubernetes connection",
+            extra={
+                'connection_name': connection_data.name,
+                'error': str(e),
+                'error_type': type(e).__name__,
+                'processing_time_ms': round(process_time * 1000, 2)
+            },
+            exc_info=True
+        )
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        process_time = time.time() - start_time
+        connection_logger.error(
+            "Error creating Kubernetes connection",
+            extra={
+                'connection_name': connection_data.name,
+                'error': str(e),
+                'error_type': type(e).__name__,
+                'processing_time_ms': round(process_time * 1000, 2)
+            },
+            exc_info=True
+        )
+        raise
+
+@router.post("/postgres")
+async def create_postgres_connection(
+    connection_data: PostgresConnectionCreate,
+    connection_manager: ConnectionManager = Depends(get_connection_manager)
+) -> Dict:
+    """
+    Create a new PostgreSQL connection
+    
+    Args:
+        connection_data: Parameters for creating the PostgreSQL connection
+        
+    Returns:
+        The created connection information
+    """
+    start_time = time.time()
+    try:
+        # Convert to the generic format used by connection manager
+        config = {
+            "host": connection_data.host,
+            "port": connection_data.port,
+            "database": connection_data.database,
+            "username": connection_data.username,
+            "password": connection_data.password
+        }
+        
+        connection = await connection_manager.create_connection(
+            name=connection_data.name,
+            type="postgres",
+            config=config
+        )
+        
+        process_time = time.time() - start_time
+        connection_logger.info(
+            "Created PostgreSQL connection",
+            extra={
+                'connection_id': connection.id,
+                'connection_name': connection.name,
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
+        
+        return {
+            "id": connection.id,
+            "name": connection.name,
+            "type": connection.type,
+            "config": connection_manager._redact_sensitive_fields(connection.config)
+        }
+    except ValueError as e:
+        process_time = time.time() - start_time
+        connection_logger.error(
+            "Error creating PostgreSQL connection",
+            extra={
+                'connection_name': connection_data.name,
+                'error': str(e),
+                'error_type': type(e).__name__,
+                'processing_time_ms': round(process_time * 1000, 2)
+            },
+            exc_info=True
+        )
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        process_time = time.time() - start_time
+        connection_logger.error(
+            "Error creating PostgreSQL connection",
+            extra={
+                'connection_name': connection_data.name,
+                'error': str(e),
+                'error_type': type(e).__name__,
+                'processing_time_ms': round(process_time * 1000, 2)
+            },
+            exc_info=True
+        )
+        raise
+
+@router.post("/s3")
+async def create_s3_connection(
+    connection_data: S3ConnectionCreate,
+    connection_manager: ConnectionManager = Depends(get_connection_manager)
+) -> Dict:
+    """
+    Create a new S3 connection
+    
+    Args:
+        connection_data: Parameters for creating the S3 connection
+        
+    Returns:
+        The created connection information
+    """
+    start_time = time.time()
+    try:
+        # Convert to the generic format used by connection manager
+        config = {
+            "bucket": connection_data.bucket
+        }
+        
+        # Add optional fields if they exist
+        if connection_data.aws_access_key_id:
+            config["aws_access_key_id"] = connection_data.aws_access_key_id
+        if connection_data.aws_secret_access_key:
+            config["aws_secret_access_key"] = connection_data.aws_secret_access_key
+        if connection_data.region:
+            config["region"] = connection_data.region
+        if connection_data.endpoint:
+            config["endpoint"] = connection_data.endpoint
+        
+        connection = await connection_manager.create_connection(
+            name=connection_data.name,
+            type="s3",
+            config=config
+        )
+        
+        process_time = time.time() - start_time
+        connection_logger.info(
+            "Created S3 connection",
+            extra={
+                'connection_id': connection.id,
+                'connection_name': connection.name,
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
+        
+        return {
+            "id": connection.id,
+            "name": connection.name,
+            "type": connection.type,
+            "config": connection_manager._redact_sensitive_fields(connection.config)
+        }
+    except ValueError as e:
+        process_time = time.time() - start_time
+        connection_logger.error(
+            "Error creating S3 connection",
+            extra={
+                'connection_name': connection_data.name,
+                'error': str(e),
+                'error_type': type(e).__name__,
+                'processing_time_ms': round(process_time * 1000, 2)
+            },
+            exc_info=True
+        )
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        process_time = time.time() - start_time
+        connection_logger.error(
+            "Error creating S3 connection",
+            extra={
+                'connection_name': connection_data.name,
+                'error': str(e),
+                'error_type': type(e).__name__,
+                'processing_time_ms': round(process_time * 1000, 2)
+            },
+            exc_info=True
+        )
+        raise
+
+# Keep the generic endpoint for backward compatibility and other connection types
 @router.post("/")
 async def create_connection(
     connection_data: ConnectionCreate,
     connection_manager: ConnectionManager = Depends(get_connection_manager)
 ) -> Dict:
     """
-    Create a new connection
+    Create a new connection (generic method)
     
     Args:
         connection_data: Parameters for creating the connection

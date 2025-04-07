@@ -4,11 +4,10 @@ Connection Manager Service
 Manages connections to data sources via MCP servers
 """
 
-import asyncio
 import json
 import logging
 import os
-from typing import Dict, List, Optional, Type, Tuple
+from typing import Dict, List, Optional, Type, Tuple, Union, Any
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -30,13 +29,178 @@ class CorrelationIdFilter(logging.Filter):
 # Add the filter to our logger
 logger.addFilter(CorrelationIdFilter())
 
+# Base connection configuration model
+class BaseConnectionConfig(BaseModel):
+    """Base connection configuration"""
+    id: str
+    name: str
+    type: str
+    
+class GrafanaConnectionConfig(BaseConnectionConfig):
+    """Grafana connection configuration"""
+    type: str = "grafana"
+    url: str
+    api_key: str
+    
+class KubernetesConnectionConfig(BaseConnectionConfig):
+    """Kubernetes connection configuration"""
+    type: str = "kubernetes"
+    kubeconfig: str
+    context: Optional[str] = None
+    
+class S3ConnectionConfig(BaseConnectionConfig):
+    """S3 connection configuration"""
+    type: str = "s3"
+    bucket: str
+    aws_access_key_id: Optional[str] = None
+    aws_secret_access_key: Optional[str] = None
+    region: Optional[str] = None
+    endpoint: Optional[str] = None
+    
+class PostgresConnectionConfig(BaseConnectionConfig):
+    """PostgreSQL connection configuration"""
+    type: str = "postgres"
+    host: str
+    port: str
+    database: str
+    username: str
+    password: str
+    
+# Generic fallback for other types
+class GenericConnectionConfig(BaseConnectionConfig):
+    """Generic connection configuration"""
+    config: Dict[str, str] = Field(default_factory=dict)
+
+# Main connection config that can be any specific type
 class ConnectionConfig(BaseModel):
     """Connection configuration"""
     id: str
     name: str
     type: str  # "grafana", "sql", "prometheus", "loki", "s3", "kubernetes", etc.
-    config: Dict[str, str] = Field(default_factory=dict)
-
+    config: Dict[str, Any] = Field(default_factory=dict)
+    
+    def to_specific_config(self) -> Union[
+        GrafanaConnectionConfig, 
+        KubernetesConnectionConfig,
+        S3ConnectionConfig,
+        PostgresConnectionConfig,
+        GenericConnectionConfig
+    ]:
+        """Convert to a type-specific configuration"""
+        if self.type == "grafana":
+            return GrafanaConnectionConfig(
+                id=self.id,
+                name=self.name,
+                url=self.config.get("url", ""),
+                api_key=self.config.get("api_key", "")
+            )
+        elif self.type == "kubernetes":
+            return KubernetesConnectionConfig(
+                id=self.id,
+                name=self.name,
+                kubeconfig=self.config.get("kubeconfig", ""),
+                context=self.config.get("context")
+            )
+        elif self.type == "s3":
+            return S3ConnectionConfig(
+                id=self.id,
+                name=self.name,
+                bucket=self.config.get("bucket", ""),
+                aws_access_key_id=self.config.get("aws_access_key_id"),
+                aws_secret_access_key=self.config.get("aws_secret_access_key"),
+                region=self.config.get("region"),
+                endpoint=self.config.get("endpoint")
+            )
+        elif self.type == "postgres":
+            return PostgresConnectionConfig(
+                id=self.id,
+                name=self.name,
+                host=self.config.get("host", ""),
+                port=self.config.get("port", ""),
+                database=self.config.get("database", ""),
+                username=self.config.get("username", ""),
+                password=self.config.get("password", "")
+            )
+        else:
+            return GenericConnectionConfig(
+                id=self.id,
+                name=self.name,
+                type=self.type,
+                config=self.config
+            )
+    
+    @classmethod
+    def from_specific_config(cls, config: Union[
+        GrafanaConnectionConfig, 
+        KubernetesConnectionConfig,
+        S3ConnectionConfig,
+        PostgresConnectionConfig,
+        GenericConnectionConfig
+    ]) -> 'ConnectionConfig':
+        """Create from a type-specific configuration"""
+        if isinstance(config, GrafanaConnectionConfig):
+            return cls(
+                id=config.id,
+                name=config.name,
+                type=config.type,
+                config={
+                    "url": config.url,
+                    "api_key": config.api_key
+                }
+            )
+        elif isinstance(config, KubernetesConnectionConfig):
+            return cls(
+                id=config.id,
+                name=config.name,
+                type=config.type,
+                config={
+                    "kubeconfig": config.kubeconfig,
+                    "context": config.context if config.context else ""
+                }
+            )
+        elif isinstance(config, S3ConnectionConfig):
+            config_dict = {
+                "bucket": config.bucket
+            }
+            
+            # Add optional fields if they exist
+            if config.aws_access_key_id:
+                config_dict["aws_access_key_id"] = config.aws_access_key_id
+            if config.aws_secret_access_key:
+                config_dict["aws_secret_access_key"] = config.aws_secret_access_key
+            if config.region:
+                config_dict["region"] = config.region
+            if config.endpoint:
+                config_dict["endpoint"] = config.endpoint
+                
+            return cls(
+                id=config.id,
+                name=config.name,
+                type=config.type,
+                config=config_dict
+            )
+        elif isinstance(config, PostgresConnectionConfig):
+            return cls(
+                id=config.id,
+                name=config.name,
+                type=config.type,
+                config={
+                    "host": config.host,
+                    "port": config.port,
+                    "database": config.database,
+                    "username": config.username,
+                    "password": config.password
+                }
+            )
+        elif isinstance(config, GenericConnectionConfig):
+            return cls(
+                id=config.id,
+                name=config.name,
+                type=config.type,
+                config=config.config
+            )
+        else:
+            raise ValueError(f"Unsupported config type: {type(config)}")
 
 # Singleton instance
 _connection_manager_instance = None
