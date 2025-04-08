@@ -245,15 +245,9 @@ class ConnectionManager:
         logger.info("ConnectionManager closed successfully", extra={'correlation_id': correlation_id})
     
     def get_connection(self, connection_id: str) -> Optional[ConnectionConfig]:
-        """
-        Get a connection by ID
-        
-        Args:
-            connection_id: The ID of the connection
-            
-        Returns:
-            The connection, or None if not found
-        """
+        """Get a connection by ID"""
+        logger.info(f"Getting connection {connection_id}")
+        logger.info(f"Connection ids: {self.connections.keys()}")
         return self.connections.get(connection_id)
     
     def get_connections_by_type(self, connection_type: str) -> List[ConnectionConfig]:
