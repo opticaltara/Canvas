@@ -34,8 +34,15 @@ class Settings(BaseSettings):
     notebook_s3_prefix: str = "notebooks"
     
     # Connection storage settings
-    connection_storage_type: str = "file"  # Options: file, env, none
+    connection_storage_type: str = "file"  # Options: file, env, db, none
     connection_file_path: str = "./data/connections.json"
+    
+    # Database settings
+    db_host: str = "localhost"
+    db_port: int = 5432
+    db_name: str = "sherlog"
+    db_user: str = "sherlog"
+    db_password: str = "sherlog"
     
     # AWS settings (for S3 storage)
     aws_access_key_id: str = Field(default="", validation_alias="AWS_ACCESS_KEY_ID")
@@ -53,6 +60,11 @@ class Settings(BaseSettings):
         env_prefix = "SHERLOG_"
         env_file = ".env"
         env_file_encoding = "utf-8"
+        
+    @property
+    def database_url(self) -> str:
+        """Get the database connection URL"""
+        return f"postgresql://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
 
 
 @lru_cache()

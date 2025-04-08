@@ -7,13 +7,15 @@ Manages connections to data sources via MCP servers
 import json
 import logging
 import os
-from typing import Dict, List, Optional, Type, Tuple, Union, Any
-from uuid import UUID, uuid4
+from typing import Dict, List, Optional, Tuple, Union, Any
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 import aiofiles
 
 from backend.config import get_settings
+from backend.db.database import get_db_session
+from backend.db.repositories import ConnectionRepository
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -302,6 +304,12 @@ class ConnectionManager:
                 if connection.type == connection_type and connection.name == default_conn_name:
                     return connection
         
+        # Otherwise, check if we have a default connection stored
+        if connection_type in self.default_connections:
+            conn_id = self.default_connections[connection_type]
+            if conn_id in self.connections:
+                return self.connections[conn_id]
+        
         # Otherwise, try to return the first connection of the type
         for connection in self.connections.values():
             if connection.type == connection_type:
@@ -327,36 +335,38 @@ class ConnectionManager:
         """
         correlation_id = str(uuid4())
         logger.info(f"Creating new {type} connection: {name}", extra={'correlation_id': correlation_id})
-        # Create a unique ID for the connection
-        connection_id = str(uuid4())
-        
-        # Create the connection config
-        connection = ConnectionConfig(
-            id=connection_id,
-            name=name,
-            type=type,
-            config=config
-        )
         
         # Validate the connection
-        logger.debug(f"Validating connection {name} ({connection_id})", extra={'correlation_id': correlation_id})
-        is_valid, message = self._validate_and_prepare_connection(connection_id, type, config)
+        logger.debug(f"Validating connection {name}", extra={'correlation_id': correlation_id})
+        is_valid, message = self._validate_and_prepare_connection(None, type, config)
         if not is_valid:
-            logger.error(f"Connection validation failed for {name} ({connection_id}): {message}", extra={'correlation_id': correlation_id})
+            logger.error(f"Connection validation failed for {name}: {message}", extra={'correlation_id': correlation_id})
             raise ValueError(message)
         
-        # Add to connections
-        self.connections[connection_id] = connection
+        # Create the connection in the database
+        async with get_db_session() as session:
+            repo = ConnectionRepository(session)
+            db_connection = await repo.create(name, type, config)
+            
+            # Convert to ConnectionConfig model
+            connection_dict = db_connection.to_dict()
+            connection = ConnectionConfig(
+                id=connection_dict["id"],
+                name=connection_dict["name"],
+                type=connection_dict["type"],
+                config=connection_dict["config"]
+            )
+        
+        # Add to in-memory connections
+        self.connections[connection.id] = connection
         
         # If this is the first connection for this type, set it as default
         if not self.get_default_connection(type):
-            logger.info(f"Setting {name} ({connection_id}) as default {type} connection", extra={'correlation_id': correlation_id})
-            self.default_connections[type] = connection_id
+            logger.info(f"Setting {name} ({connection.id}) as default {type} connection", extra={'correlation_id': correlation_id})
+            self.default_connections[type] = connection.id
+            await self.set_default_connection(connection.id)
         
-        # Save connections
-        await self._save_connections()
-        
-        logger.info(f"Successfully created connection {name} ({connection_id})", extra={'correlation_id': correlation_id})
+        logger.info(f"Successfully created connection {name} ({connection.id})", extra={'correlation_id': correlation_id})
         return connection
     
     async def update_connection(self, connection_id: str, name: str, config: Dict) -> ConnectionConfig:
@@ -380,14 +390,6 @@ class ConnectionManager:
             logger.error(f"Connection not found for update: {connection_id}")
             raise ValueError(f"Connection not found: {connection_id}")
         
-        # Update the connection
-        updated_connection = ConnectionConfig(
-            id=connection_id,
-            name=name,
-            type=connection.type,
-            config=config
-        )
-        
         # Validate the connection
         logger.debug(f"Validating updated connection {name} ({connection_id})")
         is_valid, message = self._validate_and_prepare_connection(connection_id, connection.type, config)
@@ -395,11 +397,25 @@ class ConnectionManager:
             logger.error(f"Connection validation failed for update {name} ({connection_id}): {message}")
             raise ValueError(message)
         
-        # Update the connection
-        self.connections[connection_id] = updated_connection
+        # Update the connection in the database
+        async with get_db_session() as session:
+            repo = ConnectionRepository(session)
+            db_connection = await repo.update(connection_id, name, config)
+            if not db_connection:
+                logger.error(f"Failed to update connection {connection_id} in database")
+                raise ValueError(f"Failed to update connection: {connection_id}")
+            
+            # Convert to ConnectionConfig model
+            connection_dict = db_connection.to_dict()
+            updated_connection = ConnectionConfig(
+                id=connection_dict["id"],
+                name=connection_dict["name"],
+                type=connection_dict["type"],
+                config=connection_dict["config"]
+            )
         
-        # Save connections
-        await self._save_connections()
+        # Update the in-memory connection
+        self.connections[connection_id] = updated_connection
         
         logger.info(f"Successfully updated connection {name} ({connection_id})")
         return updated_connection
@@ -420,8 +436,17 @@ class ConnectionManager:
             logger.error(f"Connection not found for deletion: {connection_id}")
             raise ValueError(f"Connection not found: {connection_id}")
         
-        # Remove the connection
-        del self.connections[connection_id]
+        # Delete from database
+        async with get_db_session() as session:
+            repo = ConnectionRepository(session)
+            success = await repo.delete(connection_id)
+            if not success:
+                logger.error(f"Failed to delete connection {connection_id} from database")
+                raise ValueError(f"Failed to delete connection: {connection_id}")
+        
+        # Remove from in-memory connections
+        if connection_id in self.connections:
+            del self.connections[connection_id]
         
         # Update default connections if needed
         for conn_type, default_id in list(self.default_connections.items()):
@@ -433,12 +458,12 @@ class ConnectionManager:
                     new_default = connections[0].id
                     logger.info(f"Setting new default connection for type {conn_type}: {new_default}")
                     self.default_connections[conn_type] = new_default
+                    await self.set_default_connection(new_default)
                 else:
                     logger.info(f"No remaining connections for type {conn_type}, removing default")
-                    del self.default_connections[conn_type]
+                    if conn_type in self.default_connections:
+                        del self.default_connections[conn_type]
         
-        # Save connections
-        await self._save_connections()
         logger.info(f"Successfully deleted connection {connection_id}")
     
     async def set_default_connection(self, connection_id: str) -> None:
@@ -455,11 +480,13 @@ class ConnectionManager:
         if not connection:
             raise ValueError(f"Connection not found: {connection_id}")
         
-        # Set as default
+        # Set as default in memory
         self.default_connections[connection.type] = connection_id
         
-        # Save connections
-        await self._save_connections()
+        # Set as default in database
+        async with get_db_session() as session:
+            repo = ConnectionRepository(session)
+            await repo.set_default_connection(connection.type, connection_id)
     
     async def test_connection(self, connection_type: str, config: Dict) -> bool:
         """
@@ -611,28 +638,12 @@ class ConnectionManager:
         
         return redacted_config
     
-    async def _save_connections(self) -> None:
-        """Save connections to storage"""
-        correlation_id = str(uuid4())
-        try:
-            # Prepare connection data for saving
-            data = {
-                "connections": {conn_id: conn.dict() for conn_id, conn in self.connections.items()},
-                "defaults": self.default_connections
-            }
-            
-            await self._save_connections_to_file(data)
-            logger.info("Successfully saved connections", extra={'correlation_id': correlation_id})
-        except Exception as e:
-            logger.error(f"Error saving connections: {str(e)}", extra={'correlation_id': correlation_id})
-            raise
-    
     async def _load_connections(self) -> None:
         """Load connections from storage"""
         correlation_id = str(uuid4())
         try:
             # Check storage strategy from configuration
-            storage_type = os.environ.get("SHERLOG_CONNECTION_STORAGE", "file").lower()
+            storage_type = self.settings.connection_storage_type.lower()
             logger.info(f"Loading connections from storage type: {storage_type}", extra={'correlation_id': correlation_id})
             
             if storage_type == "file":
@@ -653,11 +664,37 @@ class ConnectionManager:
                         for conn_id, conn_data in connection_data.get("connections", {}).items()
                     }
                     self.default_connections = connection_data.get("defaults", {})
+            elif storage_type == "db":
+                # Load from database
+                await self._load_connections_from_db()
                     
             logger.info(f"Successfully loaded {len(self.connections)} connections", extra={'correlation_id': correlation_id})
         except Exception as e:
             logger.error(f"Error loading connections: {str(e)}", extra={'correlation_id': correlation_id})
             raise
+    
+    async def _load_connections_from_db(self) -> None:
+        """Load connections from database"""
+        async with get_db_session() as session:
+            repo = ConnectionRepository(session)
+            
+            # Load all connections
+            db_connections = await repo.get_all()
+            self.connections = {
+                conn.to_dict()["id"]: ConnectionConfig(
+                    id=conn.to_dict()["id"],
+                    name=conn.to_dict()["name"],
+                    type=conn.to_dict()["type"],
+                    config=conn.to_dict()["config"]
+                )
+                for conn in db_connections
+            }
+            
+            # Load default connections
+            for conn_type in set(conn.to_dict()["type"] for conn in db_connections):
+                default_conn = await repo.get_default_connection(conn_type)
+                if default_conn:
+                    self.default_connections[conn_type] = default_conn.to_dict()["id"]
     
     async def _save_connections_to_file(self, data: Dict) -> None:
         """Save connections to a local file"""
