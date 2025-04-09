@@ -247,13 +247,40 @@ class ConnectionManager:
         
         logger.info("ConnectionManager closed successfully", extra={'correlation_id': correlation_id})
     
-    def get_connection(self, connection_id: str) -> Optional[ConnectionConfig]:
+    async def get_connection(self, connection_id: str) -> Optional[ConnectionConfig]:
         """Get a connection by ID"""
         logger.info(f"Getting connection {connection_id}")
-        logger.info(f"Connection ids: {self.connections.keys()}")
-        return self.connections.get(connection_id)
+        
+        # First check the in-memory cache
+        if connection_id in self.connections:
+            return self.connections[connection_id]
+            
+        # If not found, query the database
+        try:
+            async with get_db_session() as session:
+                repo = ConnectionRepository(session)
+                db_connection = await repo.get_by_id(connection_id)
+                
+                if db_connection:
+                    # Convert to ConnectionConfig and cache it
+                    connection_dict = db_connection.to_dict()
+                    connection = ConnectionConfig(
+                        id=connection_dict["id"],
+                        name=connection_dict["name"],
+                        type=connection_dict["type"],
+                        config=connection_dict["config"]
+                    )
+                    # Update the cache
+                    self.connections[connection_id] = connection
+                    return connection
+                    
+            # Not found in database either
+            return None
+        except Exception as e:
+            logger.error(f"Error retrieving connection from database: {str(e)}")
+            return None
     
-    def get_connections_by_type(self, connection_type: str) -> List[ConnectionConfig]:
+    async def get_connections_by_type(self, connection_type: str) -> List[ConnectionConfig]:
         """
         Get all connections for a specific type
         
@@ -263,29 +290,76 @@ class ConnectionManager:
         Returns:
             List of connections for the type
         """
-        return [
-            conn for conn in self.connections.values()
-            if conn.type == connection_type
-        ]
+        try:
+            # Query the database directly
+            async with get_db_session() as session:
+                repo = ConnectionRepository(session)
+                db_connections = await repo.get_by_type(connection_type)
+                
+                connections = []
+                for db_conn in db_connections:
+                    conn_dict = db_conn.to_dict()
+                    connection = ConnectionConfig(
+                        id=conn_dict["id"],
+                        name=conn_dict["name"],
+                        type=conn_dict["type"],
+                        config=conn_dict["config"]
+                    )
+                    # Update cache
+                    self.connections[conn_dict["id"]] = connection
+                    connections.append(connection)
+                
+                return connections
+        except Exception as e:
+            logger.error(f"Error retrieving connections by type from database: {str(e)}")
+            return []
     
-    def get_all_connections(self) -> List[Dict]:
+    async def get_all_connections(self) -> List[Dict]:
         """
         Get all connections (with sensitive fields redacted)
         
         Returns:
             List of connection information
         """
-        return [
-            {
-                "id": conn.id,
-                "name": conn.name,
-                "type": conn.type,
-                "config": self._redact_sensitive_fields(conn.config)
-            }
-            for conn in self.connections.values()
-        ]
+        try:
+            # Query the database directly
+            async with get_db_session() as session:
+                repo = ConnectionRepository(session)
+                db_connections = await repo.get_all()
+                
+                # Update cache with any new connections
+                for db_conn in db_connections:
+                    conn_dict = db_conn.to_dict()
+                    self.connections[conn_dict["id"]] = ConnectionConfig(
+                        id=conn_dict["id"],
+                        name=conn_dict["name"],
+                        type=conn_dict["type"],
+                        config=conn_dict["config"]
+                    )
+                
+                return [
+                    {
+                        "id": conn.to_dict()["id"],
+                        "name": conn.to_dict()["name"],
+                        "type": conn.to_dict()["type"],
+                        "config": self._redact_sensitive_fields(conn.to_dict()["config"])
+                    }
+                    for conn in db_connections
+                ]
+        except Exception as e:
+            logger.error(f"Error retrieving all connections from database: {str(e)}")
+            # Fallback to in-memory cache
+            return [
+                {
+                    "id": conn.id,
+                    "name": conn.name,
+                    "type": conn.type,
+                    "config": self._redact_sensitive_fields(conn.config)
+                }
+                for conn in self.connections.values()
+            ]
     
-    def get_default_connection(self, connection_type: str) -> Optional[ConnectionConfig]:
+    async def get_default_connection(self, connection_type: str) -> Optional[ConnectionConfig]:
         """
         Get the default connection for a given type
         
@@ -299,23 +373,54 @@ class ConnectionManager:
         env_var_name = f"SHERLOG_CONNECTION_DEFAULT_{connection_type.upper()}"
         default_conn_name = os.environ.get(env_var_name)
         
-        # If we have a default connection name, try to get it
+        # If we have a default connection name from env vars, try to get it
         if default_conn_name:
-            for connection in self.connections.values():
-                if connection.type == connection_type and connection.name == default_conn_name:
-                    return connection
+            try:
+                async with get_db_session() as session:
+                    repo = ConnectionRepository(session)
+                    db_connection = await repo.get_by_name_and_type(default_conn_name, connection_type)
+                    
+                    if db_connection:
+                        conn_dict = db_connection.to_dict()
+                        connection = ConnectionConfig(
+                            id=conn_dict["id"],
+                            name=conn_dict["name"],
+                            type=conn_dict["type"],
+                            config=conn_dict["config"]
+                        )
+                        # Update cache
+                        self.connections[conn_dict["id"]] = connection
+                        return connection
+            except Exception as e:
+                logger.error(f"Error finding default connection by name: {str(e)}")
         
-        # Otherwise, check if we have a default connection stored
-        if connection_type in self.default_connections:
-            conn_id = self.default_connections[connection_type]
-            if conn_id in self.connections:
-                return self.connections[conn_id]
-        
-        # Otherwise, try to return the first connection of the type
-        for connection in self.connections.values():
-            if connection.type == connection_type:
-                return connection
+        # Otherwise, check if we have a default connection stored in db
+        try:
+            async with get_db_session() as session:
+                repo = ConnectionRepository(session)
+                db_connection = await repo.get_default_connection(connection_type)
                 
+                if db_connection:
+                    conn_dict = db_connection.to_dict()
+                    connection = ConnectionConfig(
+                        id=conn_dict["id"],
+                        name=conn_dict["name"],
+                        type=conn_dict["type"],
+                        config=conn_dict["config"]
+                    )
+                    # Update cache
+                    self.connections[conn_dict["id"]] = connection
+                    # Update in-memory default tracking
+                    self.default_connections[connection_type] = conn_dict["id"]
+                    return connection
+                    
+                # If still not found, try to return the first connection of the type
+                connections = await self.get_connections_by_type(connection_type)
+                if connections:
+                    return connections[0]
+        except Exception as e:
+            logger.error(f"Error retrieving default connection from database: {str(e)}")
+        
         # No connection found
         return None
     
@@ -386,7 +491,7 @@ class ConnectionManager:
             ValueError: If the connection is not found or validation fails
         """
         logger.info(f"Updating connection {connection_id} with new name: {name}")
-        connection = self.get_connection(connection_id)
+        connection = await self.get_connection(connection_id)
         if not connection:
             logger.error(f"Connection not found for update: {connection_id}")
             raise ValueError(f"Connection not found: {connection_id}")
@@ -454,7 +559,7 @@ class ConnectionManager:
             if default_id == connection_id:
                 logger.info(f"Removing {connection_id} as default connection for type {conn_type}")
                 # Find another connection for this type
-                connections = self.get_connections_by_type(conn_type)
+                connections = await self.get_connections_by_type(conn_type)
                 if connections:
                     new_default = connections[0].id
                     logger.info(f"Setting new default connection for type {conn_type}: {new_default}")
@@ -477,7 +582,7 @@ class ConnectionManager:
         Raises:
             ValueError: If the connection is not found
         """
-        connection = self.get_connection(connection_id)
+        connection = await self.get_connection(connection_id)
         if not connection:
             raise ValueError(f"Connection not found: {connection_id}")
         
@@ -599,7 +704,7 @@ class ConnectionManager:
         Returns:
             The connection schema or an error message
         """
-        connection = self.get_connection(connection_id)
+        connection = await self.get_connection(connection_id)
         if not connection:
             return {"error": f"Connection not found: {connection_id}"}
             

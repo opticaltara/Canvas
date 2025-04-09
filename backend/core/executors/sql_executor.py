@@ -2,6 +2,7 @@
 SQL Cell Executor
 """
 
+import logging
 from typing import Any, Dict, Optional
 from backend.core.cell import Cell
 from backend.core.execution import ExecutionContext
@@ -10,6 +11,8 @@ from backend.services.connection_manager import get_connection_manager
 
 from pydantic import BaseModel
 from typing import List, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 class SQLQueryResult(BaseModel):
     data: List[Dict]
@@ -36,10 +39,15 @@ async def execute_sql_cell(cell: Cell, context: ExecutionContext) -> SQLQueryRes
     
     # Get the connection
     if connection_id:
-        connection = connection_manager.get_connection(connection_id)
+        connection = await connection_manager.get_connection(connection_id)
     else:
-        # Get default SQL connection
-        connection = connection_manager.get_default_connection("sql")
+        try:
+            connection = await connection_manager.get_default_connection("sql")
+            if connection:
+                connection_id = connection.id
+        except Exception as e:
+            logger.error(f"Error getting default SQL connection: {str(e)}", extra={'correlation_id': 'N/A'})
+            connection = None
     
     if not connection:
         return SQLQueryResult(

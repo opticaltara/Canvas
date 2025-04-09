@@ -5,7 +5,7 @@ Repository module for database operations
 import logging
 from typing import Dict, List, Optional, Any, cast
 
-from sqlalchemy import select, delete, update
+from sqlalchemy import select, delete, update, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.models import Connection, DefaultConnection
@@ -50,6 +50,23 @@ class ConnectionRepository:
         connections = list(result.scalars().all())
         logger.info("Retrieved %d connections of type %s", len(connections), connection_type, extra={'correlation_id': 'N/A'})
         return connections
+    
+    async def get_by_name_and_type(self, name: str, connection_type: str) -> Optional[Connection]:
+        """Get connection by name and type"""
+        logger.info(f"Getting connection with name {name} and type {connection_type}", extra={'correlation_id': 'N/A'})
+        query = select(Connection).where(
+            and_(
+                Connection.name == name,
+                Connection.type == connection_type
+            )
+        )
+        result = await self.session.execute(query)
+        connection = result.scalars().first()
+        if connection:
+            logger.info("Found connection: %s", connection.name, extra={'correlation_id': 'N/A'})
+        else:
+            logger.info("No connection found with name %s and type %s", name, connection_type, extra={'correlation_id': 'N/A'})
+        return connection
     
     async def create(self, name: str, connection_type: str, config: Dict[str, Any]) -> Connection:
         """Create a new connection"""

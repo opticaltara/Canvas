@@ -372,7 +372,7 @@ class CellExecutor:
                 # Use the cell's connection_id if available
                 if cell.connection_id is not None:
                     # Get the specific connection
-                    connection = connection_manager.get_connection(str(cell.connection_id))
+                    connection = await connection_manager.get_connection(str(cell.connection_id))
                     if connection:
                         # Start MCP server for this specific connection
                         server_addresses = await mcp_manager.start_mcp_servers([connection])
@@ -390,24 +390,33 @@ class CellExecutor:
                                 "s3_select_object": lambda bucket, key, query: {"data": []},
                             }
                 else:
-                    # If no specific connection ID, get the default connection
-                    connection = connection_manager.get_default_connection(connection_type)
-                    if connection:
-                        # Start MCP server for the default connection
-                        server_addresses = await mcp_manager.start_mcp_servers([connection])
+                    # Otherwise, get the default connection for the connection type
+                    try:
+                        # Get the default connection
+                        connection = await connection_manager.get_default_connection(connection_type)
                         
-                        # Create client object for this connection
-                        if connection.id in server_addresses:
-                            mcp_clients[f"mcp_{connection.id}"] = {
-                                "connection_id": connection.id,
-                                "address": server_addresses[connection.id],
-                                "query_db": lambda query, params: {"rows": [], "columns": []},
-                                "query_logs": lambda query, params: {"data": []},
-                                "query_metrics": lambda query, params: {"data": []},
-                                "s3_list_objects": lambda bucket, prefix: {"data": []},
-                                "s3_get_object": lambda bucket, key: {"data": ""},
-                                "s3_select_object": lambda bucket, key, query: {"data": []},
-                            }
+                        if connection:
+                            # Start MCP server for the default connection
+                            server_addresses = await mcp_manager.start_mcp_servers([connection])
+                            
+                            # Create client object for this connection
+                            if connection.id in server_addresses:
+                                mcp_clients[f"mcp_{connection.id}"] = {
+                                    "connection_id": connection.id,
+                                    "address": server_addresses[connection.id],
+                                    "query_db": lambda query, params: {"rows": [], "columns": []},
+                                    "query_logs": lambda query, params: {"data": []},
+                                    "query_metrics": lambda query, params: {"data": []},
+                                    "s3_list_objects": lambda bucket, prefix: {"data": []},
+                                    "s3_get_object": lambda bucket, key: {"data": ""},
+                                    "s3_select_object": lambda bucket, key, query: {"data": []},
+                                }
+                        else:
+                            default_correlation_id = str(uuid4())
+                            self.logger.warning(f"No default connection found for type: {connection_type}", extra={'correlation_id': default_correlation_id})
+                    except Exception as e:
+                        default_correlation_id = str(uuid4())
+                        self.logger.error(f"Error getting default connection for {connection_type}: {str(e)}", extra={'correlation_id': default_correlation_id})
         
         # Dispatch to the appropriate executor based on cell type
         if cell.type == CellType.PYTHON:

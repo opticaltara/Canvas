@@ -44,7 +44,7 @@ async def execute_log_cell(cell: Cell, context: ExecutionContext) -> LogQueryRes
     connection_manager = get_connection_manager()
     
     # Get the Grafana connection
-    connection = connection_manager.get_default_connection("grafana")
+    connection = await connection_manager.get_default_connection("grafana")
     
     if not connection:
         return LogQueryResult(

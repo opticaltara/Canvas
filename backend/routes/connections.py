@@ -129,7 +129,7 @@ async def list_connections(
     """
     start_time = time.time()
     try:
-        connections = connection_manager.get_all_connections()
+        connections = await connection_manager.get_all_connections()
         process_time = time.time() - start_time
         connection_logger.info(
             "Listed all connections",
@@ -212,7 +212,7 @@ async def get_connection(
     """
     start_time = time.time()
     try:
-        connection = connection_manager.get_connection(connection_id)
+        connection = await connection_manager.get_connection(connection_id)
         if not connection:
             process_time = time.time() - start_time
             connection_logger.warning(
@@ -936,7 +936,7 @@ async def get_mcp_server_status(
         
         # Get the connection manager to verify the connection exists
         connection_manager = request.app.state.connection_manager
-        connection = connection_manager.get_connection(connection_id)
+        connection = await connection_manager.get_connection(connection_id)
         
         if not connection:
             raise HTTPException(status_code=404, detail=f"Connection {connection_id} not found")
@@ -1009,7 +1009,7 @@ async def start_mcp_server(
         connection_manager = request.app.state.connection_manager
         
         # Get the connection
-        connection = connection_manager.get_connection(connection_id)
+        connection = await connection_manager.get_connection(connection_id)
         if not connection:
             connection_logger.error(
                 "Connection not found",
@@ -1118,7 +1118,7 @@ async def stop_mcp_server(
         
         # Get the connection manager to verify the connection exists
         connection_manager = request.app.state.connection_manager
-        connection = connection_manager.get_connection(connection_id)
+        connection = await connection_manager.get_connection(connection_id)
         
         if not connection:
             raise HTTPException(status_code=404, detail=f"Connection {connection_id} not found")
@@ -1166,7 +1166,7 @@ async def get_all_mcp_server_statuses(
         # Enrich with connection information
         enriched_statuses = {}
         for connection_id, status in statuses.items():
-            connection = connection_manager.get_connection(connection_id)
+            connection = await connection_manager.get_connection(connection_id)
             if connection:
                 enriched_statuses[connection_id] = {
                     "connection_id": connection_id,
