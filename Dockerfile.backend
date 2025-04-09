@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 
 # Install dependencies using pip directly
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt aiosqlite
 
 # Create node_modules directory for Deno
 RUN mkdir -p node_modules && chmod 777 node_modules
@@ -46,6 +46,10 @@ ENV LOGFIRE_TOKEN=""
 ENV SHERLOG_ENV=development
 # Set log level for all components
 ENV LOG_LEVEL=INFO
+
+# Database configuration - use SQLite
+ENV SHERLOG_DB_TYPE=sqlite
+ENV SHERLOG_DB_FILE=/app/data/sherlog.db
 
 # Expose API port
 EXPOSE 8000

@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     db_name: str = "sherlog"
     db_user: str = "sherlog"
     db_password: str = "sherlog"
+    db_type: str = "sqlite"  # Options: sqlite, postgresql
+    db_file: str = "./data/sherlog.db"
     
     # AWS settings (for S3 storage)
     aws_access_key_id: str = Field(default="", validation_alias="AWS_ACCESS_KEY_ID")
@@ -64,7 +66,10 @@ class Settings(BaseSettings):
     @property
     def database_url(self) -> str:
         """Get the database connection URL"""
-        return f"postgresql://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
+        if self.db_type == "sqlite":
+            return f"sqlite:///{self.db_file}"
+        else:
+            return f"postgresql://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
 
 
 @lru_cache()

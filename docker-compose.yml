@@ -22,17 +22,13 @@ services:
       - SHERLOG_ENV=${SHERLOG_ENV:-development}
       - PYTHONUNBUFFERED=1
       # Database configuration
-      - SHERLOG_DB_HOST=postgres
-      - SHERLOG_DB_PORT=5432
-      - SHERLOG_DB_NAME=sherlog
-      - SHERLOG_DB_USER=sherlog
-      - SHERLOG_DB_PASSWORD=sherlog
+      - SHERLOG_DB_TYPE=sqlite
+      - SHERLOG_DB_FILE=/app/data/sherlog.db
       - SHERLOG_CONNECTION_STORAGE_TYPE=db
     ports:
       - "9091:8000"
     depends_on:
       - mcp-grafana
-      - postgres
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
@@ -103,26 +99,6 @@ services:
           cpus: '0.50'  # Limit CPU usage when in standby
           memory: 256M  # Limit memory usage when in standby
 
-  postgres:
-    image: postgres:15
-    container_name: sherlog-canvas-postgres
-    environment:
-      - POSTGRES_USER=sherlog
-      - POSTGRES_PASSWORD=sherlog
-      - POSTGRES_DB=sherlog
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "sherlog"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
 volumes:
   data:
-    driver: local
-  postgres_data:
     driver: local

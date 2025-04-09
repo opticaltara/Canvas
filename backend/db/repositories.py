@@ -19,27 +19,41 @@ class ConnectionRepository:
     
     def __init__(self, session: AsyncSession):
         self.session = session
+        logger.info("ConnectionRepository initialized with session: %s", session)
     
     async def get_all(self) -> List[Connection]:
         """Get all connections"""
+        logger.info("Fetching all connections")
         query = select(Connection)
         result = await self.session.execute(query)
-        return list(result.scalars().all())
+        connections = list(result.scalars().all())
+        logger.info("Retrieved %d connections", len(connections))
+        return connections
     
     async def get_by_id(self, connection_id: str) -> Optional[Connection]:
         """Get a connection by ID"""
+        logger.info("Fetching connection with ID: %s", connection_id)
         query = select(Connection).where(Connection.id == connection_id)
         result = await self.session.execute(query)
-        return result.scalar_one_or_none()
+        connection = result.scalar_one_or_none()
+        if connection:
+            logger.info("Found connection: %s", connection.name)
+        else:
+            logger.info("No connection found with ID: %s", connection_id)
+        return connection
     
     async def get_by_type(self, connection_type: str) -> List[Connection]:
         """Get connections by type"""
+        logger.info("Fetching connections of type: %s", connection_type)
         query = select(Connection).where(Connection.type == connection_type)
         result = await self.session.execute(query)
-        return list(result.scalars().all())
+        connections = list(result.scalars().all())
+        logger.info("Retrieved %d connections of type %s", len(connections), connection_type)
+        return connections
     
     async def create(self, name: str, connection_type: str, config: Dict[str, Any]) -> Connection:
         """Create a new connection"""
+        logger.info("Creating new connection: %s (type: %s)", name, connection_type)
         connection = Connection(
             name=name,
             type=connection_type,
@@ -48,12 +62,15 @@ class ConnectionRepository:
         self.session.add(connection)
         await self.session.commit()
         await self.session.refresh(connection)
+        logger.info("Connection created successfully with ID: %s", connection.id)
         return connection
     
     async def update(self, connection_id: str, name: str, config: Dict[str, Any]) -> Optional[Connection]:
         """Update an existing connection"""
+        logger.info("Updating connection with ID: %s", connection_id)
         connection = await self.get_by_id(connection_id)
         if not connection:
+            logger.info("Cannot update connection: ID %s not found", connection_id)
             return None
         
         # Use SQLAlchemy update statement instead of direct attribute assignment
@@ -62,17 +79,26 @@ class ConnectionRepository:
         await self.session.commit()
         
         # Refresh and return the updated connection
-        return await self.get_by_id(connection_id)
+        updated_connection = await self.get_by_id(connection_id)
+        logger.info("Connection %s updated successfully", connection_id)
+        return updated_connection
     
     async def delete(self, connection_id: str) -> bool:
         """Delete a connection"""
+        logger.info("Deleting connection with ID: %s", connection_id)
         query = delete(Connection).where(Connection.id == connection_id)
         result = await self.session.execute(query)
         await self.session.commit()
-        return result.rowcount > 0
+        success = result.rowcount > 0
+        if success:
+            logger.info("Connection %s deleted successfully", connection_id)
+        else:
+            logger.info("Connection %s not found for deletion", connection_id)
+        return success
     
     async def get_default_connection(self, connection_type: str) -> Optional[Connection]:
         """Get the default connection for a type"""
+        logger.info("Fetching default connection for type: %s", connection_type)
         query = select(DefaultConnection).where(DefaultConnection.connection_type == connection_type)
         result = await self.session.execute(query)
         default_conn = result.scalar_one_or_none()
@@ -81,23 +107,28 @@ class ConnectionRepository:
             # Extract the string value from the DefaultConnection object
             conn_id = default_conn.connection_id
             if isinstance(conn_id, str):
+                logger.info("Found default connection ID: %s", conn_id)
                 return await self.get_by_id(conn_id)
+        logger.info("No default connection found for type: %s", connection_type)
         return None
     
     async def set_default_connection(self, connection_type: str, connection_id: str) -> DefaultConnection:
         """Set a connection as default for its type"""
+        logger.info("Setting connection %s as default for type: %s", connection_id, connection_type)
         # Check if a default connection already exists for this type
         query = select(DefaultConnection).where(DefaultConnection.connection_type == connection_type)
         result = await self.session.execute(query)
         default_conn = result.scalar_one_or_none()
         
         if default_conn:
+            logger.info("Updating existing default connection for type: %s", connection_type)
             # Update existing default using SQLAlchemy update statement
             stmt = update(DefaultConnection).where(
                 DefaultConnection.connection_type == connection_type
             ).values(connection_id=connection_id)
             await self.session.execute(stmt)
         else:
+            logger.info("Creating new default connection entry for type: %s", connection_type)
             # Create new default
             default_conn = DefaultConnection(
                 connection_type=connection_type,
@@ -110,4 +141,6 @@ class ConnectionRepository:
         # Re-fetch the default connection to return
         query = select(DefaultConnection).where(DefaultConnection.connection_type == connection_type)
         result = await self.session.execute(query)
-        return result.scalar_one() 
+        default_conn = result.scalar_one()
+        logger.info("Successfully set connection %s as default for type: %s", connection_id, connection_type)
+        return default_conn 

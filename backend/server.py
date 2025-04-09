@@ -294,6 +294,14 @@ async def startup_event():
     )
     
     try:
+        # Initialize database
+        from backend.db.database import init_db
+        await init_db()
+        app_logger.info(
+            "Database initialized",
+            extra={'correlation_id': correlation_id}
+        )
+        
         # Start the execution queue
         await execution_queue.start()
         app_logger.info(
