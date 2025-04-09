@@ -642,32 +642,9 @@ class ConnectionManager:
         """Load connections from storage"""
         correlation_id = str(uuid4())
         try:
-            # Check storage strategy from configuration
-            storage_type = self.settings.connection_storage_type.lower()
-            logger.info(f"Loading connections from storage type: {storage_type}", extra={'correlation_id': correlation_id})
-            
-            if storage_type == "file":
-                # Load from local file
-                data = await self._load_connections_from_file()
-                if data:
-                    self.connections = {
-                        conn_id: ConnectionConfig(**conn_data)
-                        for conn_id, conn_data in data.get("connections", {}).items()
-                    }
-                    self.default_connections = data.get("defaults", {})
-            elif storage_type == "env":
-                # Load from environment variables
-                connection_data = self._load_connections_from_env()
-                if connection_data:
-                    self.connections = {
-                        conn_id: ConnectionConfig(**conn_data)
-                        for conn_id, conn_data in connection_data.get("connections", {}).items()
-                    }
-                    self.default_connections = connection_data.get("defaults", {})
-            elif storage_type == "db":
-                # Load from database
-                await self._load_connections_from_db()
-                    
+            # Always use database storage
+            logger.info("Loading connections from database storage", extra={'correlation_id': correlation_id})
+            await self._load_connections_from_db()
             logger.info(f"Successfully loaded {len(self.connections)} connections", extra={'correlation_id': correlation_id})
         except Exception as e:
             logger.error(f"Error loading connections: {str(e)}", extra={'correlation_id': correlation_id})
