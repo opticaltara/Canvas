@@ -63,10 +63,6 @@ class SQLiteUUID:
         return cls(uuid.UUID(value))
 
 
-# Base class for all models
-Base = declarative_base()
-
-
 class Notebook(Base):
     """SQLAlchemy model for notebooks"""
     __tablename__ = "notebooks"
@@ -127,7 +123,7 @@ class Cell(Base):
     connection_id = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    metadata = Column(JSON, default=dict)
+    cell_metadata = Column(JSON, default=dict)
     settings = Column(JSON, default=dict)
     
     # Result data
@@ -168,7 +164,7 @@ class Cell(Base):
             "connection_id": self.connection_id,
             "dependencies": [dep.id for dep in self.dependencies],
             "dependents": [dep.id for dep in self.dependents],
-            "metadata": self.metadata if self.metadata is not None else {},
+            "metadata": self.cell_metadata if self.cell_metadata is not None else {},
             "settings": self.settings if self.settings is not None else {}
         }
 
