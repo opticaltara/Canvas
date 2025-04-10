@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from backend.config import get_settings
 from backend.core.notebook import Notebook, NotebookMetadata
-from backend.core.cell import Cell, CellType, CellStatus
+from backend.core.cell import Cell, CellType, CellStatus, CellResult
 from backend.db.repositories import NotebookRepository
 from backend.db.database import get_db
 
@@ -51,7 +51,10 @@ class NotebookManager:
         correlation_id = str(uuid4())
         self.settings = get_settings()
         self.notify_callback: Optional[Callable] = None
-        self.db: Session = next(get_db())
+        
+        # Get a session from the generator and initialize repository
+        session_generator = get_db()
+        self.db: Session = next(session_generator)
         self.repository = NotebookRepository(self.db)
         
         logger.info("NotebookManager initialized", extra={'correlation_id': correlation_id})
@@ -88,16 +91,19 @@ class NotebookManager:
             tags=metadata.get("tags", []) if metadata else []
         )
         
-        # Create notebook model
+        # Get data as dictionary from to_dict
+        notebook_data = db_notebook.to_dict()
+        
+        # Create notebook model with values from dictionary and default values for datetimes if needed
         notebook = Notebook(
-            id=UUID(db_notebook.id),
+            id=UUID(notebook_data["id"]),
             metadata=NotebookMetadata(
-                title=db_notebook.title,
-                description=db_notebook.description or "",
-                created_by=db_notebook.created_by,
-                created_at=db_notebook.created_at,
-                updated_at=db_notebook.updated_at,
-                tags=db_notebook.tags or []
+                title=notebook_data["metadata"]["title"],
+                description=notebook_data["metadata"]["description"],
+                created_by=notebook_data["metadata"]["created_by"],
+                created_at=datetime.fromisoformat(notebook_data["metadata"]["created_at"]) if notebook_data["metadata"]["created_at"] else datetime.now(timezone.utc),
+                updated_at=datetime.fromisoformat(notebook_data["metadata"]["updated_at"]) if notebook_data["metadata"]["updated_at"] else datetime.now(timezone.utc),
+                tags=notebook_data["metadata"]["tags"]
             )
         )
         
@@ -170,7 +176,7 @@ class NotebookManager:
         logger.info(f"Successfully deleted notebook {notebook_id}")
     
     def create_cell(self, notebook_id: UUID, cell_type: CellType, content: str, 
-                    position: Optional[int] = None, connection_id: Optional[int] = None,
+                    position: Optional[int] = None, connection_id: Optional[str] = None,
                     metadata: Optional[Dict] = None, settings: Optional[Dict] = None) -> Cell:
         """
         Create a new cell in a notebook
@@ -211,17 +217,20 @@ class NotebookManager:
         if not db_cell:
             raise KeyError(f"Failed to create cell in notebook {notebook_id}")
         
+        # Convert to model using to_dict
+        cell_dict = db_cell.to_dict()
+        
         # Create cell model
         cell = Cell(
-            id=UUID(db_cell.id),
+            id=UUID(cell_dict["id"]),
             type=cell_type,
             content=content,
-            status=CellStatus(db_cell.status),
-            created_at=db_cell.created_at,
-            updated_at=db_cell.updated_at,
-            connection_id=db_cell.connection_id,
-            metadata=db_cell.metadata or {},
-            settings=db_cell.settings or {}
+            status=CellStatus(cell_dict["status"]),
+            created_at=datetime.fromisoformat(cell_dict["created_at"]) if cell_dict["created_at"] else datetime.now(timezone.utc),
+            updated_at=datetime.fromisoformat(cell_dict["updated_at"]) if cell_dict["updated_at"] else datetime.now(timezone.utc),
+            connection_id=cell_dict["connection_id"],
+            metadata=cell_dict["metadata"],
+            settings=cell_dict["settings"]
         )
         
         # Add to notebook model
@@ -390,8 +399,10 @@ class NotebookManager:
         # Mark each dependent as stale
         stale_cells = set()
         for db_dependent in db_dependents:
-            self.repository.mark_cell_stale(db_dependent.id)
-            stale_cells.add(UUID(db_dependent.id))
+            # Convert to dict first
+            dependent_dict = db_dependent.to_dict()
+            self.repository.mark_cell_stale(dependent_dict["id"])
+            stale_cells.add(UUID(dependent_dict["id"]))
         
         logger.info(f"Marked {len(stale_cells)} dependents of cell {cell_id} as stale")
         return stale_cells
@@ -432,16 +443,19 @@ class NotebookManager:
         # Sort cell order by position
         cell_order.sort(key=lambda cell_id: cells[cell_id].metadata.get("position", 0))
         
+        # Get data as dict
+        notebook_dict = db_notebook.to_dict()
+        
         # Create notebook model
         notebook = Notebook(
-            id=UUID(db_notebook.id),
+            id=UUID(notebook_dict["id"]),
             metadata=NotebookMetadata(
-                title=db_notebook.title,
-                description=db_notebook.description or "",
-                created_by=db_notebook.created_by,
-                created_at=db_notebook.created_at,
-                updated_at=db_notebook.updated_at,
-                tags=db_notebook.tags or []
+                title=notebook_dict["metadata"]["title"],
+                description=notebook_dict["metadata"]["description"],
+                created_by=notebook_dict["metadata"]["created_by"],
+                created_at=datetime.fromisoformat(notebook_dict["metadata"]["created_at"]) if notebook_dict["metadata"]["created_at"] else datetime.now(timezone.utc),
+                updated_at=datetime.fromisoformat(notebook_dict["metadata"]["updated_at"]) if notebook_dict["metadata"]["updated_at"] else datetime.now(timezone.utc),
+                tags=notebook_dict["metadata"]["tags"]
             ),
             cells=cells,
             cell_order=cell_order
@@ -451,37 +465,38 @@ class NotebookManager:
     
     def _db_cell_to_model(self, db_cell) -> Cell:
         """Convert database cell to model"""
+        # Get data as dict
+        cell_dict = db_cell.to_dict()
+        
         # Create result if exists
         result = None
-        if db_cell.result_content is not None:
-            from backend.core.cell import CellResult
+        if cell_dict["result"] is not None:
             result = CellResult(
-                content=db_cell.result_content,
-                error=db_cell.result_error,
-                execution_time=db_cell.result_execution_time,
-                timestamp=db_cell.result_timestamp
+                content=cell_dict["result"]["content"],
+                error=cell_dict["result"]["error"],
+                execution_time=cell_dict["result"]["execution_time"],
+                timestamp=datetime.fromisoformat(cell_dict["result"]["timestamp"]) if cell_dict["result"]["timestamp"] else datetime.now(timezone.utc)
             )
         
         # Create cell model
         cell = Cell(
-            id=UUID(db_cell.id),
-            type=CellType(db_cell.type),
-            content=db_cell.content,
+            id=UUID(cell_dict["id"]),
+            type=CellType(cell_dict["type"]),
+            content=cell_dict["content"],
             result=result,
-            status=CellStatus(db_cell.status),
-            created_at=db_cell.created_at,
-            updated_at=db_cell.updated_at,
-            connection_id=db_cell.connection_id,
-            metadata=db_cell.metadata or {},
-            settings=db_cell.settings or {}
+            status=CellStatus(cell_dict["status"]),
+            created_at=datetime.fromisoformat(cell_dict["created_at"]) if cell_dict["created_at"] else datetime.now(timezone.utc),
+            updated_at=datetime.fromisoformat(cell_dict["updated_at"]) if cell_dict["updated_at"] else datetime.now(timezone.utc),
+            connection_id=cell_dict["connection_id"],
+            metadata=cell_dict["metadata"],
+            settings=cell_dict["settings"]
         )
         
-        # Add dependencies
-        for db_dependency in db_cell.dependencies:
-            cell.dependencies.add(UUID(db_dependency.id))
+        # Add dependencies and dependents
+        for dep_id in cell_dict["dependencies"]:
+            cell.dependencies.add(UUID(dep_id))
         
-        # Add dependents
-        for db_dependent in db_cell.dependents:
-            cell.dependents.add(UUID(db_dependent.id))
+        for dep_id in cell_dict["dependents"]:
+            cell.dependents.add(UUID(dep_id))
         
         return cell

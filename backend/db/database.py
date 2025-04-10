@@ -4,13 +4,14 @@ Database connection setup
 
 import contextlib
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, Iterator
 
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 from backend.config import get_settings
 
@@ -28,15 +29,24 @@ logger.info("Database URL: %s", DATABASE_URL, extra={'correlation_id': 'N/A'})
 # Convert standard URLs to async URLs
 if DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
+    SYNC_DATABASE_URL = DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
     logger.debug("Converted to async PostgreSQL URL", extra={'correlation_id': 'N/A'})
 elif DATABASE_URL.startswith("sqlite:///"):
     DATABASE_URL = DATABASE_URL.replace("sqlite:///", "sqlite+aiosqlite:///")
+    SYNC_DATABASE_URL = DATABASE_URL.replace("sqlite+aiosqlite:///", "sqlite:///")
     logger.debug("Converted to async SQLite URL", extra={'correlation_id': 'N/A'})
+else:
+    SYNC_DATABASE_URL = DATABASE_URL
 
 # Create async engine and sessionmaker
 logger.info("Creating async database engine", extra={'correlation_id': 'N/A'})
 engine = create_async_engine(DATABASE_URL)
 async_session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+# Create synchronous engine and sessionmaker for compatibility
+from sqlalchemy import create_engine
+sync_engine = create_engine(SYNC_DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=sync_engine)
 
 # Initialize database
 async def init_db():
@@ -61,4 +71,14 @@ async def get_db_session() -> AsyncIterator[AsyncSession]:
         raise
     finally:
         await session.close()
-        logger.debug("Session closed", extra={'correlation_id': 'N/A'}) 
+        logger.debug("Session closed", extra={'correlation_id': 'N/A'})
+
+def get_db() -> Iterator[Session]:
+    """Get a synchronous database session"""
+    db = SessionLocal()
+    logger.debug("Synchronous database session created", extra={'correlation_id': 'N/A'})
+    try:
+        yield db
+    finally:
+        db.close()
+        logger.debug("Synchronous session closed", extra={'correlation_id': 'N/A'}) 
