@@ -3,15 +3,19 @@ Notebook Manager Service
 """
 
 import asyncio
-import json
 import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 from uuid import UUID, uuid4
 
+from sqlalchemy.orm import Session
+
 from backend.config import get_settings
 from backend.core.notebook import Notebook, NotebookMetadata
+from backend.core.cell import Cell, CellType, CellStatus
+from backend.db.repositories import NotebookRepository
+from backend.db.database import get_db
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -45,12 +49,12 @@ class NotebookManager:
     """
     def __init__(self):
         correlation_id = str(uuid4())
-        self.notebooks: Dict[UUID, Notebook] = {}
         self.settings = get_settings()
         self.notify_callback: Optional[Callable] = None
+        self.db: Session = next(get_db())
+        self.repository = NotebookRepository(self.db)
         
-        # Load notebooks from storage
-        self._load_notebooks()
+        logger.info("NotebookManager initialized", extra={'correlation_id': correlation_id})
     
     def set_notify_callback(self, callback: Callable) -> None:
         """
@@ -74,27 +78,30 @@ class NotebookManager:
             The created notebook
         """
         correlation_id = str(uuid4())
-        notebook_id = uuid4()
-        logger.info(f"Creating new notebook with ID {notebook_id} and name '{name}'", extra={'correlation_id': correlation_id})
+        logger.info(f"Creating new notebook with name '{name}'", extra={'correlation_id': correlation_id})
         
+        # Create notebook in database
+        db_notebook = self.repository.create_notebook(
+            title=name,
+            description=description,
+            created_by=metadata.get("created_by") if metadata else None,
+            tags=metadata.get("tags", []) if metadata else []
+        )
+        
+        # Create notebook model
         notebook = Notebook(
-            id=notebook_id,
+            id=UUID(db_notebook.id),
             metadata=NotebookMetadata(
-                title=name,
-                description=description or "",
-                created_at=datetime.now(timezone.utc),
-                updated_at=datetime.now(timezone.utc)
+                title=db_notebook.title,
+                description=db_notebook.description or "",
+                created_by=db_notebook.created_by,
+                created_at=db_notebook.created_at,
+                updated_at=db_notebook.updated_at,
+                tags=db_notebook.tags or []
             )
         )
         
-        # Update metadata if provided
-        if metadata:
-            logger.debug(f"Updating metadata for notebook {notebook_id}", extra={'correlation_id': correlation_id})
-            notebook.update_metadata(metadata)
-        
-        self.notebooks[notebook_id] = notebook
-        self.save_notebook(notebook_id)
-        logger.info(f"Successfully created and saved notebook {notebook_id}", extra={'correlation_id': correlation_id})
+        logger.info(f"Successfully created notebook {notebook.id}", extra={'correlation_id': correlation_id})
         
         return notebook
     
@@ -111,11 +118,15 @@ class NotebookManager:
         Raises:
             KeyError: If the notebook is not found
         """
-        if notebook_id not in self.notebooks:
+        db_notebook = self.repository.get_notebook(str(notebook_id))
+        if not db_notebook:
             logger.error(f"Notebook {notebook_id} not found")
             raise KeyError(f"Notebook {notebook_id} not found")
+        
+        # Convert to model
+        notebook = self._db_notebook_to_model(db_notebook)
         logger.debug(f"Retrieved notebook {notebook_id}")
-        return self.notebooks[notebook_id]
+        return notebook
     
     def list_notebooks(self) -> List[Notebook]:
         """
@@ -124,7 +135,8 @@ class NotebookManager:
         Returns:
             List of notebooks
         """
-        return list(self.notebooks.values())
+        db_notebooks = self.repository.list_notebooks()
+        return [self._db_notebook_to_model(db_notebook) for db_notebook in db_notebooks]
     
     def save_notebook(self, notebook_id: UUID) -> None:
         """
@@ -136,27 +148,9 @@ class NotebookManager:
         Raises:
             KeyError: If the notebook is not found
         """
-        if notebook_id not in self.notebooks:
-            logger.error(f"Cannot save notebook {notebook_id}: not found")
-            raise KeyError(f"Notebook {notebook_id} not found")
-        
-        notebook = self.notebooks[notebook_id]
-        logger.info(f"Saving notebook {notebook_id} to storage")
-        
-        # Update the updated_at timestamp
-        notebook.metadata.updated_at = datetime.now(timezone.utc)
-        
-        # Save to storage based on storage type
-        storage_type = self.settings.notebook_storage_type
-        
-        if storage_type == "file":
-            self._save_notebook_to_file(notebook)
-        elif storage_type == "s3":
-            asyncio.create_task(self._save_notebook_to_s3(notebook))
-        else:
-            logger.warning(f"No persistent storage configured for notebook {notebook_id}")
-            # Default to in-memory only (no persistence)
-            pass
+        # This method is now a no-op since changes are saved immediately
+        # to the database in the repository methods
+        pass
     
     def delete_notebook(self, notebook_id: UUID) -> None:
         """
@@ -168,284 +162,326 @@ class NotebookManager:
         Raises:
             KeyError: If the notebook is not found
         """
-        if notebook_id not in self.notebooks:
+        success = self.repository.delete_notebook(str(notebook_id))
+        if not success:
             logger.error(f"Cannot delete notebook {notebook_id}: not found")
             raise KeyError(f"Notebook {notebook_id} not found")
         
-        logger.info(f"Deleting notebook {notebook_id}")
-        
-        # Delete from storage based on storage type
-        storage_type = self.settings.notebook_storage_type
-        
-        if storage_type == "file":
-            self._delete_notebook_from_file(notebook_id)
-        elif storage_type == "s3":
-            asyncio.create_task(self._delete_notebook_from_s3(notebook_id))
-        
-        # Remove from memory
-        del self.notebooks[notebook_id]
         logger.info(f"Successfully deleted notebook {notebook_id}")
     
-    def _load_notebooks(self) -> None:
-        """Load notebooks from storage"""
-        correlation_id = str(uuid4())
-        storage_type = self.settings.notebook_storage_type
-        logger.info(f"Loading notebooks from storage type: {storage_type}", extra={'correlation_id': correlation_id})
+    def create_cell(self, notebook_id: UUID, cell_type: CellType, content: str, 
+                    position: Optional[int] = None, connection_id: Optional[int] = None,
+                    metadata: Optional[Dict] = None, settings: Optional[Dict] = None) -> Cell:
+        """
+        Create a new cell in a notebook
         
-        if storage_type == "file":
-            self._load_notebooks_from_file()
-        elif storage_type == "s3":
-            asyncio.create_task(self._load_notebooks_from_s3())
+        Args:
+            notebook_id: ID of the notebook
+            cell_type: Type of cell to create
+            content: Content for the cell
+            position: Optional position in the cell order
+            connection_id: Optional connection ID
+            metadata: Optional metadata
+            settings: Optional settings
+            
+        Returns:
+            The created cell
+            
+        Raises:
+            KeyError: If the notebook is not found
+        """
+        # Get notebook to verify it exists
+        notebook = self.get_notebook(notebook_id)
+        
+        # Determine position
+        if position is None:
+            position = len(notebook.cells)
+        
+        # Create cell in database
+        db_cell = self.repository.create_cell(
+            notebook_id=str(notebook_id),
+            cell_type=cell_type.value,
+            content=content,
+            position=position,
+            connection_id=connection_id,
+            metadata=metadata,
+            settings=settings
+        )
+        
+        if not db_cell:
+            raise KeyError(f"Failed to create cell in notebook {notebook_id}")
+        
+        # Create cell model
+        cell = Cell(
+            id=UUID(db_cell.id),
+            type=cell_type,
+            content=content,
+            status=CellStatus(db_cell.status),
+            created_at=db_cell.created_at,
+            updated_at=db_cell.updated_at,
+            connection_id=db_cell.connection_id,
+            metadata=db_cell.metadata or {},
+            settings=db_cell.settings or {}
+        )
+        
+        # Add to notebook model
+        notebook.cells[cell.id] = cell
+        if position is not None and 0 <= position <= len(notebook.cell_order):
+            notebook.cell_order.insert(position, cell.id)
         else:
-            logger.warning("No persistent storage configured, starting with empty notebook set", 
-                          extra={'correlation_id': correlation_id})
-            # In-memory only, nothing to load
-            pass
+            notebook.cell_order.append(cell.id)
+        
+        logger.info(f"Created cell {cell.id} in notebook {notebook_id}")
+        return cell
     
-    def _save_notebook_to_file(self, notebook: Notebook) -> None:
+    def get_cell(self, cell_id: UUID) -> Cell:
         """
-        Save a notebook to a file
+        Get a cell by ID
         
         Args:
-            notebook: The notebook to save
+            cell_id: The ID of the cell
+            
+        Returns:
+            The cell
+            
+        Raises:
+            KeyError: If the cell is not found
         """
-        directory = self.settings.notebook_file_storage_dir
-        os.makedirs(directory, exist_ok=True)
+        db_cell = self.repository.get_cell(str(cell_id))
+        if not db_cell:
+            logger.error(f"Cell {cell_id} not found")
+            raise KeyError(f"Cell {cell_id} not found")
         
-        file_path = os.path.join(directory, f"{notebook.id}.json")
-        logger.debug(f"Saving notebook {notebook.id} to file: {file_path}")
-        
-        try:
-            with open(file_path, "w") as f:
-                json.dump(notebook.serialize(), f, indent=2)
-            logger.debug(f"Successfully saved notebook {notebook.id} to file")
-        except Exception as e:
-            logger.error(f"Error saving notebook {notebook.id} to file: {e}")
-            raise
+        # Convert to model
+        cell = self._db_cell_to_model(db_cell)
+        logger.debug(f"Retrieved cell {cell_id}")
+        return cell
     
-    def _load_notebooks_from_file(self) -> None:
-        """Load notebooks from files"""
-        correlation_id = str(uuid4())
-        directory = self.settings.notebook_file_storage_dir
-        logger.info(f"Loading notebooks from directory: {directory}", extra={'correlation_id': correlation_id})
-        
-        if not os.path.exists(directory):
-            os.makedirs(directory, exist_ok=True)
-            logger.info(f"Created notebook storage directory: {directory}", extra={'correlation_id': correlation_id})
-            return
-        
-        for filename in os.listdir(directory):
-            if not filename.endswith('.json'):
-                continue
-            
-            file_path = os.path.join(directory, filename)
-            logger.debug(f"Loading notebook from file: {file_path}")
-            
-            try:
-                with open(file_path, "r") as f:
-                    data = json.load(f)
-                
-                notebook_id = UUID(data.get("id"))
-                logger.debug(f"Creating notebook instance for ID: {notebook_id}")
-                
-                # Create a notebook instance
-                notebook = Notebook(
-                    id=notebook_id,
-                    metadata=NotebookMetadata(
-                        title=data.get("name", "Untitled"),
-                        description=data.get("description", ""),
-                        created_at=datetime.fromisoformat(data.get("created_at", datetime.now(timezone.utc).isoformat())),
-                        updated_at=datetime.fromisoformat(data.get("updated_at", datetime.now(timezone.utc).isoformat()))
-                    )
-                )
-                
-                # Update metadata if provided
-                if data.get("metadata"):
-                    notebook.update_metadata(data.get("metadata"))
-                
-                # Load cells
-                for cell_data in data.get("cells", []):
-                    notebook.create_cell(
-                        cell_type=cell_data["type"],
-                        content=cell_data["content"],
-                        **cell_data.get("metadata", {})
-                    )
-                
-                # Load dependencies
-                for dependency in data.get("dependencies", []):
-                    dependent_id = UUID(dependency[0])
-                    dependency_id = UUID(dependency[1])
-                    notebook.add_dependency(dependent_id, dependency_id)
-                
-                # Add to notebooks dict
-                self.notebooks[notebook_id] = notebook
-                logger.debug(f"Successfully loaded notebook {notebook_id}")
-            
-            except Exception as e:
-                logger.error(f"Error loading notebook from {file_path}: {e}")
-    
-    def _delete_notebook_from_file(self, notebook_id: UUID) -> None:
+    def update_cell_content(self, cell_id: UUID, content: str) -> Cell:
         """
-        Delete a notebook file
+        Update a cell's content
         
         Args:
-            notebook_id: The ID of the notebook
+            cell_id: ID of the cell to update
+            content: New content for the cell
+            
+        Returns:
+            The updated cell
+            
+        Raises:
+            KeyError: If the cell is not found
         """
-        directory = self.settings.notebook_file_storage_dir
-        file_path = os.path.join(directory, f"{notebook_id}.json")
-        logger.debug(f"Deleting notebook file: {file_path}")
+        # Update in database
+        db_cell = self.repository.update_cell(
+            str(cell_id),
+            content=content
+        )
         
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-                logger.debug(f"Successfully deleted notebook file for {notebook_id}")
-            except Exception as e:
-                logger.error(f"Error deleting notebook file {file_path}: {e}")
-                raise
-        else:
-            logger.warning(f"Notebook file not found for deletion: {file_path}")
+        if not db_cell:
+            logger.error(f"Cell {cell_id} not found")
+            raise KeyError(f"Cell {cell_id} not found")
+        
+        # Mark as stale
+        self.repository.mark_cell_stale(str(cell_id))
+        
+        # Convert to model
+        cell = self._db_cell_to_model(db_cell)
+        logger.info(f"Updated content for cell {cell_id}")
+        return cell
     
-    async def _save_notebook_to_s3(self, notebook: Notebook) -> None:
+    def delete_cell(self, cell_id: UUID) -> None:
         """
-        Save a notebook to S3
+        Delete a cell
         
         Args:
-            notebook: The notebook to save
+            cell_id: ID of the cell to delete
+            
+        Raises:
+            KeyError: If the cell is not found
         """
-        try:
-            import aioboto3
-            
-            bucket = self.settings.notebook_s3_bucket
-            key = f"{self.settings.notebook_s3_prefix}/{notebook.id}.json"
-            logger.debug(f"Saving notebook {notebook.id} to S3: {bucket}/{key}")
-            
-            session = aioboto3.Session(
-                aws_access_key_id=self.settings.aws_access_key_id,
-                aws_secret_access_key=self.settings.aws_secret_access_key,
-                region_name=self.settings.aws_region
-            )
-            
-            s3 = session.client("s3")
-            await s3.put_object(
-                Bucket=bucket,
-                Key=key,
-                Body=json.dumps(notebook.serialize(), indent=2),
-                ContentType="application/json"
-            )
-            logger.debug(f"Successfully saved notebook {notebook.id} to S3")
+        success = self.repository.delete_cell(str(cell_id))
+        if not success:
+            logger.error(f"Cell {cell_id} not found")
+            raise KeyError(f"Cell {cell_id} not found")
         
-        except Exception as e:
-            logger.error(f"Error saving notebook {notebook.id} to S3: {e}")
-            raise
+        logger.info(f"Deleted cell {cell_id}")
     
-    async def _load_notebooks_from_s3(self) -> None:
-        """Load notebooks from S3"""
-        try:
-            import aioboto3
-            
-            bucket = self.settings.notebook_s3_bucket
-            prefix = self.settings.notebook_s3_prefix
-            logger.info(f"Loading notebooks from S3: {bucket}/{prefix}")
-            
-            session = aioboto3.Session(
-                aws_access_key_id=self.settings.aws_access_key_id,
-                aws_secret_access_key=self.settings.aws_secret_access_key,
-                region_name=self.settings.aws_region
-            )
-            
-            s3 = session.client("s3")
-            # List objects in the bucket with the prefix
-            response = await s3.list_objects_v2(
-                Bucket=bucket,
-                Prefix=prefix
-            )
-            
-            # Get each notebook file
-            for obj in response.get("Contents", []):
-                key = obj["Key"]
-                
-                if not key.endswith(".json"):
-                    continue
-                
-                logger.debug(f"Loading notebook from S3: {bucket}/{key}")
-                
-                # Get the notebook file
-                response = await s3.get_object(
-                    Bucket=bucket,
-                    Key=key
-                )
-                
-                # Read the data
-                data = await response["Body"].read()
-                data = json.loads(data)
-                
-                notebook_id = UUID(data.get("id"))
-                logger.debug(f"Creating notebook instance for ID: {notebook_id}")
-                
-                # Create a notebook instance
-                notebook = Notebook(
-                    id=notebook_id,
-                    metadata=NotebookMetadata(
-                        title=data.get("name", "Untitled"),
-                        description=data.get("description", ""),
-                        created_at=datetime.fromisoformat(data.get("created_at", datetime.now(timezone.utc).isoformat())),
-                        updated_at=datetime.fromisoformat(data.get("updated_at", datetime.now(timezone.utc).isoformat()))
-                    )
-                )
-                
-                # Update metadata if provided
-                if data.get("metadata"):
-                    notebook.update_metadata(data.get("metadata"))
-                
-                # Load cells
-                for cell_data in data.get("cells", []):
-                    notebook.create_cell(
-                        cell_type=cell_data["type"],
-                        content=cell_data["content"],
-                        **cell_data.get("metadata", {})
-                    )
-                
-                # Load dependencies
-                for dependency in data.get("dependencies", []):
-                    dependent_id = UUID(dependency[0])
-                    dependency_id = UUID(dependency[1])
-                    notebook.add_dependency(dependent_id, dependency_id)
-                
-                # Add to notebooks dict
-                self.notebooks[notebook_id] = notebook
-                logger.debug(f"Successfully loaded notebook {notebook_id} from S3")
-        
-        except Exception as e:
-            logger.error(f"Error loading notebooks from S3: {e}")
-            raise
-    
-    async def _delete_notebook_from_s3(self, notebook_id: UUID) -> None:
+    def add_dependency(self, dependent_id: UUID, dependency_id: UUID) -> None:
         """
-        Delete a notebook from S3
+        Add a dependency between cells
         
         Args:
-            notebook_id: The ID of the notebook
+            dependent_id: ID of the cell that depends on another
+            dependency_id: ID of the cell that is depended upon
+            
+        Raises:
+            KeyError: If either cell is not found
         """
-        try:
-            import aioboto3
-            
-            bucket = self.settings.notebook_s3_bucket
-            key = f"{self.settings.notebook_s3_prefix}/{notebook_id}.json"
-            logger.debug(f"Deleting notebook from S3: {bucket}/{key}")
-            
-            session = aioboto3.Session(
-                aws_access_key_id=self.settings.aws_access_key_id,
-                aws_secret_access_key=self.settings.aws_secret_access_key,
-                region_name=self.settings.aws_region
-            )
-            
-            s3 = session.client("s3")
-            await s3.delete_object(
-                Bucket=bucket,
-                Key=key
-            )
-            logger.debug(f"Successfully deleted notebook {notebook_id} from S3")
+        success = self.repository.add_dependency(str(dependent_id), str(dependency_id))
+        if not success:
+            logger.error(f"Failed to add dependency between cells {dependent_id} and {dependency_id}")
+            raise KeyError(f"Failed to add dependency between cells {dependent_id} and {dependency_id}")
         
-        except Exception as e:
-            logger.error(f"Error deleting notebook {notebook_id} from S3: {e}")
-            raise
+        logger.info(f"Added dependency: {dependent_id} depends on {dependency_id}")
+    
+    def remove_dependency(self, dependent_id: UUID, dependency_id: UUID) -> None:
+        """
+        Remove a dependency between cells
+        
+        Args:
+            dependent_id: ID of the cell that depends on another
+            dependency_id: ID of the cell that is depended upon
+            
+        Raises:
+            KeyError: If either cell is not found
+        """
+        success = self.repository.remove_dependency(str(dependent_id), str(dependency_id))
+        if not success:
+            logger.error(f"Failed to remove dependency between cells {dependent_id} and {dependency_id}")
+            raise KeyError(f"Failed to remove dependency between cells {dependent_id} and {dependency_id}")
+        
+        logger.info(f"Removed dependency: {dependent_id} no longer depends on {dependency_id}")
+    
+    def set_cell_result(self, cell_id: UUID, result: Any, error: Optional[str] = None, 
+                        execution_time: float = 0.0) -> None:
+        """
+        Set the execution result for a cell
+        
+        Args:
+            cell_id: ID of the cell
+            result: The result data
+            error: Optional error message
+            execution_time: Time taken to execute the cell
+            
+        Raises:
+            KeyError: If the cell is not found
+        """
+        db_cell = self.repository.set_cell_result(
+            str(cell_id),
+            content=result,
+            error=error,
+            execution_time=execution_time
+        )
+        
+        if not db_cell:
+            logger.error(f"Cell {cell_id} not found")
+            raise KeyError(f"Cell {cell_id} not found")
+        
+        logger.info(f"Set result for cell {cell_id}")
+    
+    def mark_dependents_stale(self, cell_id: UUID) -> Set[UUID]:
+        """
+        Mark all cells that depend on this cell as stale
+        
+        Args:
+            cell_id: ID of the cell whose dependents should be marked stale
+            
+        Returns:
+            Set of cell IDs that were marked stale
+            
+        Raises:
+            KeyError: If the cell is not found
+        """
+        # Get dependents from database
+        db_dependents = self.repository.get_dependents(str(cell_id))
+        if not db_dependents:
+            return set()
+        
+        # Mark each dependent as stale
+        stale_cells = set()
+        for db_dependent in db_dependents:
+            self.repository.mark_cell_stale(db_dependent.id)
+            stale_cells.add(UUID(db_dependent.id))
+        
+        logger.info(f"Marked {len(stale_cells)} dependents of cell {cell_id} as stale")
+        return stale_cells
+    
+    def reorder_cells(self, notebook_id: UUID, cell_order: List[UUID]) -> None:
+        """
+        Reorder cells in a notebook
+        
+        Args:
+            notebook_id: ID of the notebook
+            cell_order: New order of cell IDs
+            
+        Raises:
+            KeyError: If the notebook is not found
+        """
+        success = self.repository.reorder_cells(
+            str(notebook_id),
+            [str(cell_id) for cell_id in cell_order]
+        )
+        
+        if not success:
+            logger.error(f"Notebook {notebook_id} not found")
+            raise KeyError(f"Notebook {notebook_id} not found")
+        
+        logger.info(f"Reordered cells in notebook {notebook_id}")
+    
+    def _db_notebook_to_model(self, db_notebook) -> Notebook:
+        """Convert database notebook to model"""
+        # Get cells
+        cells = {}
+        cell_order = []
+        
+        for db_cell in db_notebook.cells:
+            cell = self._db_cell_to_model(db_cell)
+            cells[cell.id] = cell
+            cell_order.append(cell.id)
+        
+        # Sort cell order by position
+        cell_order.sort(key=lambda cell_id: cells[cell_id].metadata.get("position", 0))
+        
+        # Create notebook model
+        notebook = Notebook(
+            id=UUID(db_notebook.id),
+            metadata=NotebookMetadata(
+                title=db_notebook.title,
+                description=db_notebook.description or "",
+                created_by=db_notebook.created_by,
+                created_at=db_notebook.created_at,
+                updated_at=db_notebook.updated_at,
+                tags=db_notebook.tags or []
+            ),
+            cells=cells,
+            cell_order=cell_order
+        )
+        
+        return notebook
+    
+    def _db_cell_to_model(self, db_cell) -> Cell:
+        """Convert database cell to model"""
+        # Create result if exists
+        result = None
+        if db_cell.result_content is not None:
+            from backend.core.cell import CellResult
+            result = CellResult(
+                content=db_cell.result_content,
+                error=db_cell.result_error,
+                execution_time=db_cell.result_execution_time,
+                timestamp=db_cell.result_timestamp
+            )
+        
+        # Create cell model
+        cell = Cell(
+            id=UUID(db_cell.id),
+            type=CellType(db_cell.type),
+            content=db_cell.content,
+            result=result,
+            status=CellStatus(db_cell.status),
+            created_at=db_cell.created_at,
+            updated_at=db_cell.updated_at,
+            connection_id=db_cell.connection_id,
+            metadata=db_cell.metadata or {},
+            settings=db_cell.settings or {}
+        )
+        
+        # Add dependencies
+        for db_dependency in db_cell.dependencies:
+            cell.dependencies.add(UUID(db_dependency.id))
+        
+        # Add dependents
+        for db_dependent in db_cell.dependents:
+            cell.dependents.add(UUID(db_dependent.id))
+        
+        return cell

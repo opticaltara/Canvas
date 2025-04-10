@@ -8,23 +8,16 @@ services:
     container_name: sherlog-canvas-backend
     volumes:
       - ./data:/app/data
+      - ./logs:/app/logs
     environment:
       - SHERLOG_DEBUG=true
-      - SHERLOG_ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - SHERLOG_ANTHROPIC_MODEL=claude-3-7-sonnet-20250219
-      # Optional AWS credentials for S3 storage
-      - SHERLOG_NOTEBOOK_STORAGE_TYPE=file
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
-      - AWS_REGION=${AWS_REGION:-us-east-1}
-      # Logfire configuration
-      - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
-      - SHERLOG_ENV=${SHERLOG_ENV:-development}
-      - PYTHONUNBUFFERED=1
-      # Database configuration
+      - SHERLOG_API_PORT=8000
+      - SHERLOG_CONNECTION_STORAGE_TYPE=db
       - SHERLOG_DB_TYPE=sqlite
       - SHERLOG_DB_FILE=/app/data/sherlog.db
-      - SHERLOG_CONNECTION_STORAGE_TYPE=db
+      - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
+      - SHERLOG_ENVIRONMENT=${SHERLOG_ENVIRONMENT:-development}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
     ports:
       - "9091:8000"
     depends_on:

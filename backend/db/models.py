@@ -4,10 +4,12 @@ Database models for connections
 
 import uuid
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Set
 
-from sqlalchemy import Column, String, DateTime, ForeignKey, Boolean, JSON, func, Text
-from sqlalchemy.orm import relationship
+from sqlalchemy import Column, String, DateTime, ForeignKey, Boolean, JSON, func, Text, Integer, Enum, Float
+from sqlalchemy.orm import relationship, declarative_base
+from sqlalchemy.ext.declarative import declared_attr
+from sqlalchemy.dialects.postgresql import UUID as PgUUID
 
 from backend.db.database import Base
 
@@ -45,4 +47,135 @@ class DefaultConnection(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationship to the connection
-    connection = relationship("Connection") 
+    connection = relationship("Connection")
+
+
+class SQLiteUUID:
+    """SQLite-compatible UUID type"""
+    def __init__(self, value=None):
+        self.value = value or uuid.uuid4()
+    
+    def __str__(self):
+        return str(self.value)
+    
+    @classmethod
+    def from_string(cls, value):
+        return cls(uuid.UUID(value))
+
+
+# Base class for all models
+Base = declarative_base()
+
+
+class Notebook(Base):
+    """SQLAlchemy model for notebooks"""
+    __tablename__ = "notebooks"
+    
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    title = Column(String(255), nullable=False, default="Untitled Investigation")
+    description = Column(Text, nullable=True)
+    created_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    tags = Column(JSON, default=list)
+    
+    # Relationships
+    cells = relationship("Cell", back_populates="notebook", cascade="all, delete-orphan")
+    
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for API responses"""
+        return {
+            "id": self.id,
+            "metadata": {
+                "title": self.title,
+                "description": self.description if self.description is not None else "",
+                "tags": self.tags if self.tags is not None else [],
+                "created_by": self.created_by,
+                "created_at": self.created_at.isoformat() if self.created_at is not None else None,
+                "updated_at": self.updated_at.isoformat() if self.updated_at is not None else None
+            },
+            "cells": {cell.id: cell.to_dict() for cell in self.cells},
+            "cell_order": [cell.id for cell in sorted(self.cells, key=lambda c: c.position)],
+            "dependency_graph": self._build_dependency_graph()
+        }
+    
+    def _build_dependency_graph(self) -> Dict:
+        """Build dependency graph from cells"""
+        dependents = {}
+        dependencies = {}
+        
+        for cell in self.cells:
+            dependents[cell.id] = [dep.id for dep in cell.dependents]
+            dependencies[cell.id] = [dep.id for dep in cell.dependencies]
+        
+        return {
+            "dependents": dependents,
+            "dependencies": dependencies
+        }
+
+
+class Cell(Base):
+    """SQLAlchemy model for cells"""
+    __tablename__ = "cells"
+    
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    notebook_id = Column(String(36), ForeignKey("notebooks.id", ondelete="CASCADE"), nullable=False)
+    type = Column(String(50), nullable=False)  # SQL, Python, Markdown, etc.
+    content = Column(Text, nullable=False)
+    position = Column(Integer, nullable=False, default=0)
+    status = Column(String(20), nullable=False, default="idle")  # idle, running, success, error, stale
+    connection_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    metadata = Column(JSON, default=dict)
+    settings = Column(JSON, default=dict)
+    
+    # Result data
+    result_content = Column(JSON, nullable=True)
+    result_error = Column(Text, nullable=True)
+    result_execution_time = Column(Float, nullable=True)
+    result_timestamp = Column(DateTime, nullable=True)
+    
+    # Relationships
+    notebook = relationship("Notebook", back_populates="cells")
+    dependencies = relationship(
+        "Cell",
+        secondary="cell_dependencies",
+        primaryjoin="Cell.id==cell_dependencies.c.dependent_id",
+        secondaryjoin="Cell.id==cell_dependencies.c.dependency_id",
+        backref="dependents"
+    )
+    
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for API responses"""
+        result = None
+        if self.result_content is not None:
+            result = {
+                "content": self.result_content,
+                "error": self.result_error,
+                "execution_time": self.result_execution_time,
+                "timestamp": self.result_timestamp.isoformat() if self.result_timestamp is not None else None
+            }
+        
+        return {
+            "id": self.id,
+            "type": self.type,
+            "content": self.content,
+            "result": result,
+            "status": self.status,
+            "created_at": self.created_at.isoformat() if self.created_at is not None else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at is not None else None,
+            "connection_id": self.connection_id,
+            "dependencies": [dep.id for dep in self.dependencies],
+            "dependents": [dep.id for dep in self.dependents],
+            "metadata": self.metadata if self.metadata is not None else {},
+            "settings": self.settings if self.settings is not None else {}
+        }
+
+
+class CellDependency(Base):
+    """Association table for cell dependencies"""
+    __tablename__ = "cell_dependencies"
+    
+    dependent_id = Column(String(36), ForeignKey("cells.id", ondelete="CASCADE"), primary_key=True)
+    dependency_id = Column(String(36), ForeignKey("cells.id", ondelete="CASCADE"), primary_key=True) 

@@ -27,12 +27,6 @@ class Settings(BaseSettings):
     logfire_token: str = Field(default="", validation_alias="LOGFIRE_TOKEN")
     environment: str = Field(default="development", validation_alias="SHERLOG_ENV")
     
-    # Storage settings
-    notebook_storage_type: str = "file"  # Options: file, s3, none
-    notebook_file_storage_dir: str = "./data/notebooks"
-    notebook_s3_bucket: str = ""
-    notebook_s3_prefix: str = "notebooks"
-    
     # Connection storage settings
     connection_storage_type: str = "file"  # Options: file, env, db, none
     connection_file_path: str = "./data/connections.json"

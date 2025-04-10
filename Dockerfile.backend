@@ -27,7 +27,7 @@ RUN deno run -A --unstable-worker-options jsr:@pydantic/mcp-run-python warmup
 COPY backend/ ./backend/
 
 # Create data directory
-RUN mkdir -p data/notebooks
+RUN mkdir -p data
 
 # Create logs directory
 RUN mkdir -p logs && chmod 777 logs
@@ -37,13 +37,11 @@ ENV PYTHONPATH=/app
 ENV SHERLOG_API_HOST=0.0.0.0
 ENV SHERLOG_API_PORT=8000
 ENV SHERLOG_DEBUG=false
-ENV SHERLOG_NOTEBOOK_STORAGE_TYPE=file
-ENV SHERLOG_NOTEBOOK_FILE_STORAGE_DIR=/app/data/notebooks
 ENV SHERLOG_CONNECTION_STORAGE_TYPE=db
 ENV SHERLOG_CONNECTION_FILE_PATH=/app/data/connections.json
 ENV PYTHONUNBUFFERED=1
 ENV LOGFIRE_TOKEN=""
-ENV SHERLOG_ENV=development
+ENV SHERLOG_ENVIRONMENT=development
 # Set log level for all components
 ENV LOG_LEVEL=INFO
 

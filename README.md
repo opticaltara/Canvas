@@ -184,15 +184,28 @@ Visit `http://localhost:5173` to access Sherlog Canvas.
 Configuration is managed through environment variables with the `SHERLOG_` prefix:
 
 | Variable | Description | Default |
-|----------|-------------|---------|
+| --- | --- | --- |
+| `SHERLOG_API_HOST` | Host to bind the API server | `0.0.0.0` |
+| `SHERLOG_API_PORT` | Port for the API server | `8000` |
 | `SHERLOG_DEBUG` | Enable debug mode | `false` |
-| `SHERLOG_API_HOST` | API host address | `0.0.0.0` |
-| `SHERLOG_API_PORT` | API port | `8000` |
-| `SHERLOG_ANTHROPIC_API_KEY` | Anthropic API key | `` |
-| `SHERLOG_ANTHROPIC_MODEL` | Anthropic model | `claude-3-7-sonnet-20250219` |
-| `SHERLOG_NOTEBOOK_STORAGE_TYPE` | Storage type for notebooks (file, s3, none) | `file` |
-| `SHERLOG_NOTEBOOK_FILE_STORAGE_DIR` | Directory for file storage | `./data/notebooks` |
-| `SHERLOG_CONNECTION_STORAGE_TYPE` | Storage type for connections (file, env, none) | `file` |
+| `SHERLOG_CORS_ORIGINS` | CORS origins (comma-separated) | `*` |
+| `SHERLOG_AUTH_ENABLED` | Enable authentication | `false` |
+| `SHERLOG_ANTHROPIC_API_KEY` | Anthropic API key for Claude | |
+| `SHERLOG_ANTHROPIC_MODEL` | Claude model to use | `claude-3-7-sonnet-20250219` |
+| `SHERLOG_LOGFIRE_TOKEN` | LogFire token for logging | |
+| `SHERLOG_ENVIRONMENT` | Environment (development, production) | `development` |
+| `SHERLOG_CONNECTION_STORAGE_TYPE` | Storage type for connections (file, env, db, none) | `file` |
+| `SHERLOG_CONNECTION_FILE_PATH` | Path to connection storage file | `./data/connections.json` |
+| `SHERLOG_DB_HOST` | Database host | `localhost` |
+| `SHERLOG_DB_PORT` | Database port | `5432` |
+| `SHERLOG_DB_NAME` | Database name | `sherlog` |
+| `SHERLOG_DB_USER` | Database user | `sherlog` |
+| `SHERLOG_DB_PASSWORD` | Database password | `sherlog` |
+| `SHERLOG_DB_TYPE` | Database type (sqlite, postgresql) | `sqlite` |
+| `SHERLOG_DB_FILE` | SQLite database file path | `./data/sherlog.db` |
+| `SHERLOG_PYTHON_CELL_TIMEOUT` | Timeout for Python cell execution (seconds) | `30` |
+| `SHERLOG_PYTHON_CELL_MAX_MEMORY` | Max memory for Python cell execution (MB) | `1024` |
+| `SHERLOG_DEFAULT_QUERY_TIMEOUT` | Default timeout for database queries (seconds) | `30` |
 
 ## Project Structure
 
