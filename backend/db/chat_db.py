@@ -140,8 +140,8 @@ class ChatDatabase:
         # Get current timestamp
         now = datetime.now(timezone.utc).isoformat()
         
-        # Serialize message to JSON
-        message_json = json.dumps(message.__dict__)
+        # Serialize message to JSON using ModelMessagesTypeAdapter
+        message_json = ModelMessagesTypeAdapter.dump_json([message])
         
         # Insert message
         await self._asyncify(

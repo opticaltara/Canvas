@@ -97,6 +97,7 @@ class ChatAgentService:
         self.settings = get_settings()
         self.notebook_manager = notebook_manager
         self.mcp_servers = mcp_servers or []
+        self.sessions: Dict[str, str] = {}  # Store session_id -> notebook_id mapping
         
         # Initialize the AI agent for investigation
         self.ai_agent = AIAgent(mcp_servers=self.mcp_servers)
@@ -135,8 +136,9 @@ class ChatAgentService:
     async def create_session(self, session_id: Optional[str] = None, notebook_id: Optional[str] = None) -> str:
         """Create a new chat session"""
         session_id = session_id or str(uuid4())
-        chat_agent_logger.info(f"Creating new chat session: {session_id}")
-        
+        if notebook_id:
+            self.sessions[session_id] = notebook_id
+        chat_agent_logger.info(f"Creating new chat session: {session_id} with notebook: {notebook_id}")
         return session_id
     
     async def handle_message(
@@ -160,6 +162,11 @@ class ChatAgentService:
         start_time = time.time()
         
         try:
+            # Get notebook_id for this session
+            notebook_id = self.sessions.get(session_id)
+            if not notebook_id:
+                raise ValueError(f"No notebook_id found for session {session_id}")
+            
             # First, check if we need clarification
             clarification_result = await self.chat_agent.run(
                 f"Check if this query needs clarification: {prompt}",
@@ -179,6 +186,7 @@ class ChatAgentService:
             async for status_type, status in self.ai_agent.investigate(
                 prompt,
                 session_id,
+                notebook_id=notebook_id,
                 message_history=message_history,
                 cell_tools=self.cell_tools
             ):

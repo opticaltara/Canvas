@@ -20,12 +20,6 @@ Sherlog Canvas consists of:
    - MCP server integration for data sources
    - AI orchestration for query planning
 
-2. **Frontend**:
-   - Vite.js + React-based UI
-   - Real-time updates via WebSockets
-   - Monaco Editor for code/query editing
-   - Dependency visualization
-
 ## Quick Start
 
 Sherlog Canvas now includes a convenient startup script that handles all components using Docker Compose:
@@ -57,7 +51,6 @@ The start script handles:
 - Starting PostgreSQL MCP server in Docker
 - Starting Grafana MCP server in Docker
 - Starting the backend API server in Docker
-- Starting the frontend in Docker
 
 All services are managed through Docker Compose for consistency and ease of use.
 
@@ -147,21 +140,6 @@ pip install -r requirements.txt
 python -m uvicorn backend.server:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### Frontend Setup
-
-```bash
-# Navigate to the frontend directory
-cd frontend
-
-# Install dependencies
-npm install
-
-# Start the development server
-npm run dev
-```
-
-Visit `http://localhost:5173` to access Sherlog Canvas.
-
 ## Usage Examples
 
 ### Investigating Service Errors
@@ -220,18 +198,8 @@ sherlog-canvas/
 │   ├── routes/              # API routes
 │   ├── config.py            # Configuration
 │   └── server.py            # FastAPI server
-├── frontend/                # Frontend TypeScript/React code
-│   ├── src/                 # Source code
-│   │   ├── components/      # React components
-│   │   ├── hooks/           # Custom React hooks
-│   │   ├── styles/          # CSS styles
-│   │   ├── types/           # TypeScript types
-│   │   └── utils/           # Utility functions
-│   ├── package.json         # NPM configuration
-│   └── vite.config.ts       # Vite configuration
 ├── docker-compose.yml       # Docker Compose configuration
 ├── Dockerfile.backend       # Backend Docker image
-├── Dockerfile.frontend      # Frontend Docker image
 └── requirements.txt         # Python dependencies
 ```
 
@@ -272,8 +240,7 @@ If you need to integrate a data source that doesn't have an existing MCP server:
 
 1. Add the new cell type to `backend/core/cell.py`
 2. Create a cell executor in `backend/core/execution.py`
-3. Add appropriate UI components in the frontend
-4. Update pydantic-ai tools to handle the new cell type
+3. Update pydantic-ai tools to handle the new cell type
 
 ## Contributing
 

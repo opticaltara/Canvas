@@ -9,10 +9,21 @@ import logging
 import time
 from typing import Dict, List, Optional, Any
 from uuid import UUID, uuid4
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from pydantic_ai.messages import (
+    TextPart, 
+    UserPromptPart, 
+    ModelRequest, 
+    ModelResponse,
+    PartStartEvent,
+    PartDeltaEvent,
+    TextPartDelta,
+    FinalResultEvent
+)
 
 from backend.ai.chat_agent import ChatAgentService, ChatRequest, ChatMessage
 from backend.ai.chat_tools import NotebookCellTools
@@ -52,7 +63,7 @@ async def get_chat_db(request: Request) -> ChatDatabase:
 
 class CreateSessionRequest(BaseModel):
     """Request to create a new chat session"""
-    notebook_id: Optional[str] = None
+    notebook_id: str = Field(description="The ID of the notebook to associate with the chat session")
 
 
 class CreateSessionResponse(BaseModel):
@@ -207,7 +218,7 @@ async def post_message(
             user_msg = ChatMessage(
                 role="user",
                 content=prompt,
-                timestamp=time.strftime("%Y-%m-%dT%H:%M:%S.%fZ", time.gmtime())
+                timestamp=datetime.now(timezone.utc).isoformat()
             )
             yield json.dumps(user_msg.model_dump()).encode('utf-8') + b'\n'
             
@@ -215,32 +226,35 @@ async def post_message(
             messages = await chat_db.get_messages(session_id)
             
             # Stream the AI response
-            async for text_chunk, response in chat_agent.stream_response(
-                prompt=prompt,
-                session_id=session_id,
-                message_history=messages
-            ):
-                # Create a chat message from the response chunk
-                model_msg = ChatMessage(
-                    role="model",
-                    content=text_chunk,
-                    timestamp=response.timestamp.isoformat()
-                )
-                yield json.dumps(model_msg.model_dump()).encode('utf-8') + b'\n'
-            
-            # After successful streaming, save the messages to the database
-            from pydantic_ai.messages import UserPromptPart, ModelRequest
-            
-            # Create and save user message
-            user_model_message = ModelRequest(
-                parts=[UserPromptPart(content=prompt)],
-                timestamp=time.time()
-            )
-            await chat_db.add_message(session_id, user_model_message)
-            
-            # Get final AI response and save it
-            final_response = response  # Last response from the stream
-            await chat_db.add_message(session_id, final_response)
+            async with chat_agent.chat_agent.iter(prompt, message_history=messages) as run:
+                async for node in run:
+                    if chat_agent.chat_agent.is_model_request_node(node):
+                        async with node.stream(run.ctx) as request_stream:
+                            async for event in request_stream:
+                                if isinstance(event, PartStartEvent):
+                                    content = ""
+                                elif isinstance(event, PartDeltaEvent):
+                                    if isinstance(event.delta, TextPartDelta):
+                                        content = event.delta.content_delta
+                                        model_msg = ChatMessage(
+                                            role="model",
+                                            content=content,
+                                            timestamp=datetime.now(timezone.utc).isoformat()
+                                        )
+                                        yield json.dumps(model_msg.model_dump()).encode('utf-8') + b'\n'
+                                elif isinstance(event, FinalResultEvent):
+                                    # Final result, save to database
+                                    user_model_message = ModelRequest(
+                                        parts=[UserPromptPart(content=prompt)]
+                                    )
+                                    await chat_db.add_message(session_id, user_model_message)
+                                    if run.result:
+                                        # Convert AgentRunResult to ModelResponse
+                                        model_response = ModelResponse(
+                                            parts=[TextPart(content=run.result.data)],
+                                            timestamp=datetime.now(timezone.utc)
+                                        )
+                                        await chat_db.add_message(session_id, model_response)
             
             process_time = time.time() - start_time
             chat_logger.info(
@@ -382,7 +396,7 @@ async def unified_chat(
             user_msg = ChatMessage(
                 role="user",
                 content=request.prompt,
-                timestamp=time.strftime("%Y-%m-%dT%H:%M:%S.%fZ", time.gmtime())
+                timestamp=datetime.now(timezone.utc).isoformat()
             )
             yield json.dumps(user_msg.model_dump()).encode('utf-8') + b'\n'
             
@@ -390,32 +404,35 @@ async def unified_chat(
             messages = await chat_db.get_messages(session_id)
             
             # Stream the AI response
-            async for text_chunk, response in chat_agent.stream_response(
-                prompt=request.prompt,
-                session_id=session_id,
-                message_history=messages
-            ):
-                # Create a chat message from the response chunk
-                model_msg = ChatMessage(
-                    role="model",
-                    content=text_chunk,
-                    timestamp=response.timestamp.isoformat()
-                )
-                yield json.dumps(model_msg.model_dump()).encode('utf-8') + b'\n'
-            
-            # After successful streaming, save the messages to the database
-            from pydantic_ai.messages import UserPromptPart, ModelRequest
-            
-            # Create and save user message
-            user_model_message = ModelRequest(
-                parts=[UserPromptPart(content=request.prompt)],
-                timestamp=time.time()
-            )
-            await chat_db.add_message(session_id, user_model_message)
-            
-            # Save final AI response
-            final_response = response  # Last response from the stream
-            await chat_db.add_message(session_id, final_response)
+            async with chat_agent.chat_agent.iter(request.prompt, message_history=messages) as run:
+                async for node in run:
+                    if chat_agent.chat_agent.is_model_request_node(node):
+                        async with node.stream(run.ctx) as request_stream:
+                            async for event in request_stream:
+                                if isinstance(event, PartStartEvent):
+                                    content = ""
+                                elif isinstance(event, PartDeltaEvent):
+                                    if isinstance(event.delta, TextPartDelta):
+                                        content = event.delta.content_delta
+                                        model_msg = ChatMessage(
+                                            role="model",
+                                            content=content,
+                                            timestamp=datetime.now(timezone.utc).isoformat()
+                                        )
+                                        yield json.dumps(model_msg.model_dump()).encode('utf-8') + b'\n'
+                                elif isinstance(event, FinalResultEvent):
+                                    # Final result, save to database
+                                    user_model_message = ModelRequest(
+                                        parts=[UserPromptPart(content=request.prompt)]
+                                    )
+                                    await chat_db.add_message(session_id, user_model_message)
+                                    if run.result:
+                                        # Convert AgentRunResult to ModelResponse
+                                        model_response = ModelResponse(
+                                            parts=[TextPart(content=run.result.data)],
+                                            timestamp=datetime.now(timezone.utc)
+                                        )
+                                        await chat_db.add_message(session_id, model_response)
             
             process_time = time.time() - start_time
             chat_logger.info(

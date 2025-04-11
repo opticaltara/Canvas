@@ -12,8 +12,7 @@ It uses Anthropic's Claude model for natural language understanding and code gen
 with tools that connect to various data sources like SQL, Prometheus, Loki, and S3.
 """
 
-from typing import Any, Dict, List, Optional, cast, AsyncGenerator, Tuple
-from typing_extensions import Literal
+from typing import Any, Dict, List, Optional, AsyncGenerator, Tuple
 from uuid import UUID
 import os
 
@@ -27,10 +26,9 @@ from pydantic_ai.mcp import MCPServerHTTP
 from pydantic_ai.messages import ModelMessage
 
 from backend.config import get_settings
-from backend.core.cell import AIQueryCell, CellType, create_cell
+from backend.core.cell import AIQueryCell
 from backend.core.execution import ExecutionContext
-from backend.core.notebook import Notebook
-from backend.ai.planning import InvestigationPlan, InvestigationStep, PlanAdapter
+from backend.ai.planning import InvestigationPlan, InvestigationStep
 from backend.services.connection_manager import get_connection_manager, BaseConnectionConfig
 from backend.ai.chat_tools import NotebookCellTools, CreateCellParams
 
@@ -226,7 +224,7 @@ class AIAgent:
         self, 
         query: str, 
         session_id: str, 
-        notebook_id: Optional[str] = None,
+        notebook_id: str,
         message_history: List[ModelMessage] = [],
         cell_tools: Optional[NotebookCellTools] = None
     ) -> AsyncGenerator[Tuple[str, Dict[str, Any]], None]:
@@ -237,7 +235,7 @@ class AIAgent:
         Args:
             query: The user's query
             session_id: The chat session ID
-            notebook_id: Optional notebook ID
+            notebook_id: The notebook ID to create cells in
             message_history: Previous messages in the session
             cell_tools: Tools for creating and managing cells
             
@@ -247,6 +245,9 @@ class AIAgent:
         if not cell_tools:
             raise ValueError("cell_tools is required for creating cells")
             
+        if not notebook_id:
+            raise ValueError("notebook_id is required for creating cells")
+            
         # Create initial investigation plan
         plan = await self.create_investigation_plan(query, notebook_id)
         yield "plan_created", {"status": "plan_created", "thinking": plan.thinking}
@@ -254,7 +255,7 @@ class AIAgent:
         # Create a markdown cell explaining the plan
         plan_cell = await cell_tools.create_cell(
             params=CreateCellParams(
-                notebook_id=str(notebook_id),
+                notebook_id=notebook_id,
                 cell_type="markdown",
                 content=f"# Investigation Plan\n\n{plan.thinking}\n\n## Steps:\n" + 
                        "\n".join(f"- {step.description}" for step in plan.steps),
@@ -281,7 +282,7 @@ class AIAgent:
             # Create cell for this step
             cell_result = await cell_tools.create_cell(
                 params=CreateCellParams(
-                    notebook_id=str(notebook_id),
+                    notebook_id=notebook_id,
                     cell_type=step.step_type,
                     content=content,
                     metadata={
@@ -312,7 +313,7 @@ class AIAgent:
         )
         summary_cell = await cell_tools.create_cell(
             params=CreateCellParams(
-                notebook_id=str(notebook_id),
+                notebook_id=notebook_id,
                 cell_type="markdown",
                 content=f"# Investigation Summary\n\n{summary.data}",
                 metadata={
@@ -324,7 +325,7 @@ class AIAgent:
         )
         yield "summary_created", {"status": "summary_created"}
 
-    async def create_investigation_plan(self, query: str, notebook_id: Optional[str] = None) -> InvestigationPlan:
+    async def create_investigation_plan(self, query: str, notebook_id: str) -> InvestigationPlan:
         """Create an investigation plan for the given query"""
         # Get available data sources from connection manager
         connection_manager = get_connection_manager()
@@ -334,7 +335,7 @@ class AIAgent:
         # Create dependencies for the investigation planner
         deps = InvestigationDependencies(
             user_query=query,
-            notebook_id=UUID(notebook_id) if notebook_id else None,
+            notebook_id=UUID(notebook_id),
             available_data_sources=available_data_sources
         )
 
@@ -419,10 +420,15 @@ async def execute_ai_query_cell(cell: AIQueryCell, context: ExecutionContext) ->
         # Initialize the AI agent with MCP servers
         agent = AIAgent(mcp_servers=mcp_servers)
         
+        # Get notebook_id from cell metadata
+        notebook_id = cell.metadata.get("notebook_id")
+        if not notebook_id:
+            raise ValueError("Cell metadata must contain notebook_id")
+        
         # Generate an investigation plan
         plan = await agent.create_investigation_plan(
             query=cell.content,
-            notebook_id=cell.metadata.get("notebook_id")
+            notebook_id=notebook_id
         )
         
         # Store thinking output if available

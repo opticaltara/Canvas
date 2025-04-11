@@ -28,19 +28,6 @@ services:
       timeout: 10s
       retries: 3
     restart: unless-stopped
-
-  frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile.frontend
-    container_name: sherlog-canvas-frontend
-    ports:
-      - "3001:3001"
-    depends_on:
-      - backend
-    environment:
-      - WDS_SOCKET_PORT=3001
-    restart: unless-stopped
     
   mcp-grafana:
     # Using a custom build instead of the official image

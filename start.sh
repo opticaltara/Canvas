@@ -80,7 +80,6 @@ echo "Services started. Status:"
 docker-compose ps
 
 echo "Sherlog Canvas is now running!"
-echo "Original Frontend: http://localhost:3000"
 echo "Backend API: http://localhost:8080"
 echo "Next.js App: http://localhost:3003"
 echo "Grafana MCP: http://localhost:9110"
