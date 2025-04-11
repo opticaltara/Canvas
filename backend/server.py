@@ -229,6 +229,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount routers
+app.include_router(notebooks_router, prefix="/api/notebooks", tags=["notebooks"])
+app.include_router(connections_router, prefix="/api/connections", tags=["connections"])
+app.include_router(chat_router, prefix="/api/chat", tags=["chat"])
+
 # Enhanced request logging middleware
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
