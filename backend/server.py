@@ -146,14 +146,26 @@ async def lifespan(app: FastAPI):
     data_dir.mkdir(exist_ok=True)
     app_logger.info(f"Ensured data directory exists at {data_dir.absolute()}")
     
+    # Initialize database
+    app_logger.info("Initializing database tables")
+    try:
+        from backend.db.database import init_db
+        await init_db()
+        app_logger.info("Database tables initialized successfully")
+    except Exception as e:
+        app_logger.error(f"Failed to initialize database tables: {str(e)}", exc_info=True)
+        raise
+    
     # Initialize chat database
     app_logger.info("Initializing chat database connection")
     try:
-        async with ChatDatabase.connect(data_dir) as chat_db_ctx:
-            app.state.chat_db = chat_db_ctx
-            app_logger.info("Chat database initialized successfully")
+        # Create the chat database connection
+        chat_db_ctx = ChatDatabase.connect(data_dir)
+        app.state.chat_db = await chat_db_ctx.__aenter__()
+        app_logger.info("Chat database initialized successfully")
     except Exception as e:
         app_logger.error(f"Failed to initialize chat database: {str(e)}", exc_info=True)
+        raise
     
     # Create task for cell execution
     app_logger.info("Starting cell execution worker")
@@ -166,19 +178,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         app_logger.error(f"Failed to start cell execution worker: {str(e)}", exc_info=True)
         raise
-    
-    # Initialize MCP servers if configured
-    mcp_enabled = getattr(settings, "mcp_enabled", False)
-    if mcp_enabled:
-        app_logger.info("MCP is enabled, setting up MCP servers")
-        try:
-            mcp_servers = []
-            app.state.mcp_servers = mcp_servers
-            app_logger.info(f"Initialized {len(mcp_servers)} MCP servers")
-        except Exception as e:
-            app_logger.error(f"Failed to initialize MCP servers: {str(e)}", exc_info=True)
-    else:
-        app_logger.info("MCP is disabled, skipping MCP server setup")
     
     app_logger.info("Application startup completed")
     
@@ -220,6 +219,10 @@ app = FastAPI(
 )
 # logfire.instrument_fastapi(app)
 
+# Create notebook and connection managers
+notebook_manager = NotebookManager()
+connection_manager = ConnectionManager()
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -228,6 +231,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Initialize managers
+app.state.notebook_manager = notebook_manager
+app.state.connection_manager = connection_manager
 
 # Mount routers
 app.include_router(notebooks_router, prefix="/api/notebooks", tags=["notebooks"])
@@ -384,10 +391,6 @@ class WebSocketManager:
 
 # Initialize WebSocket manager
 websocket_manager = WebSocketManager()
-
-# Create notebook and connection managers
-notebook_manager = NotebookManager()
-connection_manager = ConnectionManager()
 
 # Initialize cell executor
 cell_executor = CellExecutor(notebook_manager)

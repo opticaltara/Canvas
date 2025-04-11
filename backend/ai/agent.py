@@ -12,29 +12,33 @@ It uses Anthropic's Claude model for natural language understanding and code gen
 with tools that connect to various data sources like SQL, Prometheus, Loki, and S3.
 """
 
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, cast, AsyncGenerator, Tuple
 from typing_extensions import Literal
 from uuid import UUID
+import os
 
 # import logfire
 import logging
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.models.anthropic import AnthropicModel
+from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.mcp import MCPServerHTTP
+from pydantic_ai.messages import ModelMessage
 
 from backend.config import get_settings
 from backend.core.cell import AIQueryCell, CellType, create_cell
 from backend.core.execution import ExecutionContext
 from backend.core.notebook import Notebook
 from backend.ai.planning import InvestigationPlan, InvestigationStep, PlanAdapter
-from backend.services.connection_manager import ConnectionConfig
+from backend.services.connection_manager import get_connection_manager, BaseConnectionConfig
+from backend.ai.chat_tools import NotebookCellTools, CreateCellParams
 
 # Get logger for AI operations
 ai_logger = logging.getLogger("ai")
 
 # Get settings for API keys
 settings = get_settings()
-anthropic_model = settings.anthropic_model
 
 class InvestigationDependencies(BaseModel):
     """Dependencies for the investigation agent"""
@@ -42,7 +46,7 @@ class InvestigationDependencies(BaseModel):
     notebook_id: Optional[UUID] = Field(description="The ID of the notebook", default=None)
     available_data_sources: List[str] = Field(
         description="Available data sources for queries",
-        default=["sql", "prometheus", "loki", "s3"]
+        default_factory=list
     )
 
 
@@ -94,19 +98,15 @@ class S3QueryParams(BaseModel):
 
 
 class InvestigationStepModel(BaseModel):
-    """A single step in an investigation plan"""
-    step_id: int = Field(description="Unique ID for this step")
-    description: str = Field(description="Description of what this step does")
-    cell_type: Literal["ai_query", "sql", "python", "markdown", "log", "metric", "s3"] = Field(
-        description="Type of cell to create"
-    )
-    content: str = Field(description="Content for the cell (query, code, text)")
-    depends_on: List[int] = Field(
-        description="IDs of steps this step depends on",
+    """A step in the investigation plan"""
+    step_type: str = Field(description="Type of step (e.g., 'sql', 'python', 'markdown')")
+    description: str = Field(description="Description of what this step will do")
+    dependencies: List[str] = Field(
+        description="List of step IDs this step depends on",
         default_factory=list
     )
-    metadata: Dict[str, Any] = Field(
-        description="Additional metadata for the step",
+    parameters: Dict[str, Any] = Field(
+        description="Parameters for the step",
         default_factory=dict
     )
 
@@ -124,215 +124,262 @@ class InvestigationPlanModel(BaseModel):
 
 class AIAgent:
     """
-    The AI agent that handles interactions with Claude 3.7
-    Responsible for interpreting user queries, generating investigation plans,
-    and creating/updating cells based on analysis.
+    The AI agent that handles investigation planning and execution.
+    Responsible for:
+    1. Creating investigation plans
+    2. Executing steps and streaming results
+    3. Adjusting plans based on results
+    4. Creating cells directly
     """
     def __init__(self, mcp_servers: Optional[List[MCPServerHTTP]] = None):
         self.settings = get_settings()
-        self.api_key = self.settings.anthropic_api_key
-        self.model = self.settings.anthropic_model
+        self.model = AnthropicModel(
+            self.settings.anthropic_model,
+            provider=AnthropicProvider(api_key=self.settings.anthropic_api_key)
+        )
         self.mcp_servers = mcp_servers or []
         
-        # Initialize agents with MCP servers
+        # Initialize investigation planner
         self.investigation_planner = Agent(
-            f"anthropic:{self.model}",
+            self.model,
             deps_type=InvestigationDependencies,
-            result_type=Dict,  # Changed to Dict since we'll convert to InvestigationPlan
+            result_type=Dict,
             mcp_servers=self.mcp_servers,
             system_prompt="""
-            You are an expert at software engineering investigation. Your task is to create a detailed plan
-            to investigate and solve problems by breaking them down into specific steps.
+            You are an expert at software engineering investigation planning. Your task is to create detailed plans
+            for investigating user queries. The plans should include:
+            1. A clear understanding of what needs to be investigated
+            2. A sequence of steps to gather and analyze data
+            3. Dependencies between steps
+            4. Parameters needed for each step
+            5. Expected outputs and insights
             
-            Create an investigation plan with ordered steps. Each step should:
-            1. Have a clear purpose in the investigation
-            2. Specify what type of cell to create (sql, log, metric, python, markdown)
-            3. Include the actual query/code/content for that cell
-            4. List any dependencies on previous steps
+            Each step should be one of these types:
+            - sql: For database queries
+            - python: For data analysis and processing
+            - markdown: For explanations and documentation
+            - log: For log analysis
+            - metric: For metric analysis
+            - s3: For S3 data access
             
-            Important considerations:
-            - Start with data gathering steps (SQL queries, log analysis, metrics)
-            - Add analysis steps using Python to process the gathered data
-            - Include markdown cells to explain your approach and findings
-            - Consider which steps depend on others and set dependencies appropriately
-            - Think step by step and be thorough in your approach
-
-            Think carefully about the logical sequence of investigation. What data do you need first?
-            How will you analyze it? What conclusions can you draw?
+            For each step, provide:
+            - A clear description of what the step will do
+            - Any dependencies on previous steps
+            - Required parameters and their expected format
+            - Expected output format and insights
             
-            Return the plan as a dictionary with:
+            Return a JSON object with this structure:
             {
-                "query": "the original query",
                 "steps": [
                     {
-                        "step_id": 1,
-                        "description": "step description",
-                        "cell_type": "sql|log|metric|python|markdown",
-                        "content": "actual query/code/content",
-                        "depends_on": [list of step_ids this depends on]
+                        "step_type": "type of step",
+                        "description": "what this step will do",
+                        "dependencies": ["step_id1", "step_id2"],
+                        "parameters": {
+                            "key": "value"
+                        },
+                        "expected_output": "description of expected output"
                     }
                 ],
-                "thinking": "optional explanation of your thought process"
+                "thinking": "detailed explanation of your investigation approach"
             }
             """
         )
 
-        # Initialize cell content generators with MCP servers
+        # Initialize content generators
         self.sql_generator = Agent(
-            f"anthropic:{self.model}",
+            self.model,
             result_type=str,
             mcp_servers=self.mcp_servers,
             system_prompt="You are an expert SQL query writer. Generate a SQL query that addresses the user's request. Return ONLY the SQL query with no explanations."
         )
 
         self.log_generator = Agent(
-            f"anthropic:{self.model}",
+            self.model,
             result_type=str,
             mcp_servers=self.mcp_servers,
             system_prompt="You are an expert in log analysis. Generate a log query that addresses the user's request. Return ONLY the log query with no explanations."
         )
 
         self.metric_generator = Agent(
-            f"anthropic:{self.model}",
+            self.model,
             result_type=str,
             mcp_servers=self.mcp_servers,
             system_prompt="You are an expert in metric analysis. Generate a PromQL query that addresses the user's request. Return ONLY the PromQL query with no explanations."
         )
 
         self.python_generator = Agent(
-            f"anthropic:{self.model}",
+            self.model,
             result_type=str,
             mcp_servers=self.mcp_servers,
             system_prompt="You are an expert Python programmer. Generate Python code that addresses the user's request. Return ONLY the Python code with no explanations."
         )
 
         self.markdown_generator = Agent(
-            f"anthropic:{self.model}",
+            self.model,
             result_type=str,
             mcp_servers=self.mcp_servers,
             system_prompt="You are an expert at technical documentation. Create clear markdown to address the user's request. Return ONLY the markdown with no meta-commentary."
         )
-    
-    async def generate_investigation_plan(
-        self,
-        query: str,
-        available_data_sources: Optional[List[str]] = None
-    ) -> InvestigationPlan:
-        """
-        Generate an investigation plan for a query using Pydantic AI
 
-        Args:
-            query: The user's investigation query
-            available_data_sources: List of available data sources
-            
-        Returns:
-            A structured investigation plan with steps and cell types
-            
-        Note: On error, returns a simple fallback plan
+    async def investigate(
+        self, 
+        query: str, 
+        session_id: str, 
+        notebook_id: Optional[str] = None,
+        message_history: List[ModelMessage] = [],
+        cell_tools: Optional[NotebookCellTools] = None
+    ) -> AsyncGenerator[Tuple[str, Dict[str, Any]], None]:
         """
-        if available_data_sources is None:
-            available_data_sources = ["sql", "prometheus", "loki", "s3"]
+        Investigate a query by creating and executing a plan.
+        Streams status updates as steps are completed.
         
-        # Set up dependencies for the agent
-        dependencies = InvestigationDependencies(
-            user_query=query,
-            available_data_sources=available_data_sources
-        )
+        Args:
+            query: The user's query
+            session_id: The chat session ID
+            notebook_id: Optional notebook ID
+            message_history: Previous messages in the session
+            cell_tools: Tools for creating and managing cells
+            
+        Yields:
+            Tuples of (step_id, status) as steps are completed
+        """
+        if not cell_tools:
+            raise ValueError("cell_tools is required for creating cells")
+            
+        # Create initial investigation plan
+        plan = await self.create_investigation_plan(query, notebook_id)
+        yield "plan_created", {"status": "plan_created", "thinking": plan.thinking}
         
-        try:
-            # Run the agent with MCP servers context manager
-            async with self.investigation_planner.run_mcp_servers():
-                result = await self.investigation_planner.run(
-                    user_prompt=dependencies.user_query,
-                    deps=dependencies
-                )
-                
-                # Convert the dictionary result to an InvestigationPlan using PlanAdapter
-                plan_dict = cast(Dict, result.data)
-                plan_dict["query"] = query  # Ensure query is set
-                return PlanAdapter.from_dict(plan_dict)
-                
-        except Exception as e:
-            print(f"Error generating investigation plan: {e}")
-            # Create a simple fallback plan
-            return InvestigationPlan(
-                query=query,
-                steps=[
-                    InvestigationStep(
-                        step_id=1,
-                        description="Initial analysis",
-                        cell_type=CellType.MARKDOWN,
-                        content=f"# Investigation for: {query}\n\nLet's break down this problem and investigate.",
-                        depends_on=[]
-                    )
-                ]
+        # Create a markdown cell explaining the plan
+        plan_cell = await cell_tools.create_cell(
+            params=CreateCellParams(
+                notebook_id=str(notebook_id),
+                cell_type="markdown",
+                content=f"# Investigation Plan\n\n{plan.thinking}\n\n## Steps:\n" + 
+                       "\n".join(f"- {step.description}" for step in plan.steps),
+                metadata={
+                    "session_id": session_id,
+                    "step_id": "plan",
+                    "dependencies": []
+                }
             )
-    
-    async def create_cells_from_plan(
-        self,
-        notebook: Notebook,
-        plan: InvestigationPlan,
-        query_cell_id: Optional[UUID] = None
-    ) -> Dict[int, UUID]:
-        """
-        Create cells in the notebook based on an investigation plan
+        )
+        yield "plan_cell_created", {"status": "plan_cell_created"}
         
-        Args:
-            notebook: The notebook to add cells to
-            plan: The investigation plan
-            query_cell_id: Optional ID of the query cell that initiated this plan
-            
-        Returns:
-            Mapping from step_ids to created cell UUIDs
-        """
-        # Maps step_ids to cell UUIDs
-        step_to_cell_map = {}
-        
-        # Create cells for each step
+        # Execute steps in order
+        completed_steps = {}
         for step in plan.steps:
-            step_id = step.step_id
-            description = step.description
-            cell_type = step.cell_type  # Already a CellType enum
-            content = step.content
-            depends_on = step.depends_on
+            # Wait for dependencies
+            for dep_id in step.dependencies:
+                if dep_id not in completed_steps:
+                    raise ValueError(f"Dependency {dep_id} not found in completed steps")
             
-            # Create metadata with description and step info
-            metadata = {
-                "description": description,
-                "step_id": step_id,
-                "generated": True,
-                "query_cell_id": str(query_cell_id) if query_cell_id else None
+            # Generate content for this step
+            content = await self.generate_content(step.step_type, step.description)
+            
+            # Create cell for this step
+            cell_result = await cell_tools.create_cell(
+                params=CreateCellParams(
+                    notebook_id=str(notebook_id),
+                    cell_type=step.step_type,
+                    content=content,
+                    metadata={
+                        "session_id": session_id,
+                        "step_id": step.step_type,
+                        "dependencies": step.dependencies
+                    }
+                )
+            )
+            
+            # Execute the cell
+            await cell_tools.execute_cell(cell_result["cell_id"])
+            
+            # Stream status update
+            yield f"step_{step.step_type}_completed", {
+                "status": "step_completed",
+                "step_type": step.step_type
             }
             
-            # Create the cell
-            cell = create_cell(cell_type, content)
-            cell.metadata.update(metadata)
+            # Store completed step
+            completed_steps[step.step_type] = content
             
-            # Add to notebook
-            cell = notebook.add_cell(cell)
-            step_to_cell_map[step_id] = cell.id
+            # TODO: Add logic to adjust plan based on results if needed
             
-            # If this is from a query cell, track the relationship
-            if query_cell_id and query_cell_id in notebook.cells:
-                query_cell = notebook.cells[query_cell_id]
-                if isinstance(query_cell, AIQueryCell):
-                    query_cell.generated_cells.append(cell.id)
-        
-        # Set up dependencies between cells
-        for step in plan.steps:
-            step_id = step.step_id
-            depends_on = step.depends_on
-            
-            if step_id in step_to_cell_map:
-                current_cell_id = step_to_cell_map[step_id]
-                
-                # Add dependencies for each step this depends on
-                for dep_step_id in depends_on:
-                    if dep_step_id in step_to_cell_map:
-                        dep_cell_id = step_to_cell_map[dep_step_id]
-                        notebook.add_dependency(current_cell_id, dep_cell_id)
-        
-        return step_to_cell_map
+        # Create summary cell
+        summary = await self.markdown_generator.run(
+            f"Create a summary of the investigation results: {completed_steps}"
+        )
+        summary_cell = await cell_tools.create_cell(
+            params=CreateCellParams(
+                notebook_id=str(notebook_id),
+                cell_type="markdown",
+                content=f"# Investigation Summary\n\n{summary.data}",
+                metadata={
+                    "session_id": session_id,
+                    "step_id": "summary",
+                    "dependencies": list(completed_steps.keys())
+                }
+            )
+        )
+        yield "summary_created", {"status": "summary_created"}
+
+    async def create_investigation_plan(self, query: str, notebook_id: Optional[str] = None) -> InvestigationPlan:
+        """Create an investigation plan for the given query"""
+        # Get available data sources from connection manager
+        connection_manager = get_connection_manager()
+        connections = await connection_manager.get_all_connections()
+        available_data_sources = [conn["type"] for conn in connections]
+
+        # Create dependencies for the investigation planner
+        deps = InvestigationDependencies(
+            user_query=query,
+            notebook_id=UUID(notebook_id) if notebook_id else None,
+            available_data_sources=available_data_sources
+        )
+
+        # Generate the plan
+        result = await self.investigation_planner.run(
+            user_prompt=deps.user_query,
+            deps=deps
+        )
+        plan_data = result.data
+
+        # Convert to InvestigationPlan
+        steps = []
+        for step_data in plan_data["steps"]:
+            step = InvestigationStep(
+                step_type=step_data["step_type"],
+                description=step_data["description"],
+                dependencies=step_data["dependencies"],
+                parameters=step_data["parameters"]
+            )
+            steps.append(step)
+
+        return InvestigationPlan(
+            steps=steps,
+            thinking=plan_data.get("thinking")
+        )
+
+    async def generate_content(self, step_type: str, description: str) -> str:
+        """Generate content for a specific step type"""
+        if step_type == "sql":
+            result = await self.sql_generator.run(description)
+            return result.data
+        elif step_type == "log":
+            result = await self.log_generator.run(description)
+            return result.data
+        elif step_type == "metric":
+            result = await self.metric_generator.run(description)
+            return result.data
+        elif step_type == "python":
+            result = await self.python_generator.run(description)
+            return result.data
+        elif step_type == "markdown":
+            result = await self.markdown_generator.run(description)
+            return result.data
+        else:
+            raise ValueError(f"Unsupported step type: {step_type}")
 
 
 async def execute_ai_query_cell(cell: AIQueryCell, context: ExecutionContext) -> Dict:
@@ -347,23 +394,19 @@ async def execute_ai_query_cell(cell: AIQueryCell, context: ExecutionContext) ->
         The result of executing the cell
     """
     try:
-        # Get connection manager and MCP server manager
-        from backend.services.connection_manager import get_connection_manager
-        from backend.mcp.manager import get_mcp_server_manager
-        
+        # Get connection manager
         connection_manager = get_connection_manager()
-        mcp_manager = get_mcp_server_manager()
         
         # Get all connections
-        connections = connection_manager.get_all_connections()
+        connections = await connection_manager.get_all_connections()
         
         # Start MCP servers for all connections
-        connection_configs = []
+        server_addresses = {}
         for conn in connections:
             if isinstance(conn, dict) and "id" in conn:
-                connection_configs.append(ConnectionConfig(**conn))
-        
-        server_addresses = await mcp_manager.start_mcp_servers(connection_configs)
+                connection_config = BaseConnectionConfig(**conn)
+                await connection_config.start_mcp_server()
+                server_addresses[conn["id"]] = connection_config.mcp_status["address"]
         
         # Create MCPServerHTTP instances for each connection
         mcp_servers = []
@@ -377,29 +420,18 @@ async def execute_ai_query_cell(cell: AIQueryCell, context: ExecutionContext) ->
         agent = AIAgent(mcp_servers=mcp_servers)
         
         # Generate an investigation plan
-        plan = await agent.generate_investigation_plan(
+        plan = await agent.create_investigation_plan(
             query=cell.content,
-            available_data_sources=[conn["type"] for conn in connections if isinstance(conn, dict) and "type" in conn]
+            notebook_id=cell.metadata.get("notebook_id")
         )
         
         # Store thinking output if available
         if plan.thinking:
             cell.thinking = plan.thinking
         
-        # Create cells based on the plan
-        step_to_cell_map = await agent.create_cells_from_plan(
-            notebook=context.notebook,
-            plan=plan,
-            query_cell_id=cell.id
-        )
-        
-        # Convert plan to dict for result
-        plan_dict = PlanAdapter.to_dict(plan)
-        
-        # Return the result
+        # Return the plan for the ChatAgent to execute
         return {
-            "plan": plan_dict,
-            "generated_cells": {str(step_id): str(cell_id) for step_id, cell_id in step_to_cell_map.items()},
+            "plan": plan.model_dump(),
             "thinking": plan.thinking
         }
     
@@ -407,6 +439,5 @@ async def execute_ai_query_cell(cell: AIQueryCell, context: ExecutionContext) ->
         print(f"Error executing AI query cell: {e}")
         return {
             "error": str(e),
-            "plan": None,
-            "generated_cells": {}
+            "plan": None
         }

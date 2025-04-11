@@ -32,13 +32,37 @@ class CorrelationIdFilter(logging.Filter):
 # Add the filter to our logger
 logger.addFilter(CorrelationIdFilter())
 
-# Base connection configuration model
 class BaseConnectionConfig(BaseModel):
     """Base connection configuration"""
     id: str
     name: str
     type: str
+    config: Dict[str, Any] = Field(default_factory=dict)
+    mcp_status: Dict[str, Any] = Field(default_factory=lambda: {"status": "stopped"})
     
+    async def get_mcp_status(self) -> Dict[str, Any]:
+        """Get the MCP server status"""
+        # Get the MCP server manager to get the actual status
+        from backend.mcp.manager import get_mcp_server_manager
+        mcp_manager = get_mcp_server_manager()
+        status = mcp_manager.get_server_status(self.id)
+        self.mcp_status = status
+        return status
+    
+    async def start_mcp_server(self) -> None:
+        """Start the MCP server"""
+        from backend.mcp.manager import get_mcp_server_manager
+        mcp_manager = get_mcp_server_manager()
+        await mcp_manager.start_mcp_server(self)
+        self.mcp_status = mcp_manager.get_server_status(self.id)
+    
+    async def stop_mcp_server(self) -> None:
+        """Stop the MCP server"""
+        from backend.mcp.manager import get_mcp_server_manager
+        mcp_manager = get_mcp_server_manager()
+        await mcp_manager.stop_server(self.id)
+        self.mcp_status = mcp_manager.get_server_status(self.id)
+
 class GrafanaConnectionConfig(BaseConnectionConfig):
     """Grafana connection configuration"""
     type: str = "grafana"
@@ -74,14 +98,8 @@ class GenericConnectionConfig(BaseConnectionConfig):
     """Generic connection configuration"""
     config: Dict[str, str] = Field(default_factory=dict)
 
-# Main connection config that can be any specific type
-class ConnectionConfig(BaseModel):
+class ConnectionConfig(BaseConnectionConfig):
     """Connection configuration"""
-    id: str
-    name: str
-    type: str  # "grafana", "sql", "prometheus", "loki", "s3", "kubernetes", etc.
-    config: Dict[str, Any] = Field(default_factory=dict)
-    
     def to_specific_config(self) -> Union[
         GrafanaConnectionConfig, 
         KubernetesConnectionConfig,

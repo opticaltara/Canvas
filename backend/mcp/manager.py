@@ -13,7 +13,7 @@ import time
 from typing import Dict, List, Optional
 from uuid import uuid4
 
-from backend.services.connection_manager import ConnectionConfig
+from backend.services.connection_manager import BaseConnectionConfig
 
 # Initialize logger
 mcp_logger = logging.getLogger("mcp")
@@ -67,7 +67,7 @@ class MCPServerManager:
             }
         )
     
-    async def start_mcp_servers(self, connections: List[ConnectionConfig]) -> Dict[str, str]:
+    async def start_mcp_servers(self, connections: List[BaseConnectionConfig]) -> Dict[str, str]:
         """
         Start MCP servers for the given connections
         
@@ -109,7 +109,7 @@ class MCPServerManager:
         
         return server_addresses
     
-    async def start_mcp_server(self, connection: ConnectionConfig) -> Optional[str]:
+    async def start_mcp_server(self, connection: BaseConnectionConfig) -> Optional[str]:
         """
         Start an appropriate MCP server for the given connection
 
@@ -426,7 +426,7 @@ class MCPServerManager:
             statuses[connection_id] = self.get_server_status(connection_id)
         return statuses
     
-    async def _start_grafana_mcp(self, connection: ConnectionConfig) -> Optional[str]:
+    async def _start_grafana_mcp(self, connection: BaseConnectionConfig) -> Optional[str]:
         """
         Start a Grafana MCP server
         
@@ -446,7 +446,7 @@ class MCPServerManager:
             }
         )
         
-        # Get configuration
+        # Get configuration from the config field
         grafana_url = connection.config.get("url")
         api_key = connection.config.get("api_key")
         
@@ -458,7 +458,9 @@ class MCPServerManager:
                 extra={
                     'correlation_id': correlation_id,
                     'connection_id': connection.id,
-                    'connection_name': connection.name
+                    'connection_name': connection.name,
+                    'has_url': bool(grafana_url),
+                    'has_api_key': bool(api_key)
                 }
             )
             return None
@@ -546,7 +548,7 @@ class MCPServerManager:
             )
             return None
     
-    async def _start_kubernetes_mcp(self, connection: ConnectionConfig) -> Optional[str]:
+    async def _start_kubernetes_mcp(self, connection: BaseConnectionConfig) -> Optional[str]:
         """
         Start a Kubernetes MCP server
         
@@ -857,7 +859,7 @@ class MCPServerManager:
                     
             return None
             
-    async def _start_python_mcp(self, connection: ConnectionConfig) -> Optional[str]:
+    async def _start_python_mcp(self, connection: BaseConnectionConfig) -> Optional[str]:
         """
         Start a Python MCP server for sandboxed code execution using Pydantic MCP
         

@@ -8,11 +8,14 @@ and manage notebook cells.
 
 import logging
 import time
-from typing import Dict, List, Optional, Union, Any, Tuple, AsyncGenerator
-from uuid import UUID, uuid4
+from typing import Dict, List, Optional, Any, Tuple, AsyncGenerator
+from uuid import uuid4
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.models.anthropic import AnthropicModel
+from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.messages import (
     ModelMessage, 
     ModelMessagesTypeAdapter, 
@@ -24,11 +27,9 @@ from pydantic_ai.messages import (
 from pydantic_ai.mcp import MCPServerHTTP
 
 from backend.config import get_settings
-from backend.core.cell import AIQueryCell, CellType
-from backend.core.notebook import Notebook
-from backend.ai.planning import InvestigationPlan
 from backend.ai.chat_tools import NotebookCellTools
 from backend.services.notebook_manager import NotebookManager
+from backend.ai.agent import AIAgent
 
 # Initialize logger
 chat_agent_logger = logging.getLogger("ai.chat_agent")
@@ -72,7 +73,7 @@ def to_chat_message(message: ModelMessage) -> ChatMessage:
     return ChatMessage(
         role="unknown",
         content=str(message),
-        timestamp=message.timestamp.isoformat()
+        timestamp=datetime.now(timezone.utc).isoformat()
     )
 
 
@@ -86,7 +87,7 @@ class ChatRequest(BaseModel):
 class ChatAgentService:
     """
     Chat agent service that handles interactive conversations
-    and can create/manage notebook cells.
+    and coordinates with the AI agent for investigations.
     """
     def __init__(
         self, 
@@ -97,38 +98,35 @@ class ChatAgentService:
         self.notebook_manager = notebook_manager
         self.mcp_servers = mcp_servers or []
         
+        # Initialize the AI agent for investigation
+        self.ai_agent = AIAgent(mcp_servers=self.mcp_servers)
+        
         # Initialize cell tools
         self.cell_tools = NotebookCellTools(notebook_manager)
         
         # Create the chat agent
         self.chat_agent = Agent(
-            model=f"anthropic:{self.settings.anthropic_model}",
+            model=AnthropicModel(
+                self.settings.anthropic_model,
+                provider=AnthropicProvider(api_key=self.settings.anthropic_api_key)
+            ),
             tools=self.cell_tools.get_tools(),
-            mcp_servers=self.mcp_servers,
             system_prompt="""
             You are an AI assistant integrated with Sherlog Canvas, a reactive notebook for software engineering investigations.
             
-            You can help users:
-            1. Understand complex software systems
-            2. Investigate and diagnose issues
-            3. Create and manage notebook cells for data analysis
-            4. Interpret logs, metrics, and other data sources
+            Your primary responsibilities are:
+            1. Understanding user queries and asking clarifying questions when needed
+            2. Managing the conversation flow and maintaining context
+            3. Coordinating with the investigation agent for complex queries
+            4. Presenting investigation results in a clear, user-friendly way
             
-            You have access to tools that can manage notebook cells directly:
-            - create_cell: Create a new cell (markdown, python, sql, log, metric, s3, ai_query)
-            - update_cell: Update an existing cell's content or metadata
-            - execute_cell: Queue a cell for execution
-            - list_cells: Get information about all cells in a notebook
-            - get_cell: Get detailed information about a specific cell
-            - execute_ai_query: Create and queue an AI query cell
+            When a user asks to investigate something:
+            1. First, ensure you understand their request completely. Ask clarifying questions if needed
+            2. Once clear, pass the query to the investigation agent
+            3. Present the investigation results in a clear, organized way
+            4. Be ready to answer follow-up questions about the investigation
             
-            When asked to investigate an issue or analyze data, you should:
-            1. Break down the problem into logical steps
-            2. Create appropriate cells for each step (markdown for explanations, data queries, Python for analysis)
-            3. Make sure to create cells in the right order with correct dependencies
-            4. Provide clear explanations in markdown cells
-            
-            Respond in a helpful, conversational manner while using your tools to manage notebook cells as needed.
+            Always respond in a helpful, conversational manner while maintaining context of the investigation.
             """
         )
         
@@ -145,20 +143,51 @@ class ChatAgentService:
         self, 
         prompt: str, 
         session_id: str,
-        message_history: List[ModelMessage] = None
-    ) -> ModelResponse:
+        message_history: List[ModelMessage] = []
+    ) -> AsyncGenerator[Tuple[str, ModelResponse], None]:
         """
-        Process a user message and return the AI response
+        Process a user message and stream status updates
         
-        This is a non-streaming version used for simple requests
+        Args:
+            prompt: The user's message
+            session_id: The chat session ID
+            message_history: Previous messages in the session
+            
+        Yields:
+            Tuples of (status_type, response) as updates occur
         """
         chat_agent_logger.info(f"Handling message in session {session_id}")
         start_time = time.time()
         
         try:
-            # Use the agent with message history if provided
-            history = message_history or []
-            result = await self.chat_agent.run(prompt, message_history=history)
+            # First, check if we need clarification
+            clarification_result = await self.chat_agent.run(
+                f"Check if this query needs clarification: {prompt}",
+                message_history=message_history
+            )
+            
+            if "needs_clarification" in clarification_result.data.lower():
+                # Ask for clarification
+                clarification_response = ModelResponse(
+                    parts=[TextPart(clarification_result.data)],
+                    timestamp=datetime.now(timezone.utc)
+                )
+                yield "clarification", clarification_response
+                return
+            
+            # If no clarification needed, start investigation
+            async for status_type, status in self.ai_agent.investigate(
+                prompt,
+                session_id,
+                message_history=message_history,
+                cell_tools=self.cell_tools
+            ):
+                # Create response for this status update
+                response = ModelResponse(
+                    parts=[TextPart(f"Status: {status_type} - {status['status']}")],
+                    timestamp=datetime.now(timezone.utc)
+                )
+                yield status_type, response
             
             response_time = time.time() - start_time
             chat_agent_logger.info(
@@ -169,62 +198,10 @@ class ChatAgentService:
                 }
             )
             
-            return result.response
-            
         except Exception as e:
             response_time = time.time() - start_time
             chat_agent_logger.error(
                 f"Error handling message",
-                extra={
-                    'session_id': session_id,
-                    'error': str(e),
-                    'response_time_ms': int(response_time * 1000)
-                },
-                exc_info=True
-            )
-            raise
-    
-    async def stream_response(
-        self, 
-        prompt: str, 
-        session_id: str,
-        message_history: List[ModelMessage] = None
-    ) -> AsyncGenerator[Tuple[str, ModelResponse], None]:
-        """
-        Stream the AI's response to a user message
-        
-        Yields tuples of (text_chunk, full_response)
-        """
-        chat_agent_logger.info(f"Streaming response for session {session_id}")
-        start_time = time.time()
-        
-        try:
-            # Use the agent with message history if provided
-            history = message_history or []
-            
-            async with self.chat_agent.run_stream(prompt, message_history=history) as result:
-                async for text in result.stream(debounce_by=0.01):
-                    # Create a response object with the current text
-                    current_response = ModelResponse(
-                        parts=[TextPart(text)],
-                        timestamp=result.timestamp()
-                    )
-                    
-                    yield text, current_response
-            
-            response_time = time.time() - start_time
-            chat_agent_logger.info(
-                f"Response streaming completed",
-                extra={
-                    'session_id': session_id,
-                    'response_time_ms': int(response_time * 1000)
-                }
-            )
-            
-        except Exception as e:
-            response_time = time.time() - start_time
-            chat_agent_logger.error(
-                f"Error streaming response",
                 extra={
                     'session_id': session_id,
                     'error': str(e),
