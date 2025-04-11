@@ -39,6 +39,7 @@ pg-mcp/
 
 # Data
 /data/
+/logs/
 
 # IDE
 .idea/
