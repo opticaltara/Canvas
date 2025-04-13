@@ -218,7 +218,8 @@ async def post_message(
             user_msg = ChatMessage(
                 role="user",
                 content=prompt,
-                timestamp=datetime.now(timezone.utc).isoformat()
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                agent="user"
             )
             yield json.dumps(user_msg.model_dump()).encode('utf-8') + b'\n'
             
@@ -239,7 +240,8 @@ async def post_message(
                                         model_msg = ChatMessage(
                                             role="model",
                                             content=content,
-                                            timestamp=datetime.now(timezone.utc).isoformat()
+                                            timestamp=datetime.now(timezone.utc).isoformat(),
+                                            agent="chat_agent"
                                         )
                                         yield json.dumps(model_msg.model_dump()).encode('utf-8') + b'\n'
                                 elif isinstance(event, FinalResultEvent):
@@ -413,7 +415,8 @@ async def unified_chat(
             user_msg = ChatMessage(
                 role="user",
                 content=request.prompt,
-                timestamp=datetime.now(timezone.utc).isoformat()
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                agent="user"
             )
             yield json.dumps(user_msg.model_dump()).encode('utf-8') + b'\n'
             
@@ -434,7 +437,8 @@ async def unified_chat(
                                         model_msg = ChatMessage(
                                             role="model",
                                             content=content,
-                                            timestamp=datetime.now(timezone.utc).isoformat()
+                                            timestamp=datetime.now(timezone.utc).isoformat(),
+                                            agent="chat_agent"
                                         )
                                         yield json.dumps(model_msg.model_dump()).encode('utf-8') + b'\n'
                                 elif isinstance(event, FinalResultEvent):

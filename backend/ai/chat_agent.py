@@ -49,13 +49,14 @@ class ChatMessage(BaseModel):
     role: str = Field(description="Role: 'user' or 'model'")
     content: str = Field(description="Message content")
     timestamp: str = Field(description="Timestamp of the message")
+    agent: Optional[str] = Field(description="Agent that generated the message: 'chat_agent' or 'ai_agent'", default=None)
 
 class ClarificationResult(BaseModel):
     needs_clarification: bool = Field(description="Whether the query needs clarification")
     clarification_message: Optional[str] = Field(description="Message to ask for clarification if needed", default=None)
 
 
-def to_chat_message(message: ModelMessage) -> ChatMessage:
+def to_chat_message(message: ModelMessage, agent: Optional[str] = None) -> ChatMessage:
     """Convert a ModelMessage to a ChatMessage"""
     first_part = message.parts[0]
     
@@ -64,20 +65,23 @@ def to_chat_message(message: ModelMessage) -> ChatMessage:
             return ChatMessage(
                 role="user",
                 content=first_part.content,
-                timestamp=first_part.timestamp.isoformat()
+                timestamp=first_part.timestamp.isoformat(),
+                agent=agent
             )
     elif isinstance(message, ModelResponse) and isinstance(first_part, TextPart):
         return ChatMessage(
             role="model",
             content=first_part.content,
-            timestamp=message.timestamp.isoformat()
+            timestamp=message.timestamp.isoformat(),
+            agent=agent
         )
     
     # If we can't convert, use a default representation
     return ChatMessage(
         role="unknown",
         content=str(message),
-        timestamp=datetime.now(timezone.utc).isoformat()
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        agent=agent
     )
 
 
@@ -112,7 +116,6 @@ class ChatAgentService:
                 self.settings.anthropic_model,
                 provider=AnthropicProvider(api_key=self.settings.anthropic_api_key)
             ),
-            tools=self.cell_tools.get_tools(),
             system_prompt="""
             You are an AI assistant integrated with Sherlog Canvas, a reactive notebook for software engineering investigations.
             
@@ -173,7 +176,7 @@ class ChatAgentService:
             # First, check if we need clarification
 
             clarification_result = await self.chat_agent.run(
-                f"Check if this query needs clarification: {prompt}",
+                f"Check if this query needs clarification: {prompt}. The current investigation notebook is {notebook_id}.",
                 message_history=message_history,
                 result_type=ClarificationResult
             )
@@ -185,6 +188,7 @@ class ChatAgentService:
                     parts=[TextPart(clarification_result.data.clarification_message)],
                     timestamp=datetime.now(timezone.utc)
                 )
+                # Include chat_agent as the source
                 yield "clarification", clarification_response
                 return
             
@@ -197,11 +201,12 @@ class ChatAgentService:
                 message_history=message_history,
                 cell_tools=self.cell_tools
             ):
-                # Create response for this status update
+                # Create response for this status update with ai_agent as the source
                 response = ModelResponse(
                     parts=[TextPart(f"Status: {status_type} - {status['status']}")],
                     timestamp=datetime.now(timezone.utc)
                 )
+                # Let downstream code know this is from the ai_agent
                 yield status_type, response
             
             response_time = time.time() - start_time

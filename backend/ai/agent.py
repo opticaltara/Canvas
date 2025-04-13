@@ -311,7 +311,7 @@ class AIAgent:
             
         # Create initial investigation plan
         plan = await self.create_investigation_plan(query, notebook_id)
-        yield "plan_created", {"status": "plan_created", "thinking": plan.thinking}
+        yield "plan_created", {"status": "plan_created", "thinking": plan.thinking, "agent_type": "investigation_planner"}
         
         # Create a markdown cell explaining the plan
         await cell_tools.create_cell(
@@ -327,7 +327,7 @@ class AIAgent:
                 }
             )
         )
-        yield "plan_cell_created", {"status": "plan_cell_created"}
+        yield "plan_cell_created", {"status": "plan_cell_created", "agent_type": "investigation_planner"}
 
         # Execute steps in order with potential for plan revision
         executed_steps = {}
@@ -344,7 +344,7 @@ class AIAgent:
             
             if not executable_steps:
                 # This should not happen with a valid plan, but just in case
-                yield "error", {"status": "error", "message": "No executable steps but plan not complete"}
+                yield "error", {"status": "error", "message": "No executable steps but plan not complete", "agent_type": "investigation_planner"}
                 break
                 
             # Execute the first available step
@@ -393,7 +393,8 @@ class AIAgent:
                     "query": result.query,
                     "error": result.error,
                     "metadata": result.metadata
-                }
+                },
+                "agent_type": current_step.step_type
             }
             
             # Check if this is a decision point
@@ -488,7 +489,8 @@ class AIAgent:
                         
                     yield "plan_revised", {
                         "status": "plan_revised", 
-                        "explanation": plan_revision.explanation
+                        "explanation": plan_revision.explanation,
+                        "agent_type": "plan_reviser"
                     }
         
         # Create final summary cell
@@ -524,7 +526,7 @@ class AIAgent:
                 }
             )
         )
-        yield "summary_created", {"status": "summary_created"}
+        yield "summary_created", {"status": "summary_created", "agent_type": "markdown_generator"}
 
     async def create_investigation_plan(self, query: str, notebook_id: Optional[str] = None) -> InvestigationPlanModel:
         """Create an investigation plan for the given query"""
