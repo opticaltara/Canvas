@@ -372,6 +372,14 @@ async def unified_chat(
             
             # If no session ID provided, create a new session
             if not session_id:
+                if not request.notebook_id:
+                    error_json = json.dumps({
+                        "error": "notebook_id is required when creating a new session",
+                        "status_code": 400
+                    })
+                    yield error_json.encode('utf-8') + b'\n'
+                    return
+                    
                 session_id = str(uuid4())
                 await chat_db.create_session(session_id, request.notebook_id)
                 await chat_agent.create_session(session_id, request.notebook_id)
@@ -388,6 +396,15 @@ async def unified_chat(
                     error_json = json.dumps({
                         "error": f"Chat session {session_id} not found",
                         "status_code": 404
+                    })
+                    yield error_json.encode('utf-8') + b'\n'
+                    return
+                
+                # If a different notebook_id is provided, return an error
+                if request.notebook_id and request.notebook_id != session["notebook_id"]:
+                    error_json = json.dumps({
+                        "error": f"Cannot change notebook_id for existing session {session_id}",
+                        "status_code": 400
                     })
                     yield error_json.encode('utf-8') + b'\n'
                     return

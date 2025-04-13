@@ -8,15 +8,8 @@ from typing import List
 
 from backend.core.cell import Cell
 from backend.core.execution import ExecutionContext
-from backend.ai.agent import MetricQueryParams
+from backend.core.query_result import MetricQueryResult
 from backend.services.connection_manager import get_connection_manager
-
-
-class MetricQueryResult(BaseModel):
-    data: List[Dict]
-    query: str 
-    error: Optional[str] = None
-    metadata: Dict = {}
 
 
 async def execute_metric_cell(cell: Cell, context: ExecutionContext) -> MetricQueryResult:
@@ -34,14 +27,6 @@ async def execute_metric_cell(cell: Cell, context: ExecutionContext) -> MetricQu
     source = cell.metadata.get("source", "prometheus")
     time_range = cell.metadata.get("time_range", None)
     instant = cell.metadata.get("instant", False)
-    
-    # Set up query parameters
-    query_params = MetricQueryParams(
-        query=cell.content,
-        source=source,
-        time_range=time_range,
-        instant=instant
-    )
     
     # Execute the query directly using the MCP clients
     connection_manager = get_connection_manager()
@@ -65,7 +50,7 @@ async def execute_metric_cell(cell: Cell, context: ExecutionContext) -> MetricQu
             raise ValueError(f"No MCP client found for connection {connection.id}")
             
         # Execute the query using the MCP client
-        result = mcp_client["query_metrics"](cell.content, query_params.model_dump())
+        result = mcp_client["query_prometheus"](cell.content)
         return MetricQueryResult(
             data=result.get("data", []),
             query=cell.content,

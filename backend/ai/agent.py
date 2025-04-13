@@ -12,23 +12,24 @@ It uses Anthropic's Claude model for natural language understanding and code gen
 with tools that connect to various data sources like SQL, Prometheus, Loki, and S3.
 """
 
+from enum import Enum
 from typing import Any, Dict, List, Optional, AsyncGenerator, Tuple
 from uuid import UUID
-import os
 
-# import logfire
 import logging
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.mcp import MCPServerHTTP
 from pydantic_ai.messages import ModelMessage
 
+from backend.ai.log_query_agent import LogQueryAgent
+from backend.ai.metric_query_agent import MetricQueryAgent
 from backend.config import get_settings
 from backend.core.cell import AIQueryCell
 from backend.core.execution import ExecutionContext
-from backend.ai.planning import InvestigationPlan, InvestigationStep
+from backend.core.query_result import  MarkdownQueryResult
 from backend.services.connection_manager import get_connection_manager, BaseConnectionConfig
 from backend.ai.chat_tools import NotebookCellTools, CreateCellParams
 
@@ -37,15 +38,6 @@ ai_logger = logging.getLogger("ai")
 
 # Get settings for API keys
 settings = get_settings()
-
-class InvestigationDependencies(BaseModel):
-    """Dependencies for the investigation agent"""
-    user_query: str = Field(description="The user's investigation query")
-    notebook_id: Optional[UUID] = Field(description="The ID of the notebook", default=None)
-    available_data_sources: List[str] = Field(
-        description="Available data sources for queries",
-        default_factory=list
-    )
 
 
 class DataQueryResult(BaseModel):
@@ -56,48 +48,16 @@ class DataQueryResult(BaseModel):
     metadata: Dict[str, Any] = Field(description="Additional metadata", default_factory=dict)
 
 
-class SQLQueryParams(BaseModel):
-    """Parameters for SQL queries"""
-    query: str = Field(description="SQL query to execute")
-    connection_id: Optional[str] = Field(description="Database connection ID", default=None)
-    parameters: Dict[str, Any] = Field(description="Query parameters", default_factory=dict)
-
-
-class LogQueryParams(BaseModel):
-    """Parameters for log queries"""
-    query: str = Field(description="Log query to execute (e.g., Loki query)")
-    source: str = Field(description="Log source (e.g., 'loki', 'grafana')", default="loki")
-    time_range: Optional[Dict[str, str]] = Field(
-        description="Time range for the query",
-        default=None
-    )
-
-
-class MetricQueryParams(BaseModel):
-    """Parameters for metric queries"""
-    query: str = Field(description="Metric query to execute (e.g., PromQL)")
-    source: str = Field(description="Metric source (e.g., 'prometheus', 'grafana')", default="prometheus")
-    time_range: Optional[Dict[str, str]] = Field(
-        description="Time range for the query",
-        default=None
-    )
-    instant: bool = Field(description="Whether to perform an instant query", default=False)
-
-
-class S3QueryParams(BaseModel):
-    """Parameters for S3 queries"""
-    query: str = Field(description="S3 query or object key")
-    bucket: str = Field(description="S3 bucket name")
-    prefix: Optional[str] = Field(description="Object key prefix for filtering", default=None)
-    operation: str = Field(
-        description="Operation to perform ('list_objects', 'get_object', or 'select_object')",
-        default="list_objects"
-    )
+class StepType(str, Enum):
+    MARKDOWN = "markdown"
+    LOG = "log"
+    METRIC = "metric"
 
 
 class InvestigationStepModel(BaseModel):
     """A step in the investigation plan"""
-    step_type: str = Field(description="Type of step (e.g., 'sql', 'python', 'markdown')")
+    step_id: str = Field(description="Unique identifier for this step")
+    step_type: StepType = Field(description="Type of step (sql, python, markdown, etc.)")
     description: str = Field(description="Description of what this step will do")
     dependencies: List[str] = Field(
         description="List of step IDs this step depends on",
@@ -106,6 +66,10 @@ class InvestigationStepModel(BaseModel):
     parameters: Dict[str, Any] = Field(
         description="Parameters for the step",
         default_factory=dict
+    )
+    is_decision_point: bool = Field(
+        description="Whether this step evaluates previous results and may change the plan",
+        default=False
     )
 
 
@@ -118,6 +82,56 @@ class InvestigationPlanModel(BaseModel):
         description="Reasoning behind the investigation plan",
         default=None
     )
+    hypothesis: Optional[str] = Field(
+        description="Current working hypothesis",
+        default=None
+    )
+
+class InvestigationDependencies(BaseModel):
+    """Dependencies for the investigation agent"""
+    user_query: str = Field(description="The user's investigation query")
+    notebook_id: UUID = Field(description="The ID of the notebook")
+    available_data_sources: List[str] = Field(
+        description="Available data sources for queries",
+        default_factory=list
+    )
+    executed_steps: Dict[str, Any] = Field(
+        description="Previously executed steps and their results",
+        default_factory=dict
+    )
+    current_hypothesis: Optional[str] = Field(
+        description="Current working hypothesis based on findings so far",
+        default=None
+    )
+
+class PlanRevisionRequest(BaseModel):
+    """Request to revise an investigation plan"""
+    original_plan: InvestigationPlanModel = Field(description="The original investigation plan")
+    executed_steps: Dict[str, Any] = Field(description="Steps that have been executed so far")
+    step_results: Dict[str, Any] = Field(description="Results from executed steps")
+    unexpected_results: List[str] = Field(
+        description="Step IDs with unexpected or interesting results",
+        default_factory=list
+    )
+    current_hypothesis: Optional[str] = Field(
+        description="Current working hypothesis based on findings so far",
+        default=None
+    )
+
+class PlanRevisionResult(BaseModel):
+    """Result of a plan revision"""
+    continue_as_is: bool = Field(description="Whether to continue with the original plan")
+    new_hypothesis: Optional[str] = Field(description="Updated hypothesis based on findings", default=None)
+    new_steps: List[InvestigationStepModel] = Field(
+        description="New steps to add to the plan",
+        default_factory=list
+    )
+    steps_to_remove: List[str] = Field(
+        description="Step IDs to remove from the plan",
+        default_factory=list
+    )
+    explanation: str = Field(description="Explanation of the revision decision")
+
 
 
 class AIAgent:
@@ -129,102 +143,147 @@ class AIAgent:
     3. Adjusting plans based on results
     4. Creating cells directly
     """
-    def __init__(self, mcp_servers: Optional[List[MCPServerHTTP]] = None):
+    def __init__(
+        self, 
+        notebook_id: str,
+        mcp_servers: Optional[List[MCPServerHTTP]] = None
+    ):
         self.settings = get_settings()
         self.model = AnthropicModel(
             self.settings.anthropic_model,
             provider=AnthropicProvider(api_key=self.settings.anthropic_api_key)
         )
         self.mcp_servers = mcp_servers or []
-        
+        self.notebook_id = notebook_id
+    
         # Initialize investigation planner
         self.investigation_planner = Agent(
             self.model,
             deps_type=InvestigationDependencies,
-            result_type=Dict,
+            result_type=InvestigationPlanModel,
             mcp_servers=self.mcp_servers,
             system_prompt="""
-            You are an expert at software engineering investigation planning. Your task is to create detailed plans
-            for investigating user queries. The plans should include:
-            1. A clear understanding of what needs to be investigated
-            2. A sequence of steps to gather and analyze data
-            3. Dependencies between steps
-            4. Parameters needed for each step
-            5. Expected outputs and insights
-            
-            Each step should be one of these types:
-            - sql: For database queries
-            - python: For data analysis and processing
-            - markdown: For explanations and documentation
-            - log: For log analysis
-            - metric: For metric analysis
-            - s3: For S3 data access
-            
-            For each step, provide:
-            - A clear description of what the step will do
-            - Any dependencies on previous steps
-            - Required parameters and their expected format
-            - Expected output format and insights
-            
-            Return a JSON object with this structure:
-            {
-                "steps": [
-                    {
-                        "step_type": "type of step",
-                        "description": "what this step will do",
-                        "dependencies": ["step_id1", "step_id2"],
-                        "parameters": {
-                            "key": "value"
-                        },
-                        "expected_output": "description of expected output"
-                    }
-                ],
-                "thinking": "detailed explanation of your investigation approach"
-            }
+            You are the Lead Investigator in a distributed AI system designed to solve complex software incidents. You coordinate a team of specialized agents by creating and adapting investigation plans.
+
+            When analyzing a user query about a software incident:
+
+            1. CONTEXT ASSESSMENT
+              • Extract the key incident characteristics (affected services, error patterns, timing)
+              • Consider the available data sources provided in the investigation dependencies
+              • Frame the investigation as a structured debugging process
+
+            2. INVESTIGATION DESIGN
+              Create a structured, adaptable plan with:
+              
+              • Problem Definition: Clear statement of what's being investigated
+              • Expected Impact: How this issue affects users/systems
+              • Investigation Graph: Steps with clear dependencies and information flow
+              • Adaptation Points: Where plan might need revision based on findings
+              • Success Criteria: Specific conditions that indicate resolution
+
+            3. STEP SPECIFICATION
+              For each step in your plan, define:
+              
+              • step_id: A unique identifier (use S1, S2, etc.)
+              • step_type: Must be one of ["log", "metric"]
+              • description: Instructions for the specialized agent that will:
+                - State precisely what question this step answers
+                - Provide all context needed for the specialized agent
+                - Explain how to interpret the results
+                - Reference specific artifacts from previous steps when needed
+              • dependencies: Array of step IDs required before this step can execute
+              • parameters: Configuration details relevant to this step type
+              • is_decision_point: Set to true for markdown steps that evaluate previous results
+              
+            4. DECISION POINTS
+              Include explicit markdown steps that will:
+              
+              • Evaluate results from previous steps
+              • Determine if hypothesis needs revision
+              • Decide whether to continue with planned steps or pivot
+              • Document the reasoning for continuing or changing direction
+
+            5. COMPLETION CRITERIA
+              Define specific technical indicators that will confirm:
+              
+              • Root cause has been identified
+              • Impact has been quantified
+              • Contributing factors are understood
+              • Potential remediation approaches
+
+            Remember that you are creating instructions for specialized agents, not executing the investigation yourself. Your instructions must be detailed and self-contained, as each specialized agent only sees its specific task.
             """
         )
 
-        # Initialize content generators
-        self.sql_generator = Agent(
-            self.model,
-            result_type=str,
-            mcp_servers=self.mcp_servers,
-            system_prompt="You are an expert SQL query writer. Generate a SQL query that addresses the user's request. Return ONLY the SQL query with no explanations."
-        )
 
-        self.log_generator = Agent(
+        # Initialize plan reviser
+        self.plan_reviser = Agent(
             self.model,
-            result_type=str,
+            deps_type=PlanRevisionRequest,
+            result_type=PlanRevisionResult,
             mcp_servers=self.mcp_servers,
-            system_prompt="You are an expert in log analysis. Generate a log query that addresses the user's request. Return ONLY the log query with no explanations."
-        )
+            system_prompt="""
+            You are an Investigation Plan Reviser responsible for analyzing the results of executed steps and determining if the investigation plan should be adjusted.
 
-        self.metric_generator = Agent(
-            self.model,
-            result_type=str,
-            mcp_servers=self.mcp_servers,
-            system_prompt="You are an expert in metric analysis. Generate a PromQL query that addresses the user's request. Return ONLY the PromQL query with no explanations."
-        )
+            When reviewing executed steps and their results:
 
-        self.python_generator = Agent(
-            self.model,
-            result_type=str,
-            mcp_servers=self.mcp_servers,
-            system_prompt="You are an expert Python programmer. Generate Python code that addresses the user's request. Return ONLY the Python code with no explanations."
-        )
+            1. ANALYZE EXECUTED STEPS
+              • Review the data and insights gained from steps executed so far
+              • Compare actual results against expected outputs
+              • Identify any unexpected patterns or anomalies
+              • Evaluate how the results support or contradict the current hypothesis
 
+            2. REVISION DECISION
+              Decide whether to:
+              • Continue with the existing plan (if results align with expectations)
+              • Modify the plan by adding new steps or removing planned steps
+              • Update the working hypothesis based on new evidence
+              
+            3. NEW STEP SPECIFICATION
+              If adding new steps, define each one with:
+              • step_id: A unique identifier not conflicting with existing steps
+              • step_type: The appropriate type for this step
+              • description: Detailed instructions for the specialized agent
+              • dependencies: Steps that must complete before this one
+              • parameters: Configuration for this step
+              • is_decision_point: Whether this is another evaluation step
+
+            4. EXPLANATION
+              Provide clear reasoning for your decision, including:
+              • How executed results influenced your decision
+              • Why the current plan is sufficient or needs changes
+              • How any new steps will address gaps in the investigation
+              • How updated hypothesis better explains the observed behavior
+
+            Your role is critical for adaptive investigation - don't hesitate to recommend significant changes if the evidence warrants it, but also maintain investigation focus and avoid unnecessary steps.
+            """
+        )
+        
         self.markdown_generator = Agent(
             self.model,
-            result_type=str,
+            result_type=MarkdownQueryResult,
             mcp_servers=self.mcp_servers,
-            system_prompt="You are an expert at technical documentation. Create clear markdown to address the user's request. Return ONLY the markdown with no meta-commentary."
+            system_prompt="""
+            You are an expert at technical documentation and result analysis. Create clear markdown to address the user's request. When analyzing investigation results:
+            
+            1. Summarize key findings clearly and objectively
+            2. Identify patterns and anomalies in the data
+            3. Draw connections between different data sources
+            4. Evaluate how findings support or contradict hypotheses
+            5. Recommend next steps based on the evidence
+            
+            Return ONLY the markdown with no meta-commentary.
+            """
         )
+
+        self.log_generator = LogQueryAgent(source="loki", notebook_id=self.notebook_id, mcp_servers=self.mcp_servers)
+        self.metric_generator = MetricQueryAgent(source="prometheus", notebook_id=self.notebook_id, mcp_servers=self.mcp_servers)
 
     async def investigate(
         self, 
         query: str, 
         session_id: str, 
-        notebook_id: str,
+        notebook_id: Optional[str] = None,
         message_history: List[ModelMessage] = [],
         cell_tools: Optional[NotebookCellTools] = None
     ) -> AsyncGenerator[Tuple[str, Dict[str, Any]], None]:
@@ -235,7 +294,7 @@ class AIAgent:
         Args:
             query: The user's query
             session_id: The chat session ID
-            notebook_id: The notebook ID to create cells in
+            notebook_id: The notebook ID to create cells in (optional, will use stored notebook_id if not provided)
             message_history: Previous messages in the session
             cell_tools: Tools for creating and managing cells
             
@@ -245,6 +304,8 @@ class AIAgent:
         if not cell_tools:
             raise ValueError("cell_tools is required for creating cells")
             
+        # Use stored notebook_id if none provided
+        notebook_id = notebook_id or self.notebook_id
         if not notebook_id:
             raise ValueError("notebook_id is required for creating cells")
             
@@ -253,7 +314,7 @@ class AIAgent:
         yield "plan_created", {"status": "plan_created", "thinking": plan.thinking}
         
         # Create a markdown cell explaining the plan
-        plan_cell = await cell_tools.create_cell(
+        await cell_tools.create_cell(
             params=CreateCellParams(
                 notebook_id=notebook_id,
                 cell_type="markdown",
@@ -267,66 +328,211 @@ class AIAgent:
             )
         )
         yield "plan_cell_created", {"status": "plan_cell_created"}
+
+        # Execute steps in order with potential for plan revision
+        executed_steps = {}
+        step_results = {}
+        current_hypothesis = plan.hypothesis
+        remaining_steps = plan.steps.copy()
         
-        # Execute steps in order
-        completed_steps = {}
-        for step in plan.steps:
-            # Wait for dependencies
-            for dep_id in step.dependencies:
-                if dep_id not in completed_steps:
-                    raise ValueError(f"Dependency {dep_id} not found in completed steps")
+        while remaining_steps:
+            # Find executable steps (all dependencies satisfied)
+            executable_steps = [
+                step for step in remaining_steps
+                if all(dep in executed_steps for dep in step.dependencies)
+            ]
+            
+            if not executable_steps:
+                # This should not happen with a valid plan, but just in case
+                yield "error", {"status": "error", "message": "No executable steps but plan not complete"}
+                break
+                
+            # Execute the first available step
+            current_step = executable_steps[0]
+            remaining_steps.remove(current_step)
             
             # Generate content for this step
-            content = await self.generate_content(step.step_type, step.description)
+            result = await self.generate_content(
+                current_step.step_type,
+                current_step.description,
+                executed_steps=executed_steps,
+                step_results=step_results
+            )
+
+            query = result.query
             
             # Create cell for this step
             cell_result = await cell_tools.create_cell(
                 params=CreateCellParams(
                     notebook_id=notebook_id,
-                    cell_type=step.step_type,
-                    content=content,
+                    cell_type=current_step.step_type,
+                    content=query,
                     metadata={
                         "session_id": session_id,
-                        "step_id": step.step_type,
-                        "dependencies": step.dependencies
+                        "step_id": current_step.step_id,
+                        "dependencies": current_step.dependencies
                     }
                 )
             )
             
-            # Execute the cell
-            await cell_tools.execute_cell(cell_result["cell_id"])
+            # Store completed step and its result
+            executed_steps[current_step.step_id] = {
+                "step": current_step.model_dump(),
+                "content": result
+            }
+            step_results[current_step.description] = result
             
-            # Stream status update
-            yield f"step_{step.step_type}_completed", {
+            # Stream status update with cell results
+            yield f"step_{current_step.step_id}_completed", {
                 "status": "step_completed",
-                "step_type": step.step_type
+                "step_id": current_step.step_id,
+                "step_type": current_step.step_type,
+                "cell_id": cell_result["cell_id"],
+                "result": {
+                    "data": result.data,
+                    "query": result.query,
+                    "error": result.error,
+                    "metadata": result.metadata
+                }
             }
             
-            # Store completed step
-            completed_steps[step.step_type] = content
+            # Check if this is a decision point
+            if current_step.is_decision_point and current_step.step_type == "markdown":
+                # This is a decision point, so we should revise the plan
+                plan_revision = await self.revise_plan(
+                    original_plan=InvestigationPlanModel(
+                        steps=plan.steps,
+                        thinking=plan.thinking,
+                        hypothesis=current_hypothesis
+                    ),
+                    executed_steps=executed_steps,
+                    step_results=step_results,
+                    current_hypothesis=current_hypothesis
+                )
+                
+                # If the plan revision suggests changes
+                if not plan_revision.continue_as_is:
+                    # Update the hypothesis if provided
+                    if plan_revision.new_hypothesis:
+                        current_hypothesis = plan_revision.new_hypothesis
+                        
+                        # Create a markdown cell explaining the hypothesis update
+                        hypothesis_cell = await cell_tools.create_cell(
+                            params=CreateCellParams(
+                                notebook_id=notebook_id,
+                                cell_type="markdown",
+                                content=f"## Updated Hypothesis\n\n{current_hypothesis}",
+                                metadata={
+                                    "session_id": session_id,
+                                    "step_id": f"hypothesis_update_after_{current_step.step_id}",
+                                    "dependencies": [current_step.step_id]
+                                }
+                            )
+                        )
+                    
+                    # Remove steps that should be skipped
+                    if plan_revision.steps_to_remove:
+                        # Create a set of steps to remove and their dependencies
+                        steps_to_remove = set(plan_revision.steps_to_remove)
+                        
+                        # Find all steps that depend on steps being removed
+                        dependent_steps = set()
+                        for step in remaining_steps:
+                            if any(dep in steps_to_remove for dep in step.dependencies):
+                                dependent_steps.add(step.step_id)
+                        
+                        # Combine direct steps to remove and their dependents
+                        all_steps_to_remove = steps_to_remove.union(dependent_steps)
+                        
+                        # Filter remaining steps
+                        remaining_steps = [
+                            step for step in remaining_steps
+                            if step.step_id not in all_steps_to_remove
+                        ]
+                        
+                        # Create a markdown cell explaining removed steps
+                        await cell_tools.create_cell(
+                            params=CreateCellParams(
+                                notebook_id=notebook_id,
+                                cell_type="markdown",
+                                content=f"## Plan Adaptation: Removed Steps\n\n{plan_revision.explanation}\n\nRemoved steps: {', '.join(all_steps_to_remove)}",
+                                metadata={
+                                    "session_id": session_id,
+                                    "step_id": f"plan_adaptation_after_{current_step.step_id}",
+                                    "dependencies": [current_step.step_id]
+                                }
+                            )
+                        )
+                    
+                    # Add new steps
+                    if plan_revision.new_steps:
+                        new_step_ids = []
+                        for new_step_data in plan_revision.new_steps:
+                            new_step = InvestigationStepModel(**new_step_data.model_dump())
+                            remaining_steps.append(new_step)
+                            new_step_ids.append(new_step.step_id)
+                        
+                        # Create a markdown cell explaining new steps
+                        await cell_tools.create_cell(
+                            params=CreateCellParams(
+                                notebook_id=notebook_id,
+                                cell_type="markdown",
+                                content=f"## Plan Adaptation: New Steps\n\n{plan_revision.explanation}\n\nAdded steps: {', '.join(new_step_ids)}",
+                                metadata={
+                                    "session_id": session_id,
+                                    "step_id": f"plan_adaptation_new_steps_after_{current_step.step_id}",
+                                    "dependencies": [current_step.step_id]
+                                }
+                            )
+                        )
+                        
+                    yield "plan_revised", {
+                        "status": "plan_revised", 
+                        "explanation": plan_revision.explanation
+                    }
+        
+        # Create final summary cell
+        summary_content = await self.markdown_generator.run(
+            f"""
+            Create a comprehensive investigation summary based on these steps and results:
             
-            # TODO: Add logic to adjust plan based on results if needed
+            Original Query: {query}
             
-        # Create summary cell
-        summary = await self.markdown_generator.run(
-            f"Create a summary of the investigation results: {completed_steps}"
+            Final Hypothesis: {current_hypothesis}
+            
+            Step Results: {step_results}
+            
+            Create a summary with:
+            1. Brief restatement of the original issue
+            2. Key findings from the investigation
+            3. Root cause(s) identified
+            4. Impact assessment
+            5. Recommendations for resolution
+            6. Any open questions or further investigation needed
+            """
         )
-        summary_cell = await cell_tools.create_cell(
+        
+        await cell_tools.create_cell(
             params=CreateCellParams(
                 notebook_id=notebook_id,
                 cell_type="markdown",
-                content=f"# Investigation Summary\n\n{summary.data}",
+                content=f"# Investigation Summary\n\n{summary_content}",
                 metadata={
                     "session_id": session_id,
                     "step_id": "summary",
-                    "dependencies": list(completed_steps.keys())
+                    "dependencies": list(executed_steps.keys())
                 }
             )
         )
         yield "summary_created", {"status": "summary_created"}
 
-    async def create_investigation_plan(self, query: str, notebook_id: str) -> InvestigationPlan:
+    async def create_investigation_plan(self, query: str, notebook_id: Optional[str] = None) -> InvestigationPlanModel:
         """Create an investigation plan for the given query"""
+        # Use stored notebook_id if none provided
+        notebook_id = notebook_id or self.notebook_id
+        if not notebook_id:
+            raise ValueError("notebook_id is required for creating investigation plan")
+            
         # Get available data sources from connection manager
         connection_manager = get_connection_manager()
         connections = await connection_manager.get_all_connections()
@@ -336,7 +542,9 @@ class AIAgent:
         deps = InvestigationDependencies(
             user_query=query,
             notebook_id=UUID(notebook_id),
-            available_data_sources=available_data_sources
+            available_data_sources=available_data_sources,
+            executed_steps={},
+            current_hypothesis=None
         )
 
         # Generate the plan
@@ -348,36 +556,97 @@ class AIAgent:
 
         # Convert to InvestigationPlan
         steps = []
-        for step_data in plan_data["steps"]:
-            step = InvestigationStep(
-                step_type=step_data["step_type"],
-                description=step_data["description"],
-                dependencies=step_data["dependencies"],
-                parameters=step_data["parameters"]
+        for step_data in plan_data.steps:
+            step = InvestigationStepModel(
+                step_id=step_data.step_id,
+                step_type=step_data.step_type,
+                description=step_data.description,
+                dependencies=step_data.dependencies,
+                parameters=step_data.parameters,
+                is_decision_point=step_data.is_decision_point
             )
             steps.append(step)
 
-        return InvestigationPlan(
+        return InvestigationPlanModel(
             steps=steps,
-            thinking=plan_data.get("thinking")
+            thinking=plan_data.thinking,
+            hypothesis=plan_data.hypothesis
         )
 
-    async def generate_content(self, step_type: str, description: str) -> str:
-        """Generate content for a specific step type"""
-        if step_type == "sql":
-            result = await self.sql_generator.run(description)
-            return result.data
-        elif step_type == "log":
-            result = await self.log_generator.run(description)
-            return result.data
+    async def revise_plan(
+        self,
+        original_plan: InvestigationPlanModel,
+        executed_steps: Dict[str, Any],
+        step_results: Dict[str, Any],
+        current_hypothesis: Optional[str] = None,
+        unexpected_results: List[str] = []
+    ) -> PlanRevisionResult:
+        """
+        Revise the investigation plan based on executed steps
+        
+        Args:
+            original_plan: The original investigation plan
+            executed_steps: Steps that have been executed so far
+            step_results: Results from executed steps
+            current_hypothesis: Current working hypothesis based on findings
+            unexpected_results: Step IDs with unexpected or interesting results
+            
+        Returns:
+            Revised plan with potential new steps or steps to remove
+        """
+            
+        revision_request = PlanRevisionRequest(
+            original_plan=original_plan,
+            executed_steps=executed_steps,
+            step_results=step_results,
+            unexpected_results=unexpected_results,
+            current_hypothesis=current_hypothesis
+        )
+        
+        result = await self.plan_reviser.run(
+            user_prompt="Revise the investigation plan based on executed steps and their results.",
+            deps=revision_request
+        )
+        
+        return result.data
+
+    async def generate_content(
+        self,
+        step_type: str,
+        description: str,
+        executed_steps: Dict[str, Any] | None = None,
+        step_results: Dict[str, Any] = {}
+    ):
+        """
+        Generate content for a specific step type
+        
+        Args:
+            step_type: Type of step (sql, python, markdown, etc.)
+            description: Description of what the step will do
+            executed_steps: Previously executed steps (for context)
+            step_results: Results from previously executed steps (for context)
+            
+        Returns:
+            Generated content for the step
+        """
+        # If we already have results for this step, use them
+        if description in step_results:
+            return step_results[description]
+            
+        context = ""
+        if executed_steps and step_results:
+            # Add context from previous steps if available
+            context = f"\n\nContext from previous steps:\n{executed_steps}\n\nResults from previous steps:\n{step_results}"
+        
+        # Generate content based on step type with context
+        if step_type == "log":
+            result = await self.log_generator.run_query(description + context)
+            return result
         elif step_type == "metric":
-            result = await self.metric_generator.run(description)
-            return result.data
-        elif step_type == "python":
-            result = await self.python_generator.run(description)
-            return result.data
+            result = await self.metric_generator.run_query(description + context)
+            return result
         elif step_type == "markdown":
-            result = await self.markdown_generator.run(description)
+            result = await self.markdown_generator.run(description + context)
             return result.data
         else:
             raise ValueError(f"Unsupported step type: {step_type}")
@@ -417,13 +686,13 @@ async def execute_ai_query_cell(cell: AIQueryCell, context: ExecutionContext) ->
                 if server_url.startswith("http"):
                     mcp_servers.append(MCPServerHTTP(url=f"{server_url}/sse"))
         
-        # Initialize the AI agent with MCP servers
-        agent = AIAgent(mcp_servers=mcp_servers)
-        
         # Get notebook_id from cell metadata
         notebook_id = cell.metadata.get("notebook_id")
         if not notebook_id:
             raise ValueError("Cell metadata must contain notebook_id")
+        
+        # Initialize the AI agent with MCP servers and notebook ID
+        agent = AIAgent(mcp_servers=mcp_servers, notebook_id=notebook_id)
         
         # Generate an investigation plan
         plan = await agent.create_investigation_plan(

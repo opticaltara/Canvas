@@ -50,6 +50,10 @@ class ChatMessage(BaseModel):
     content: str = Field(description="Message content")
     timestamp: str = Field(description="Timestamp of the message")
 
+class ClarificationResult(BaseModel):
+    needs_clarification: bool = Field(description="Whether the query needs clarification")
+    clarification_message: Optional[str] = Field(description="Message to ask for clarification if needed", default=None)
+
 
 def to_chat_message(message: ModelMessage) -> ChatMessage:
     """Convert a ModelMessage to a ChatMessage"""
@@ -81,7 +85,7 @@ class ChatRequest(BaseModel):
     """Request to send a message to the chat agent"""
     prompt: str = Field(description="User's message")
     session_id: Optional[str] = Field(description="Chat session ID", default=None)
-    notebook_id: Optional[str] = Field(description="Notebook ID to associate with chat", default=None)
+    notebook_id: str = Field(description="Notebook ID to associate with chat")
 
 
 class ChatAgentService:
@@ -98,9 +102,6 @@ class ChatAgentService:
         self.notebook_manager = notebook_manager
         self.mcp_servers = mcp_servers or []
         self.sessions: Dict[str, str] = {}  # Store session_id -> notebook_id mapping
-        
-        # Initialize the AI agent for investigation
-        self.ai_agent = AIAgent(mcp_servers=self.mcp_servers)
         
         # Initialize cell tools
         self.cell_tools = NotebookCellTools(notebook_manager)
@@ -138,6 +139,8 @@ class ChatAgentService:
         session_id = session_id or str(uuid4())
         if notebook_id:
             self.sessions[session_id] = notebook_id
+            # Initialize the AI agent with the notebook ID
+            self.ai_agent = AIAgent(mcp_servers=self.mcp_servers, notebook_id=notebook_id)
         chat_agent_logger.info(f"Creating new chat session: {session_id} with notebook: {notebook_id}")
         return session_id
     
@@ -168,21 +171,25 @@ class ChatAgentService:
                 raise ValueError(f"No notebook_id found for session {session_id}")
             
             # First, check if we need clarification
+
             clarification_result = await self.chat_agent.run(
                 f"Check if this query needs clarification: {prompt}",
-                message_history=message_history
+                message_history=message_history,
+                result_type=ClarificationResult
             )
             
-            if "needs_clarification" in clarification_result.data.lower():
+            if clarification_result.data.needs_clarification and clarification_result.data.clarification_message:
                 # Ask for clarification
+                chat_agent_logger.info(f"Asking for clarification: {clarification_result.data.clarification_message}")
                 clarification_response = ModelResponse(
-                    parts=[TextPart(clarification_result.data)],
+                    parts=[TextPart(clarification_result.data.clarification_message)],
                     timestamp=datetime.now(timezone.utc)
                 )
                 yield "clarification", clarification_response
                 return
             
             # If no clarification needed, start investigation
+            chat_agent_logger.info(f"Starting investigation for prompt: {prompt}")
             async for status_type, status in self.ai_agent.investigate(
                 prompt,
                 session_id,

@@ -22,7 +22,7 @@ import time
 from typing import Any, Dict, List, Optional, Set, Union
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 # Initialize logger
 cell_logger = logging.getLogger("cell")
@@ -132,7 +132,7 @@ class Cell(BaseModel):
             }
         )
     
-    @validator('connection_id')
+    @field_validator('connection_id')
     def validate_connection_id(cls, v):
         if v is not None and v not in [0, 1]:
             cell_logger.error(
