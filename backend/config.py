@@ -20,8 +20,8 @@ class Settings(BaseSettings):
     auth_enabled: bool = False
     
     # AI settings
-    anthropic_api_key: str = Field(default="", validation_alias="ANTHROPIC_API_KEY")
-    anthropic_model: str = "claude-3-7-sonnet-20250219"
+    openrouter_api_key: str = Field(default="", validation_alias="OPENROUTER_API_KEY")
+    ai_model: str = Field(default="anthropic/claude-3.7-sonnet", validation_alias="SHERLOG_AI_MODEL")
     
     # Logging settings
     logfire_token: str = Field(default="", validation_alias="LOGFIRE_TOKEN")

@@ -20,6 +20,7 @@ from backend.core.execution import CellExecutor, ExecutionQueue
 from backend.routes.connections import router as connections_router
 from backend.routes.notebooks import router as notebooks_router
 from backend.routes.chat import router as chat_router
+from backend.routes.models import router as models_router
 from backend.services.connection_manager import ConnectionManager
 from backend.services.notebook_manager import NotebookManager
 from backend.db.chat_db import ChatDatabase
@@ -240,6 +241,7 @@ app.state.connection_manager = connection_manager
 app.include_router(notebooks_router, prefix="/api/notebooks", tags=["notebooks"])
 app.include_router(connections_router, prefix="/api/connections", tags=["connections"])
 app.include_router(chat_router, prefix="/api/chat", tags=["chat"])
+app.include_router(models_router, prefix="/api/models", tags=["models"])
 
 # Enhanced request logging middleware
 @app.middleware("http")

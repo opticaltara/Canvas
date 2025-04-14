@@ -14,8 +14,8 @@ from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.models.anthropic import AnthropicModel
-from pydantic_ai.providers.anthropic import AnthropicProvider
+from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.messages import (
     ModelMessage, 
     ModelMessagesTypeAdapter, 
@@ -112,9 +112,12 @@ class ChatAgentService:
         
         # Create the chat agent
         self.chat_agent = Agent(
-            model=AnthropicModel(
-                self.settings.anthropic_model,
-                provider=AnthropicProvider(api_key=self.settings.anthropic_api_key)
+            model = OpenAIModel(
+                self.settings.ai_model,
+                provider=OpenAIProvider(
+                    base_url='https://openrouter.ai/api/v1',
+                    api_key=self.settings.openrouter_api_key,
+                ),
             ),
             system_prompt="""
             You are an AI assistant integrated with Sherlog Canvas, a reactive notebook for software engineering investigations.

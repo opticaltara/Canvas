@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Optional, AsyncGenerator
 from pydantic_ai import Agent
-from pydantic_ai.models.anthropic import AnthropicModel
-from pydantic_ai.providers.anthropic import AnthropicProvider
+from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.mcp import MCPServerHTTP
 
 from backend.ai import prometheus_system_prompt
@@ -13,9 +13,12 @@ class MetricQueryAgent:
     """Agent for querying logs"""
     def __init__(self, source: str, notebook_id: str, mcp_servers: Optional[List[MCPServerHTTP]] = None):
         self.settings = get_settings()
-        self.model = AnthropicModel(
-            self.settings.anthropic_model,
-            provider=AnthropicProvider(api_key=self.settings.anthropic_api_key)
+        self.model = OpenAIModel(
+                self.settings.ai_model,
+                provider=OpenAIProvider(
+                    base_url='https://openrouter.ai/api/v1',
+                    api_key=self.settings.openrouter_api_key,
+                ),
         )
         self.mcp_servers = mcp_servers or []
         self.notebook_id = notebook_id

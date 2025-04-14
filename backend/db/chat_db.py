@@ -9,9 +9,8 @@ from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, List, Optional, TypeVar, AsyncGenerator
-from uuid import UUID
 
-from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter, ModelRequest, ModelResponse
+from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
 
 # Initialize logger
 chat_logger = logging.getLogger("chat.db")
@@ -142,6 +141,8 @@ class ChatDatabase:
         
         # Serialize message to JSON using ModelMessagesTypeAdapter
         message_json = ModelMessagesTypeAdapter.dump_json([message])
+
+        chat_logger.info(f"Message JSON: {message_json}")
         
         # Insert message
         await self._asyncify(
@@ -187,6 +188,7 @@ class ChatDatabase:
         messages = []
         for row in rows:
             message_json = row[0]
+            chat_logger.info(f"Message JSON from get_messages: {message_json}")
             message = ModelMessagesTypeAdapter.validate_json(f"[{message_json}]")[0]
             messages.append(message)
         
