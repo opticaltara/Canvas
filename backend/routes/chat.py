@@ -7,26 +7,15 @@ This module implements the chat API endpoints for interacting with the AI agent.
 import json
 import logging
 import time
-from typing import Dict, List, Optional, Any
-from uuid import UUID, uuid4
+from typing import Dict
+from uuid import uuid4
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from pydantic_ai.messages import (
-    TextPart, 
-    UserPromptPart, 
-    ModelRequest, 
-    ModelResponse,
-    PartStartEvent,
-    PartDeltaEvent,
-    TextPartDelta,
-    FinalResultEvent
-)
 
-from backend.ai.chat_agent import ChatAgentService, ChatRequest, ChatMessage
-from backend.ai.chat_tools import NotebookCellTools
+from backend.ai.chat_agent import ChatAgentService, ChatRequest, ChatMessage, to_chat_message, CellResponsePart
 from backend.db.chat_db import ChatDatabase
 from backend.services.notebook_manager import NotebookManager, get_notebook_manager
 
@@ -204,7 +193,7 @@ async def post_message(
     
     async def stream_response():
         try:
-            # Verify the session exists
+            # Verify the session exists and get notebook_id
             session = await chat_db.get_session(session_id)
             if not session:
                 error_json = json.dumps({
@@ -213,6 +202,9 @@ async def post_message(
                 })
                 yield error_json.encode('utf-8') + b'\n'
                 return
+            
+            if session_id not in chat_agent.sessions:
+                await chat_agent.create_session(session_id, session["notebook_id"])
             
             # First, stream the user prompt so it can be displayed immediately
             user_msg = ChatMessage(
@@ -226,37 +218,21 @@ async def post_message(
             # Get message history from the database
             messages = await chat_db.get_messages(session_id)
             
-            # Stream the AI response
-            async with chat_agent.chat_agent.iter(prompt, message_history=messages) as run:
-                async for node in run:
-                    if chat_agent.chat_agent.is_model_request_node(node):
-                        async with node.stream(run.ctx) as request_stream:
-                            async for event in request_stream:
-                                if isinstance(event, PartStartEvent):
-                                    content = ""
-                                elif isinstance(event, PartDeltaEvent):
-                                    if isinstance(event.delta, TextPartDelta):
-                                        content = event.delta.content_delta
-                                        model_msg = ChatMessage(
-                                            role="model",
-                                            content=content,
-                                            timestamp=datetime.now(timezone.utc).isoformat(),
-                                            agent="chat_agent"
-                                        )
-                                        yield json.dumps(model_msg.model_dump()).encode('utf-8') + b'\n'
-                                elif isinstance(event, FinalResultEvent):
-                                    # Final result, save to database
-                                    user_model_message = ModelRequest(
-                                        parts=[UserPromptPart(content=prompt)]
-                                    )
-                                    await chat_db.add_message(session_id, user_model_message)
-                                    if run.result:
-                                        # Convert AgentRunResult to ModelResponse
-                                        model_response = ModelResponse(
-                                            parts=[TextPart(content=run.result.data)],
-                                            timestamp=datetime.now(timezone.utc)
-                                        )
-                                        await chat_db.add_message(session_id, model_response)
+            # Use handle_message flow which includes clarification and investigation
+            async for status_type, response in chat_agent.handle_message(
+                prompt=prompt,
+                session_id=session_id,
+                message_history=messages
+            ):
+                # Convert the response to ChatMessage format
+                agent = status_type
+                if isinstance(response.parts[0], CellResponsePart):
+                    agent = response.parts[0].agent_type
+                chat_msg = to_chat_message(response, agent=agent)
+                yield json.dumps(chat_msg.model_dump()).encode('utf-8') + b'\n'
+                
+                # Save the message to database
+                await chat_db.add_message(session_id, response)
             
             process_time = time.time() - start_time
             chat_logger.info(
@@ -423,37 +399,21 @@ async def unified_chat(
             # Get message history
             messages = await chat_db.get_messages(session_id)
             
-            # Stream the AI response
-            async with chat_agent.chat_agent.iter(request.prompt, message_history=messages) as run:
-                async for node in run:
-                    if chat_agent.chat_agent.is_model_request_node(node):
-                        async with node.stream(run.ctx) as request_stream:
-                            async for event in request_stream:
-                                if isinstance(event, PartStartEvent):
-                                    content = ""
-                                elif isinstance(event, PartDeltaEvent):
-                                    if isinstance(event.delta, TextPartDelta):
-                                        content = event.delta.content_delta
-                                        model_msg = ChatMessage(
-                                            role="model",
-                                            content=content,
-                                            timestamp=datetime.now(timezone.utc).isoformat(),
-                                            agent="chat_agent"
-                                        )
-                                        yield json.dumps(model_msg.model_dump()).encode('utf-8') + b'\n'
-                                elif isinstance(event, FinalResultEvent):
-                                    # Final result, save to database
-                                    user_model_message = ModelRequest(
-                                        parts=[UserPromptPart(content=request.prompt)]
-                                    )
-                                    await chat_db.add_message(session_id, user_model_message)
-                                    if run.result:
-                                        # Convert AgentRunResult to ModelResponse
-                                        model_response = ModelResponse(
-                                            parts=[TextPart(content=run.result.data)],
-                                            timestamp=datetime.now(timezone.utc)
-                                        )
-                                        await chat_db.add_message(session_id, model_response)
+            # Use handle_message flow which includes clarification and investigation
+            async for status_type, response in chat_agent.handle_message(
+                prompt=request.prompt,
+                session_id=session_id,
+                message_history=messages
+            ):
+                # Convert the response to ChatMessage format
+                agent = status_type
+                if isinstance(response.parts[0], CellResponsePart):
+                    agent = response.parts[0].agent_type
+                chat_msg = to_chat_message(response, agent=agent)
+                yield json.dumps(chat_msg.model_dump()).encode('utf-8') + b'\n'
+                
+                await chat_db.add_message(session_id, response)
+                   
             
             process_time = time.time() - start_time
             chat_logger.info(

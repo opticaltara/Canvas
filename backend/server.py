@@ -1,10 +1,8 @@
 import asyncio
 import json
 import os
-import logging
 import time
-from logging.handlers import RotatingFileHandler
-from typing import Dict, Set, Union, Optional
+from typing import Dict, Set
 from uuid import UUID, uuid4
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -15,7 +13,6 @@ from fastapi.middleware.cors import CORSMiddleware
 # import logfire
 
 from backend.config import get_settings
-from backend.core.cell import CellType
 from backend.core.execution import CellExecutor, ExecutionQueue
 from backend.routes.connections import router as connections_router
 from backend.routes.notebooks import router as notebooks_router
@@ -24,114 +21,16 @@ from backend.routes.models import router as models_router
 from backend.services.connection_manager import ConnectionManager
 from backend.services.notebook_manager import NotebookManager
 from backend.db.chat_db import ChatDatabase
-
-# Add correlation ID to log records
-class CorrelationIdFilter(logging.Filter):
-    def filter(self, record):
-        # Instead of requiring correlation_id, we'll provide a default if it's missing
-        # This will allow logs that don't have it to still work properly
-        if not hasattr(record, 'correlation_id'):
-            record.correlation_id = 'N/A'
-        return True
-
-# Function to get log level from environment variable
-def get_log_level() -> int:
-    """Get log level from environment variable LOG_LEVEL, defaults to INFO"""
-    log_level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
-    return getattr(logging, log_level_name, logging.INFO)
-
-# Enhanced logging configuration
-def setup_logging():
-    # Create logs directory if it doesn't exist
-    os.makedirs('logs', exist_ok=True)
-    
-    # Determine if we're running in Docker
-    is_docker = os.path.exists('/.dockerenv')
-    
-    # Get log level from environment
-    log_level = get_log_level()
-    
-    # Define formatter and filter
-    log_formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - [%(correlation_id)s] - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    correlation_filter = CorrelationIdFilter()
-
-    # Create shared file handler
-    file_handler = RotatingFileHandler(
-        'logs/sherlog_canvas.log',
-        maxBytes=10*1024*1024,  # 10MB
-        backupCount=5
-    )
-    file_handler.setFormatter(log_formatter)
-    file_handler.setLevel(log_level)
-    
-    # Create console handler for Docker/development environment
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(log_formatter)
-    console_handler.setLevel(log_level)
-
-    # Loggers to configure - make sure to include more loggers
-    app_logger_names = [
-        'app', 'request', 'websocket', 'execution', 'notebook', 
-        'connection', 'mcp', 'routes.connections', 'chat.db', 
-        'routes.chat', 'ai.chat_agent', 'ai.chat_tools'
-    ]
-    # Include all uvicorn loggers 
-    uvicorn_logger_names = ["uvicorn", "uvicorn.error", "uvicorn.access", "uvicorn.asgi"]
-    # Include fastapi loggers
-    fastapi_logger_names = ["fastapi"]
-    # Include other third-party libraries that might log
-    third_party_logger_names = ["asyncio"]
-    
-    all_logger_names = app_logger_names + uvicorn_logger_names + fastapi_logger_names + third_party_logger_names
-    
-    # Also configure the root logger to catch any unconfigured loggers
-    root_logger = logging.getLogger()
-    root_logger.handlers.clear()
-    root_logger.addHandler(file_handler)
-    root_logger.addHandler(console_handler)
-    root_logger.addFilter(correlation_filter)
-    root_logger.setLevel(log_level)
-
-    app_loggers = {}
-
-    # Configure all loggers
-    for name in all_logger_names:
-        logger = logging.getLogger(name)
-        # Remove existing handlers to prevent duplicate logs
-        logger.handlers.clear()
-        # Add both handlers for all environments
-        logger.addHandler(file_handler)
-        logger.addHandler(console_handler)
-        logger.addFilter(correlation_filter)
-        logger.setLevel(log_level)
-        # Enable propagation only for third-party loggers
-        if name in app_logger_names:
-            logger.propagate = False
-            app_loggers[name] = logger
-
-    if is_docker:
-        # In Docker, log this important environment information
-        root_logger.info(f"Running in Docker environment, logs will be sent to console and file. Log level: {logging.getLevelName(log_level)}")
-    else:
-        root_logger.info(f"Running in local environment, logs will be sent to console and {os.path.abspath('logs/sherlog_canvas.log')}. Log level: {logging.getLevelName(log_level)}")
-
-    return app_loggers
+from backend.core.logging import setup_logging, get_logger
 
 # Initialize loggers
-loggers = setup_logging()
-app_logger = loggers['app']
-request_logger = loggers['request']
-websocket_logger = loggers['websocket']
-execution_logger = loggers['execution']
-notebook_logger = loggers['notebook']
-connection_logger = loggers['connection']
-
-# Apply filter - MOVED INSIDE setup_logging
-for logger in loggers.values():
-    logger.addFilter(CorrelationIdFilter())
+app_loggers = setup_logging()
+app_logger = get_logger('app')
+request_logger = get_logger('request')
+websocket_logger = get_logger('websocket')
+execution_logger = get_logger('execution')
+notebook_logger = get_logger('notebook')
+connection_logger = get_logger('connection')
 
 settings = get_settings()
 

@@ -14,9 +14,10 @@ from typing import Dict, List, Optional
 from uuid import uuid4
 
 from backend.services.connection_manager import BaseConnectionConfig
+from backend.core.logging import get_logger
 
 # Initialize logger
-mcp_logger = logging.getLogger("mcp")
+mcp_logger = get_logger('mcp')
 
 # Make sure correlation_id is set for all logs
 class CorrelationIdFilter(logging.Filter):

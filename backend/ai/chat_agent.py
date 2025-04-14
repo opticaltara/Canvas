@@ -8,17 +8,17 @@ and manage notebook cells.
 
 import logging
 import time
+import json
 from typing import Dict, List, Optional, Any, Tuple, AsyncGenerator
 from uuid import uuid4
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.messages import (
     ModelMessage, 
-    ModelMessagesTypeAdapter, 
     ModelRequest, 
     ModelResponse, 
     TextPart, 
@@ -43,6 +43,34 @@ class CorrelationIdFilter(logging.Filter):
 
 chat_agent_logger.addFilter(CorrelationIdFilter())
 
+class CellResponsePart(TextPart):
+    """A specialized response part for cell data"""
+    def __init__(self, cell_params: Dict[str, Any], status_type: str, agent_type: str):
+        super().__init__(content="")  # Empty content since we're using custom fields
+        self.cell_params = cell_params
+        self.status_type = status_type
+        self.agent_type = agent_type
+
+    def model_dump(self) -> Dict[str, Any]:
+        return {
+            "type": "cell_response",
+            "cell_params": self.cell_params,
+            "status_type": self.status_type,
+            "agent_type": self.agent_type
+        }
+
+class StatusResponsePart(TextPart):
+    """A specialized response part for status messages"""
+    def __init__(self, content: str, agent_type: str):
+        super().__init__(content=content)
+        self.agent_type = agent_type
+
+    def model_dump(self) -> Dict[str, Any]:
+        return {
+            "type": "status_response",
+            "content": self.content,
+            "agent_type": self.agent_type
+        }
 
 class ChatMessage(BaseModel):
     """Format of messages used in the API"""
@@ -68,13 +96,30 @@ def to_chat_message(message: ModelMessage, agent: Optional[str] = None) -> ChatM
                 timestamp=first_part.timestamp.isoformat(),
                 agent=agent
             )
-    elif isinstance(message, ModelResponse) and isinstance(first_part, TextPart):
-        return ChatMessage(
-            role="model",
-            content=first_part.content,
-            timestamp=message.timestamp.isoformat(),
-            agent=agent
-        )
+    elif isinstance(message, ModelResponse):
+        if isinstance(first_part, CellResponsePart):
+            # For cell responses, create a structured message
+            return ChatMessage(
+                role="model",
+                content=json.dumps(first_part.model_dump()),
+                timestamp=message.timestamp.isoformat(),
+                agent=first_part.agent_type
+            )
+        elif isinstance(first_part, StatusResponsePart):
+            # For status responses, create a structured message
+            return ChatMessage(
+                role="model",
+                content=json.dumps(first_part.model_dump()),
+                timestamp=message.timestamp.isoformat(),
+                agent=first_part.agent_type
+            )
+        elif isinstance(first_part, TextPart):
+            return ChatMessage(
+                role="model",
+                content=first_part.content,
+                timestamp=message.timestamp.isoformat(),
+                agent=agent
+            )
     
     # If we can't convert, use a default representation
     return ChatMessage(
@@ -157,7 +202,7 @@ class ChatAgentService:
         self, 
         prompt: str, 
         session_id: str,
-        message_history: List[ModelMessage] = []
+        message_history: List[ModelMessage] = [],
     ) -> AsyncGenerator[Tuple[str, ModelResponse], None]:
         """
         Process a user message and stream status updates
@@ -180,18 +225,22 @@ class ChatAgentService:
                 raise ValueError(f"No notebook_id found for session {session_id}")
             
             # First, check if we need clarification
-
             clarification_result = await self.chat_agent.run(
                 f"Check if this query needs clarification: {prompt}. The current investigation notebook is {notebook_id}.",
                 message_history=message_history,
                 result_type=ClarificationResult
             )
+
+            chat_agent_logger.info(f"Clarification result: {clarification_result}")
             
             if clarification_result.data.needs_clarification and clarification_result.data.clarification_message:
                 # Ask for clarification
                 chat_agent_logger.info(f"Asking for clarification: {clarification_result.data.clarification_message}")
                 clarification_response = ModelResponse(
-                    parts=[TextPart(clarification_result.data.clarification_message)],
+                    parts=[StatusResponsePart(
+                        content=clarification_result.data.clarification_message,
+                        agent_type="chat_agent"
+                    )],
                     timestamp=datetime.now(timezone.utc)
                 )
                 # Include chat_agent as the source
@@ -207,12 +256,28 @@ class ChatAgentService:
                 message_history=message_history,
                 cell_tools=self.cell_tools
             ):
-                # Create response for this status update with ai_agent as the source
-                response = ModelResponse(
-                    parts=[TextPart(f"Status: {status_type} - {status['status']}")],
-                    timestamp=datetime.now(timezone.utc)
-                )
-                # Let downstream code know this is from the ai_agent
+                chat_agent_logger.info(f"Status: {status}")
+                
+                # Create appropriate response based on status type
+                if 'cell_params' in status:
+                    response = ModelResponse(
+                        parts=[CellResponsePart(
+                            cell_params=status.get('cell_params', {}),
+                            status_type=status.get('status', ''),
+                            agent_type=status.get('agent_type', 'unknown')
+                        )],
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                else:
+                    # For non-cell responses, create a StatusResponsePart
+                    response = ModelResponse(
+                        parts=[StatusResponsePart(
+                            content=f"Status: {status.get('status', '')}",
+                            agent_type=status.get('agent_type', 'unknown')
+                        )],
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                
                 yield status_type, response
             
             response_time = time.time() - start_time

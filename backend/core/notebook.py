@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import time
 import logging
-from datetime import datetime
-from typing import Dict, List, Optional, Set, Tuple, Union
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Set
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -20,8 +20,8 @@ class NotebookMetadata(BaseModel):
     description: str = ""
     tags: List[str] = Field(default_factory=list)
     created_by: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class Notebook(BaseModel):
@@ -72,7 +72,7 @@ class Notebook(BaseModel):
             self.cell_order.append(cell.id)
         
         # Update notebook metadata
-        self.metadata.updated_at = datetime.utcnow()
+        self.metadata.updated_at = datetime.now(timezone.utc)
         
         process_time = time.time() - start_time
         notebook_logger.info(
@@ -198,7 +198,7 @@ class Notebook(BaseModel):
         self.dependency_graph.remove_cell(cell_id)
         
         # Update notebook metadata
-        self.metadata.updated_at = datetime.utcnow()
+        self.metadata.updated_at = datetime.now(timezone.utc)
         
         process_time = time.time() - start_time
         notebook_logger.info(
@@ -234,7 +234,7 @@ class Notebook(BaseModel):
         stale_cells = self.mark_dependents_stale(cell_id)
         
         # Update notebook metadata
-        self.metadata.updated_at = datetime.utcnow()
+        self.metadata.updated_at = datetime.now(timezone.utc)
         
         process_time = time.time() - start_time
         notebook_logger.info(
@@ -257,10 +257,10 @@ class Notebook(BaseModel):
         
         cell = self.get_cell(cell_id)
         cell.metadata.update(metadata)
-        cell.updated_at = datetime.utcnow()
+        cell.updated_at = datetime.now(timezone.utc)
         
         # Update notebook metadata
-        self.metadata.updated_at = datetime.utcnow()
+        self.metadata.updated_at = datetime.now(timezone.utc)
         
         process_time = time.time() - start_time
         notebook_logger.info(
@@ -350,7 +350,7 @@ class Notebook(BaseModel):
         dependent_cell.mark_stale()
         
         # Update notebook metadata
-        self.metadata.updated_at = datetime.utcnow()
+        self.metadata.updated_at = datetime.now(timezone.utc)
         
         process_time = time.time() - start_time
         notebook_logger.info(
@@ -403,7 +403,7 @@ class Notebook(BaseModel):
         self.dependency_graph.remove_dependency(dependent_id, dependency_id)
         
         # Update notebook metadata
-        self.metadata.updated_at = datetime.utcnow()
+        self.metadata.updated_at = datetime.now(timezone.utc)
         
         process_time = time.time() - start_time
         notebook_logger.info(
@@ -554,7 +554,7 @@ class Notebook(BaseModel):
             self.cell_order.insert(position, cell_id)
             
             # Update notebook metadata
-            self.metadata.updated_at = datetime.utcnow()
+            self.metadata.updated_at = datetime.now(timezone.utc)
             
             process_time = time.time() - start_time
             notebook_logger.info(
@@ -593,7 +593,7 @@ class Notebook(BaseModel):
                     setattr(self.metadata, key, value)
             
             # Update timestamp
-            self.metadata.updated_at = datetime.utcnow()
+            self.metadata.updated_at = datetime.now(timezone.utc)
             
             process_time = time.time() - start_time
             notebook_logger.info(

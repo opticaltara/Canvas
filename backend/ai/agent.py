@@ -103,6 +103,10 @@ class InvestigationDependencies(BaseModel):
         description="Current working hypothesis based on findings so far",
         default=None
     )
+    message_history: List[ModelMessage] = Field(
+        description="Message history for the investigation",
+        default_factory=list
+    )
 
 class PlanRevisionRequest(BaseModel):
     """Request to revise an investigation plan"""
@@ -313,24 +317,27 @@ class AIAgent:
             raise ValueError("notebook_id is required for creating cells")
             
         # Create initial investigation plan
-        plan = await self.create_investigation_plan(query, notebook_id)
+        plan = await self.create_investigation_plan(query, notebook_id, message_history)
         yield "plan_created", {"status": "plan_created", "thinking": plan.thinking, "agent_type": "investigation_planner"}
         
         # Create a markdown cell explaining the plan
-        await cell_tools.create_cell(
-            params=CreateCellParams(
-                notebook_id=notebook_id,
-                cell_type="markdown",
-                content=f"# Investigation Plan\n\n{plan.thinking}\n\n## Steps:\n" + 
-                       "\n".join(f"- {step.description}" for step in plan.steps),
-                metadata={
-                    "session_id": session_id,
-                    "step_id": "plan",
-                    "dependencies": []
-                }
-            )
+        cell_params = CreateCellParams(
+            notebook_id=notebook_id,
+            cell_type="markdown",
+            content=f"# Investigation Plan\n\n{plan.thinking}\n\n## Steps:\n" + 
+                   "\n".join(f"- {step.description}" for step in plan.steps),
+            metadata={
+                "session_id": session_id,
+                "step_id": "plan",
+                "dependencies": []
+            }
         )
-        yield "plan_cell_created", {"status": "plan_cell_created", "agent_type": "investigation_planner"}
+        await cell_tools.create_cell(params=cell_params)
+        yield "plan_cell_created", {
+            "status": "plan_cell_created", 
+            "agent_type": "investigation_planner",
+            "cell_params": cell_params.model_dump()
+        }
 
         # Execute steps in order with potential for plan revision
         executed_steps = {}
@@ -531,7 +538,7 @@ class AIAgent:
         )
         yield "summary_created", {"status": "summary_created", "agent_type": "markdown_generator"}
 
-    async def create_investigation_plan(self, query: str, notebook_id: Optional[str] = None) -> InvestigationPlanModel:
+    async def create_investigation_plan(self, query: str, notebook_id: Optional[str] = None, message_history: List[ModelMessage] = []) -> InvestigationPlanModel:
         """Create an investigation plan for the given query"""
         # Use stored notebook_id if none provided
         notebook_id = notebook_id or self.notebook_id
@@ -549,7 +556,8 @@ class AIAgent:
             notebook_id=UUID(notebook_id),
             available_data_sources=available_data_sources,
             executed_steps={},
-            current_hypothesis=None
+            current_hypothesis=None,
+            message_history=message_history
         )
 
         # Generate the plan
