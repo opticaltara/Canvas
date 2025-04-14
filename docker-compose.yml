@@ -9,15 +9,11 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+    env_file:
+      - .env
     environment:
-      - SHERLOG_DEBUG=true
-      - SHERLOG_API_PORT=8000
-      - SHERLOG_CONNECTION_STORAGE_TYPE=db
-      - SHERLOG_DB_TYPE=sqlite
-      - SHERLOG_DB_FILE=/app/data/sherlog.db
-      - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
-      - SHERLOG_ENVIRONMENT=${SHERLOG_ENVIRONMENT:-development}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - SHERLOG_OPENROUTER_API_KEY=${SHERLOG_OPENROUTER_API_KEY:-}
+      - SHERLOG_AI_MODEL=${SHERLOG_AI_MODEL:-anthropic/claude-3.7-sonnet}
     ports:
       - "9091:8000"
     depends_on:

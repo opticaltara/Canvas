@@ -32,22 +32,18 @@ RUN mkdir -p data
 # Create logs directory
 RUN mkdir -p logs && chmod 777 logs
 
-# Set environment variables
-ENV PYTHONPATH=/app
-ENV SHERLOG_API_HOST=0.0.0.0
-ENV SHERLOG_API_PORT=8000
-ENV SHERLOG_DEBUG=false
-ENV SHERLOG_CONNECTION_STORAGE_TYPE=db
-ENV SHERLOG_CONNECTION_FILE_PATH=/app/data/connections.json
-ENV PYTHONUNBUFFERED=1
-ENV LOGFIRE_TOKEN=""
-ENV SHERLOG_ENVIRONMENT=development
-# Set log level for all components
-ENV LOG_LEVEL=INFO
-
-# Database configuration - use SQLite
-ENV SHERLOG_DB_TYPE=sqlite
-ENV SHERLOG_DB_FILE=/app/data/sherlog.db
+# Set default environment variables (can be overridden by .env)
+ENV PYTHONPATH=/app \
+    PYTHONUNBUFFERED=1 \
+    LOG_LEVEL=INFO \
+    SHERLOG_API_HOST=0.0.0.0 \
+    SHERLOG_API_PORT=8000 \
+    SHERLOG_DEBUG=false \
+    SHERLOG_CONNECTION_STORAGE_TYPE=db \
+    SHERLOG_CONNECTION_FILE_PATH=/app/data/connections.json \
+    SHERLOG_DB_TYPE=sqlite \
+    SHERLOG_DB_FILE=/app/data/sherlog.db \
+    SHERLOG_ENVIRONMENT=development
 
 # Expose API port
 EXPOSE 8000
