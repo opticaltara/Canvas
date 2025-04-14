@@ -109,6 +109,9 @@ class ChatAgentService:
         
         # Initialize cell tools
         self.cell_tools = NotebookCellTools(notebook_manager)
+
+        chat_agent_logger.info(f"AI model: {self.settings.ai_model}")
+        chat_agent_logger.info(f"OpenRouter API key: {self.settings.openrouter_api_key}")
         
         # Create the chat agent
         self.chat_agent = Agent(

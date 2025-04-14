@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     auth_enabled: bool = False
     
     # AI settings
-    openrouter_api_key: str = Field(default="", validation_alias="OPENROUTER_API_KEY")
+    openrouter_api_key: str = Field(default="", validation_alias="SHERLOG_OPENROUTER_API_KEY")
     ai_model: str = Field(default="anthropic/claude-3.7-sonnet", validation_alias="SHERLOG_AI_MODEL")
     
     # Logging settings
