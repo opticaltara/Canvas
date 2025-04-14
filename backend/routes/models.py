@@ -3,7 +3,7 @@ from typing import List, Dict
 from pydantic import BaseModel
 from backend.config import get_settings
 
-router = APIRouter(prefix="/api/models", tags=["models"])
+router = APIRouter(tags=["models"])
 
 class ModelConfig(BaseModel):
     model_id: str

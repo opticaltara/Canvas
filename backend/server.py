@@ -237,7 +237,7 @@ app.add_middleware(
 app.state.notebook_manager = notebook_manager
 app.state.connection_manager = connection_manager
 
-# Mount routers
+# Register routers
 app.include_router(notebooks_router, prefix="/api/notebooks", tags=["notebooks"])
 app.include_router(connections_router, prefix="/api/connections", tags=["connections"])
 app.include_router(chat_router, prefix="/api/chat", tags=["chat"])
