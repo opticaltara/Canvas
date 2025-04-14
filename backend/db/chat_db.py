@@ -140,7 +140,7 @@ class ChatDatabase:
         now = datetime.now(timezone.utc).isoformat()
         
         # Serialize message to JSON using ModelMessagesTypeAdapter
-        message_json = ModelMessagesTypeAdapter.dump_json([message])
+        message_json = ModelMessagesTypeAdapter.dump_json([message]).decode('utf-8')
 
         chat_logger.info(f"Message JSON: {message_json}")
         
@@ -189,7 +189,7 @@ class ChatDatabase:
         for row in rows:
             message_json = row[0]
             chat_logger.info(f"Message JSON from get_messages: {message_json}")
-            message = ModelMessagesTypeAdapter.validate_json(f"[{message_json}]")[0]
+            message = ModelMessagesTypeAdapter.validate_json(message_json)[0]
             messages.append(message)
         
         return messages
