@@ -381,17 +381,18 @@ class AIAgent:
             query = result.query
             
             # Create cell for this step
+            cell_params_for_step = CreateCellParams(
+                notebook_id=notebook_id,
+                cell_type=current_step.step_type,
+                content=query,
+                metadata={
+                    "session_id": session_id,
+                    "step_id": current_step.step_id,
+                    "dependencies": current_step.dependencies
+                }
+            )
             cell_result = await cell_tools.create_cell(
-                params=CreateCellParams(
-                    notebook_id=notebook_id,
-                    cell_type=current_step.step_type,
-                    content=query,
-                    metadata={
-                        "session_id": session_id,
-                        "step_id": current_step.step_id,
-                        "dependencies": current_step.dependencies
-                    }
-                )
+                params=cell_params_for_step
             )
             
             # Store completed step and its result
@@ -407,6 +408,7 @@ class AIAgent:
                 "step_id": current_step.step_id,
                 "step_type": current_step.step_type,
                 "cell_id": cell_result["cell_id"],
+                "cell_params": cell_params_for_step.model_dump(),
                 "result": {
                     "data": result.data,
                     "query": result.query,
@@ -437,18 +439,27 @@ class AIAgent:
                         current_hypothesis = plan_revision.new_hypothesis
                         
                         # Create a markdown cell explaining the hypothesis update
-                        hypothesis_cell = await cell_tools.create_cell(
-                            params=CreateCellParams(
-                                notebook_id=notebook_id,
-                                cell_type="markdown",
-                                content=f"## Updated Hypothesis\n\n{current_hypothesis}",
-                                metadata={
-                                    "session_id": session_id,
-                                    "step_id": f"hypothesis_update_after_{current_step.step_id}",
-                                    "dependencies": [current_step.step_id]
-                                }
-                            )
+                        hypothesis_cell_params = CreateCellParams(
+                            notebook_id=notebook_id,
+                            cell_type="markdown",
+                            content=f"## Updated Hypothesis\n\n{current_hypothesis}",
+                            metadata={
+                                "session_id": session_id,
+                                "step_id": f"hypothesis_update_after_{current_step.step_id}",
+                                "dependencies": [current_step.step_id]
+                            }
                         )
+                        hypothesis_cell_result = await cell_tools.create_cell(
+                            params=hypothesis_cell_params
+                        )
+                        
+                        # Yield the hypothesis cell creation status
+                        yield f"hypothesis_cell_created_after_{current_step.step_id}", {
+                            "status": "hypothesis_cell_created",
+                            "agent_type": "plan_reviser",
+                            "cell_params": hypothesis_cell_params.model_dump(),
+                            "cell_id": hypothesis_cell_result.get("cell_id", "")
+                        }
                     
                     # Remove steps that should be skipped
                     if plan_revision.steps_to_remove:
@@ -471,18 +482,27 @@ class AIAgent:
                         ]
                         
                         # Create a markdown cell explaining removed steps
-                        await cell_tools.create_cell(
-                            params=CreateCellParams(
-                                notebook_id=notebook_id,
-                                cell_type="markdown",
-                                content=f"## Plan Adaptation: Removed Steps\n\n{plan_revision.explanation}\n\nRemoved steps: {', '.join(all_steps_to_remove)}",
-                                metadata={
-                                    "session_id": session_id,
-                                    "step_id": f"plan_adaptation_after_{current_step.step_id}",
-                                    "dependencies": [current_step.step_id]
-                                }
-                            )
+                        removed_steps_cell_params = CreateCellParams(
+                            notebook_id=notebook_id,
+                            cell_type="markdown",
+                            content=f"## Plan Adaptation: Removed Steps\n\n{plan_revision.explanation}\n\nRemoved steps: {', '.join(all_steps_to_remove)}",
+                            metadata={
+                                "session_id": session_id,
+                                "step_id": f"plan_adaptation_removed_steps_after_{current_step.step_id}",
+                                "dependencies": [current_step.step_id]
+                            }
                         )
+                        removed_steps_cell_result = await cell_tools.create_cell(
+                            params=removed_steps_cell_params
+                        )
+                        
+                        # Yield the removed steps cell creation status
+                        yield f"removed_steps_cell_created_after_{current_step.step_id}", {
+                            "status": "removed_steps_cell_created",
+                            "agent_type": "plan_reviser",
+                            "cell_params": removed_steps_cell_params.model_dump(),
+                            "cell_id": removed_steps_cell_result.get("cell_id", "")
+                        }
                     
                     # Add new steps
                     if plan_revision.new_steps:
@@ -493,19 +513,28 @@ class AIAgent:
                             new_step_ids.append(new_step.step_id)
                         
                         # Create a markdown cell explaining new steps
-                        await cell_tools.create_cell(
-                            params=CreateCellParams(
-                                notebook_id=notebook_id,
-                                cell_type="markdown",
-                                content=f"## Plan Adaptation: New Steps\n\n{plan_revision.explanation}\n\nAdded steps: {', '.join(new_step_ids)}",
-                                metadata={
-                                    "session_id": session_id,
-                                    "step_id": f"plan_adaptation_new_steps_after_{current_step.step_id}",
-                                    "dependencies": [current_step.step_id]
-                                }
-                            )
+                        new_steps_cell_params = CreateCellParams(
+                            notebook_id=notebook_id,
+                            cell_type="markdown",
+                            content=f"## Plan Adaptation: New Steps\n\n{plan_revision.explanation}\n\nAdded steps: {', '.join(new_step_ids)}",
+                            metadata={
+                                "session_id": session_id,
+                                "step_id": f"plan_adaptation_new_steps_after_{current_step.step_id}",
+                                "dependencies": [current_step.step_id]
+                            }
+                        )
+                        new_steps_cell_result = await cell_tools.create_cell(
+                            params=new_steps_cell_params
                         )
                         
+                        # Yield the new steps cell creation status
+                        yield f"new_steps_cell_created_after_{current_step.step_id}", {
+                            "status": "new_steps_cell_created",
+                            "agent_type": "plan_reviser",
+                            "cell_params": new_steps_cell_params.model_dump(),
+                            "cell_id": new_steps_cell_result.get("cell_id", "")
+                        }
+                    
                     yield "plan_revised", {
                         "status": "plan_revised", 
                         "explanation": plan_revision.explanation,
@@ -533,19 +562,25 @@ class AIAgent:
             """
         )
         
-        await cell_tools.create_cell(
-            params=CreateCellParams(
-                notebook_id=notebook_id,
-                cell_type="markdown",
-                content=f"# Investigation Summary\n\n{summary_content}",
-                metadata={
-                    "session_id": session_id,
-                    "step_id": "summary",
-                    "dependencies": list(executed_steps.keys())
-                }
-            )
+        summary_cell_params = CreateCellParams(
+            notebook_id=notebook_id,
+            cell_type="markdown",
+            content=f"# Investigation Summary\n\n{summary_content}",
+            metadata={
+                "session_id": session_id,
+                "step_id": "summary",
+                "dependencies": list(executed_steps.keys())
+            }
         )
-        yield "summary_created", {"status": "summary_created", "agent_type": "markdown_generator"}
+        summary_cell_result = await cell_tools.create_cell(
+            params=summary_cell_params
+        )
+        yield "summary_created", {
+            "status": "summary_created", 
+            "agent_type": "markdown_generator",
+            "cell_params": summary_cell_params.model_dump(),
+            "cell_id": summary_cell_result.get("cell_id", "")
+        }
 
     async def create_investigation_plan(self, query: str, notebook_id: Optional[str] = None, message_history: List[ModelMessage] = []) -> InvestigationPlanModel:
         """Create an investigation plan for the given query"""
