@@ -224,6 +224,7 @@ class AIAgent:
             Do not generate more than 5 steps unless absolutely necessary for a complex investigation.
             • Stick strictly to the scope of the user's request. Do not add steps for tangential inquiries 
             or explorations not explicitly requested.
+            • Keep the `thinking` explanation brief (2-3 sentences maximum). Focus on the core strategy and rationale, omitting excessive detail.
 
             Remember that you are creating instructions for specialized agents, not executing the investigation yourself.
             Your instructions must be detailed and self-contained, as each specialized agent only sees its specific task.
@@ -279,15 +280,17 @@ class AIAgent:
             result_type=MarkdownQueryResult,
             mcp_servers=self.mcp_servers,
             system_prompt="""
-            You are an expert at technical documentation and result analysis. Create clear markdown to address the user's request. When analyzing investigation results:
+            You are an expert at technical documentation and result analysis. Create clear and **concise** markdown to address the user's request. 
+            Your primary goal is brevity and clarity. Avoid unnecessary jargon or overly detailed explanations.
             
-            1. Summarize key findings clearly and objectively
+            When analyzing investigation results:
+            1. Summarize key findings **briefly** and objectively
             2. Identify patterns and anomalies in the data
             3. Draw connections between different data sources
             4. Evaluate how findings support or contradict hypotheses
             5. Recommend next steps based on the evidence
             
-            Return ONLY the markdown with no meta-commentary.
+            Focus on being succinct. Return ONLY the markdown with no meta-commentary.
             """
         )
 
@@ -544,7 +547,7 @@ class AIAgent:
         # Create final summary cell
         summary_content = await self.markdown_generator.run(
             f"""
-            Create a comprehensive investigation summary based on these steps and results:
+            Create a **brief and concise** investigation summary based on these steps and results:
             
             Original Query: {query}
             
@@ -552,20 +555,26 @@ class AIAgent:
             
             Step Results: {step_results}
             
-            Create a summary with:
-            1. Brief restatement of the original issue
-            2. Key findings from the investigation
-            3. Root cause(s) identified
-            4. Impact assessment
-            5. Recommendations for resolution
-            6. Any open questions or further investigation needed
+            **Focus only on the most critical points:**
+            1. Key findings (1-2 sentences)
+            2. Root cause(s) identified (if any, briefly stated)
+            3. Recommendations for resolution (if any, concise)
+            
+            Keep the entire summary very short.
             """
         )
         
+        # Extract the markdown string from the result
+        summary_markdown = ""
+        if summary_content and summary_content.data and hasattr(summary_content.data, 'data'):
+            summary_markdown = summary_content.data.data
+        else:
+            ai_logger.warning(f"Could not extract summary markdown from result: {summary_content}")
+
         summary_cell_params = CreateCellParams(
             notebook_id=notebook_id,
             cell_type="markdown",
-            content=f"# Investigation Summary\n\n{summary_content}",
+            content=f"# Investigation Summary\n\n{summary_markdown}",
             metadata={
                 "session_id": session_id,
                 "step_id": "summary",
@@ -704,7 +713,13 @@ class AIAgent:
             return result
         elif step_type == "markdown":
             result = await self.markdown_generator.run(description + context)
-            return result.data
+            markdown_string = ""
+            if result and result.data and hasattr(result.data, 'data'):
+                markdown_string = result.data.data
+            else:
+                ai_logger.warning(f"Could not extract markdown data from result: {result}")
+            # Return a DataQueryResult compatible object
+            return DataQueryResult(data=markdown_string, query=description)
         else:
             raise ValueError(f"Unsupported step type: {step_type}")
 
