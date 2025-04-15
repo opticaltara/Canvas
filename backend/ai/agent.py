@@ -340,11 +340,12 @@ class AIAgent:
                 "dependencies": []
             }
         )
-        await cell_tools.create_cell(params=cell_params)
+        cell_result = await cell_tools.create_cell(params=cell_params)
         yield "plan_cell_created", {
             "status": "plan_cell_created", 
             "agent_type": "investigation_planner",
-            "cell_params": cell_params.model_dump()
+            "cell_params": cell_params.model_dump(),
+            "cell_id": cell_result.get("cell_id", "")
         }
 
         # Execute steps in order with potential for plan revision

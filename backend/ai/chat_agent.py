@@ -45,12 +45,12 @@ chat_agent_logger.addFilter(CorrelationIdFilter())
 
 class CellResponsePart(TextPart):
     """A specialized response part for cell data"""
-    def __init__(self, cell_params: Dict[str, Any], status_type: str, agent_type: str):
+    def __init__(self, cell_id: str, cell_params: Dict[str, Any], status_type: str, agent_type: str):
         super().__init__(content="")  # Empty content since we're using custom fields
         self.cell_params = cell_params
         self.status_type = status_type
         self.agent_type = agent_type
-
+        self.cell_id = cell_id
     def model_dump(self) -> Dict[str, Any]:
         return {
             "type": "cell_response",
@@ -262,6 +262,7 @@ class ChatAgentService:
                 if 'cell_params' in status:
                     response = ModelResponse(
                         parts=[CellResponsePart(
+                            cell_id=status.get('cell_id', ''),
                             cell_params=status.get('cell_params', {}),
                             status_type=status.get('status', ''),
                             agent_type=status.get('agent_type', 'unknown')
