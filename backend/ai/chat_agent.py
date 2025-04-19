@@ -189,7 +189,8 @@ class ChatAgentService:
             4. Be ready to answer follow-up questions about the investigation
             
             Always respond in a helpful, conversational manner while maintaining context of the investigation.
-            """
+            """,
+            result_type=ClarificationResult
         )
         
         chat_agent_logger.info("Chat agent service initialized")
@@ -234,7 +235,6 @@ class ChatAgentService:
             clarification_result = await self.chat_agent.run(
                 f"Check if this query needs clarification: {prompt}. The current investigation notebook is {notebook_id}.",
                 message_history=message_history,
-                result_type=ClarificationResult
             )
 
             chat_agent_logger.info(f"Clarification result: {clarification_result}")
