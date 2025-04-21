@@ -2,8 +2,8 @@
 Connection API Endpoints
 """
 
-from typing import Dict, List, Optional, Union, Any
-from uuid import UUID, uuid4
+from typing import Dict, List, Optional, Any
+from uuid import uuid4
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -13,11 +13,9 @@ from backend.services.connection_manager import (
     ConnectionManager, 
     get_connection_manager,
     GrafanaConnectionConfig,
-    KubernetesConnectionConfig,
-    S3ConnectionConfig,
-    PostgresConnectionConfig,
     GenericConnectionConfig,
-    BaseConnectionConfig
+    BaseConnectionConfig,
+    GithubConnectionConfig
 )
 import logging
 
@@ -74,29 +72,10 @@ class GrafanaConnectionCreate(BaseModel):
     url: str
     api_key: str
 
-class KubernetesConnectionCreate(BaseModel):
-    """Kubernetes connection creation parameters"""
+class GithubConnectionCreate(BaseModel):
+    """GitHub connection creation parameters"""
     name: str
-    kubeconfig: str
-    context: Optional[str] = None
-
-class PostgresConnectionCreate(BaseModel):
-    """PostgreSQL connection creation parameters"""
-    name: str
-    host: str
-    port: str
-    database: str
-    username: str
-    password: str
-
-class S3ConnectionCreate(BaseModel):
-    """S3 connection creation parameters"""
-    name: str
-    bucket: str
-    aws_access_key_id: Optional[str] = None
-    aws_secret_access_key: Optional[str] = None
-    region: Optional[str] = None
-    endpoint: Optional[str] = None
+    github_personal_access_token: str
 
 # Generic fallback for connection create
 class ConnectionCreate(BaseModel):
@@ -168,7 +147,7 @@ async def list_connection_types(
     try:
         # Return supported connection types
         # Data connection types
-        data_connections = ["grafana", "sql", "s3", "kubernetes"]
+        data_connections = ["grafana", "github"]
         # Utility connection types
         utility_connections = ["python"]
         
@@ -239,21 +218,8 @@ async def get_connection(
         if isinstance(specific_config, GrafanaConnectionConfig):
             response["url"] = specific_config.url
             response["api_key"] = "********" if specific_config.api_key else ""
-        elif isinstance(specific_config, KubernetesConnectionConfig):
-            response["kubeconfig"] = "********" if specific_config.kubeconfig else ""
-            response["context"] = specific_config.context or ""
-        elif isinstance(specific_config, S3ConnectionConfig):
-            response["bucket"] = specific_config.bucket
-            response["region"] = specific_config.region or ""
-            response["aws_access_key_id"] = specific_config.aws_access_key_id or ""
-            response["aws_secret_access_key"] = "********" if specific_config.aws_secret_access_key else ""
-            response["endpoint"] = specific_config.endpoint or ""
-        elif isinstance(specific_config, PostgresConnectionConfig):
-            response["host"] = specific_config.host
-            response["port"] = specific_config.port
-            response["database"] = specific_config.database
-            response["username"] = specific_config.username
-            response["password"] = "********" if specific_config.password else ""
+        elif isinstance(specific_config, GithubConnectionConfig):
+            response["github_personal_access_token"] = "********" if specific_config.github_personal_access_token else ""
         elif isinstance(specific_config, GenericConnectionConfig):
             # For GenericConnectionConfig, include the full config dictionary
             response["config"] = connection_manager._redact_sensitive_fields(specific_config.config)
@@ -361,16 +327,16 @@ async def create_grafana_connection(
         )
         raise
 
-@router.post("/kubernetes")
-async def create_kubernetes_connection(
-    connection_data: KubernetesConnectionCreate,
+@router.post("/github")
+async def create_github_connection(
+    connection_data: GithubConnectionCreate,
     connection_manager: ConnectionManager = Depends(get_connection_manager)
 ) -> Dict:
     """
-    Create a new Kubernetes connection
+    Create a new GitHub connection (Docker MCP)
     
     Args:
-        connection_data: Parameters for creating the Kubernetes connection
+        connection_data: Parameters for creating the GitHub connection
         
     Returns:
         The created connection information
@@ -379,21 +345,18 @@ async def create_kubernetes_connection(
     try:
         # Convert to the generic format used by connection manager
         config = {
-            "kubeconfig": connection_data.kubeconfig
+            "github_personal_access_token": connection_data.github_personal_access_token
         }
-        
-        if connection_data.context:
-            config["context"] = connection_data.context
         
         connection = await connection_manager.create_connection(
             name=connection_data.name,
-            type="kubernetes",
+            type="github",
             config=config
         )
         
         process_time = time.time() - start_time
         connection_logger.info(
-            "Created Kubernetes connection",
+            "Created GitHub connection",
             extra={
                 'connection_id': connection.id,
                 'connection_name': connection.name,
@@ -410,7 +373,7 @@ async def create_kubernetes_connection(
     except ValueError as e:
         process_time = time.time() - start_time
         connection_logger.error(
-            "Error creating Kubernetes connection",
+            "Error creating GitHub connection",
             extra={
                 'connection_name': connection_data.name,
                 'error': str(e),
@@ -423,161 +386,7 @@ async def create_kubernetes_connection(
     except Exception as e:
         process_time = time.time() - start_time
         connection_logger.error(
-            "Error creating Kubernetes connection",
-            extra={
-                'connection_name': connection_data.name,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
-            exc_info=True
-        )
-        raise
-
-@router.post("/postgres")
-async def create_postgres_connection(
-    connection_data: PostgresConnectionCreate,
-    connection_manager: ConnectionManager = Depends(get_connection_manager)
-) -> Dict:
-    """
-    Create a new PostgreSQL connection
-    
-    Args:
-        connection_data: Parameters for creating the PostgreSQL connection
-        
-    Returns:
-        The created connection information
-    """
-    start_time = time.time()
-    try:
-        # Convert to the generic format used by connection manager
-        config = {
-            "host": connection_data.host,
-            "port": connection_data.port,
-            "database": connection_data.database,
-            "username": connection_data.username,
-            "password": connection_data.password
-        }
-        
-        connection = await connection_manager.create_connection(
-            name=connection_data.name,
-            type="postgres",
-            config=config
-        )
-        
-        process_time = time.time() - start_time
-        connection_logger.info(
-            "Created PostgreSQL connection",
-            extra={
-                'connection_id': connection.id,
-                'connection_name': connection.name,
-                'processing_time_ms': round(process_time * 1000, 2)
-            }
-        )
-        
-        return {
-            "id": connection.id,
-            "name": connection.name,
-            "type": connection.type,
-            "config": connection_manager._redact_sensitive_fields(connection.config)
-        }
-    except ValueError as e:
-        process_time = time.time() - start_time
-        connection_logger.error(
-            "Error creating PostgreSQL connection",
-            extra={
-                'connection_name': connection_data.name,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
-            exc_info=True
-        )
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        process_time = time.time() - start_time
-        connection_logger.error(
-            "Error creating PostgreSQL connection",
-            extra={
-                'connection_name': connection_data.name,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
-            exc_info=True
-        )
-        raise
-
-@router.post("/s3")
-async def create_s3_connection(
-    connection_data: S3ConnectionCreate,
-    connection_manager: ConnectionManager = Depends(get_connection_manager)
-) -> Dict:
-    """
-    Create a new S3 connection
-    
-    Args:
-        connection_data: Parameters for creating the S3 connection
-        
-    Returns:
-        The created connection information
-    """
-    start_time = time.time()
-    try:
-        # Convert to the generic format used by connection manager
-        config = {
-            "bucket": connection_data.bucket
-        }
-        
-        # Add optional fields if they exist
-        if connection_data.aws_access_key_id:
-            config["aws_access_key_id"] = connection_data.aws_access_key_id
-        if connection_data.aws_secret_access_key:
-            config["aws_secret_access_key"] = connection_data.aws_secret_access_key
-        if connection_data.region:
-            config["region"] = connection_data.region
-        if connection_data.endpoint:
-            config["endpoint"] = connection_data.endpoint
-        
-        connection = await connection_manager.create_connection(
-            name=connection_data.name,
-            type="s3",
-            config=config
-        )
-        
-        process_time = time.time() - start_time
-        connection_logger.info(
-            "Created S3 connection",
-            extra={
-                'connection_id': connection.id,
-                'connection_name': connection.name,
-                'processing_time_ms': round(process_time * 1000, 2)
-            }
-        )
-        
-        return {
-            "id": connection.id,
-            "name": connection.name,
-            "type": connection.type,
-            "config": connection_manager._redact_sensitive_fields(connection.config)
-        }
-    except ValueError as e:
-        process_time = time.time() - start_time
-        connection_logger.error(
-            "Error creating S3 connection",
-            extra={
-                'connection_name': connection_data.name,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
-            exc_info=True
-        )
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        process_time = time.time() - start_time
-        connection_logger.error(
-            "Error creating S3 connection",
+            "Error creating GitHub connection",
             extra={
                 'connection_name': connection_data.name,
                 'error': str(e),
@@ -655,7 +464,7 @@ async def create_connection(
             },
             exc_info=True
         )
-        raise
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.put("/{connection_id}")
@@ -839,7 +648,7 @@ async def test_connection(
             },
             exc_info=True
         )
-        raise
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/{connection_id}/default")
@@ -911,10 +720,16 @@ async def get_connection_schema(
         The schema information
     """
     try:
+        connection = await connection_manager.get_connection(connection_id)
+        if not connection:
+             raise HTTPException(status_code=404, detail=f"Connection {connection_id} not found")
         schema = await connection_manager.get_connection_schema(connection_id)
         return schema
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e: # Catch other potential errors
+        connection_logger.error(f"Error getting schema for {connection_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to retrieve connection schema")
 
 
 @router.get("/{connection_id}/mcp/status")
@@ -1102,39 +917,51 @@ async def get_all_mcp_server_statuses(
         Status information for all MCP servers
     """
     try:
-        # Get the MCP server manager from the application state
+        # Get managers from the application state
         mcp_manager = request.app.state.mcp_manager
-        
-        # Get the connection manager
         connection_manager = request.app.state.connection_manager
         
-        # Get all server statuses
-        statuses = mcp_manager.get_all_server_statuses()
+        # Get statuses of locally managed MCPs
+        local_mcp_statuses = mcp_manager.get_all_server_statuses()
         
-        # Enrich with connection information
-        enriched_statuses = {}
-        for connection_id, status in statuses.items():
-            connection = await connection_manager.get_connection(connection_id)
-            if connection:
-                enriched_statuses[connection_id] = {
-                    "connection_id": connection_id,
-                    "connection_name": connection.name,
-                    "connection_type": connection.type,
-                    "status": status["status"],
-                    "address": status["address"],
-                    "error": status["error"]
-                }
+        # Get all connections
+        all_connections = await connection_manager.get_all_connections() # Assuming this returns List[Dict] or similar
+        
+        all_statuses = {}
+        for conn_dict in all_connections:
+            conn_id = conn_dict['id']
+            conn_type = conn_dict['type']
+            conn_name = conn_dict['name']
+            
+            status_info = {
+                "connection_id": conn_id,
+                "connection_name": conn_name,
+                "connection_type": conn_type,
+                "status": "unknown", # Default status
+                "address": None,
+                "error": None
+            }
+
+            if conn_id in local_mcp_statuses:
+                # Use status from the MCP manager for locally managed servers
+                local_status = local_mcp_statuses[conn_id]
+                status_info["status"] = local_status.get("status", "unknown")
+                status_info["address"] = local_status.get("address")
+                status_info["error"] = local_status.get("error")
             else:
-                # This is a connection that no longer exists
-                enriched_statuses[connection_id] = {
-                    "connection_id": connection_id,
-                    "connection_name": "Unknown",
-                    "connection_type": "Unknown",
-                    "status": status["status"],
-                    "address": status["address"],
-                    "error": status["error"]
-                }
-        
-        return {"servers": enriched_statuses}
+                # Locally managed type but not in mcp_manager status (e.g., never started)
+                status_info["status"] = "stopped"
+                
+            all_statuses[conn_id] = status_info
+            
+        return {"servers": all_statuses}
     except Exception as e:
+        connection_logger.error(
+            "Error retrieving all MCP server statuses",
+            extra={
+                'error': str(e),
+                'error_type': type(e).__name__
+            },
+            exc_info=True
+        )
         raise HTTPException(status_code=500, detail=str(e))

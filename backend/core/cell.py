@@ -67,6 +67,7 @@ class CellType(str, Enum):
     LOG = "log"
     METRIC = "metric"
     S3 = "s3"
+    GITHUB = "github"
 
 
 class CellResult(BaseModel):
@@ -503,6 +504,24 @@ class MarkdownCell(Cell):
         }
 
 
+class GitHubCell(Cell):
+    """
+    A cell containing a GitHub
+    """
+    type: CellType = CellType.GITHUB
+    source: str = "github"
+    
+    def __init__(self, **data):
+        super().__init__(**data)
+        cell_logger.info(
+            "Github cell initialized",
+            extra={
+                'cell_id': str(self.id),
+                'source': self.source
+            }
+        )
+
+
 class LogCell(Cell):
     """
     A cell for log analysis queries
@@ -584,48 +603,6 @@ class MetricCell(Cell):
             }
         )
 
-
-class S3Cell(Cell):
-    """
-    A cell for S3 object queries
-    
-    This cell type is used to query or list objects in S3 buckets.
-    
-    Attributes:
-        bucket: The S3 bucket name
-        prefix: Optional object key prefix to filter results
-    """
-    type: CellType = CellType.S3
-    bucket: str
-    prefix: Optional[str] = None
-    
-    def __init__(self, **data):
-        super().__init__(**data)
-        cell_logger.info(
-            "S3 query cell initialized",
-            extra={
-                'cell_id': str(self.id),
-                'bucket': self.bucket,
-                'prefix': self.prefix
-            }
-        )
-    
-    def set_prefix(self, prefix: str) -> None:
-        """Set the object key prefix"""
-        start_time = time.time()
-        self.prefix = prefix
-        process_time = time.time() - start_time
-        cell_logger.info(
-            "S3 query prefix set",
-            extra={
-                'cell_id': str(self.id),
-                'bucket': self.bucket,
-                'prefix': prefix,
-                'processing_time_ms': round(process_time * 1000, 2)
-            }
-        )
-
-
 def create_cell(cell_type: CellType, content: str, **kwargs) -> Cell:
     """
     Create a new cell of the specified type
@@ -649,7 +626,7 @@ def create_cell(cell_type: CellType, content: str, **kwargs) -> Cell:
             CellType.MARKDOWN: MarkdownCell,
             CellType.LOG: LogCell,
             CellType.METRIC: MetricCell,
-            CellType.S3: S3Cell
+            CellType.GITHUB: GitHubCell
         }
         
         # Create the cell

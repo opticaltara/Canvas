@@ -160,10 +160,10 @@ class MCPServerManager:
 
             if server_type == "grafana":
                 address = await self._start_grafana_mcp(connection)
-            elif server_type == "kubernetes":
-                address = await self._start_kubernetes_mcp(connection)
             elif server_type == "python":
                 address = await self._start_python_mcp(connection)
+            elif server_type == "github":
+                address = await self._start_github_mcp(connection)
             else:
                 error_msg = f"Unsupported MCP server type: {server_type}"
                 mcp_logger.error(
@@ -307,49 +307,38 @@ class MCPServerManager:
         if connection_id not in self.processes:
             self.status[connection_id] = MCPServerStatus.STOPPED
             mcp_logger.info(
-                "MCP server already stopped",
+                "MCP server process not found (already stopped or never started?)",
                 extra={
                     'connection_id': connection_id
                 }
             )
+            # Clear server address if present
+            self.servers.pop(connection_id, None)
             return True
             
         process = self.processes[connection_id]
         
         try:
-            if process is None:
-                # For Docker-based processes, we just update the status
-                self.status[connection_id] = MCPServerStatus.STOPPED
-                del self.processes[connection_id]
-                if connection_id in self.servers:
-                    del self.servers[connection_id]
-                mcp_logger.info(
-                    "Docker-based MCP server marked as stopped",
-                    extra={
-                        'connection_id': connection_id
-                    }
-                )
-                return True
-            
             mcp_logger.info(
-                "Stopping MCP server",
+                "Stopping MCP server process/container",
                 extra={
                     'connection_id': connection_id,
-                    'server_address': self.servers.get(connection_id)
+                    'server_address': self.servers.get(connection_id),
+                    'pid': process.pid if process else 'N/A'
                 }
             )
             
-            # Send SIGTERM to the process
+            # Send SIGTERM to the process (docker run)
             process.terminate()
             
-            # Wait for the process to exit
-            await asyncio.sleep(2)
+            # Wait for the process to exit (give docker run time to stop/rm container)
+            await asyncio.sleep(2) # Adjust if needed
             
             # If still running, force kill
             if process.poll() is None:
                 process.kill()
                 mcp_logger.warning(
-                    "Force killed MCP server process",
+                    "Force killed MCP server process (docker run)",
                     extra={
                         'connection_id': connection_id
                     }
@@ -359,9 +348,8 @@ class MCPServerManager:
             self.status[connection_id] = MCPServerStatus.STOPPED
             
             # Remove from active processes and servers
-            del self.processes[connection_id]
-            if connection_id in self.servers:
-                del self.servers[connection_id]
+            self.processes.pop(connection_id, None) # Use pop with default
+            self.servers.pop(connection_id, None) # Use pop with default
             
             process_time = time.time() - start_time
             mcp_logger.info(
@@ -386,6 +374,10 @@ class MCPServerManager:
                 },
                 exc_info=True
             )
+            # Attempt cleanup even on error
+            self.processes.pop(connection_id, None)
+            self.servers.pop(connection_id, None)
+            self.status[connection_id] = MCPServerStatus.FAILED # Mark as failed if stop errored
             return False
             
     def get_server_status(self, connection_id: str) -> Dict:
@@ -429,7 +421,7 @@ class MCPServerManager:
     
     async def _start_grafana_mcp(self, connection: BaseConnectionConfig) -> Optional[str]:
         """
-        Start a Grafana MCP server
+        Start a Grafana MCP server by building and running the local Dockerfile.
         
         Args:
             connection: The Grafana connection configuration
@@ -439,7 +431,7 @@ class MCPServerManager:
         """
         correlation_id = str(uuid4())
         mcp_logger.info(
-            "Starting Grafana MCP server",
+            "Attempting to start Grafana MCP server from Dockerfile",
             extra={
                 'correlation_id': correlation_id,
                 'connection_id': connection.id,
@@ -452,414 +444,98 @@ class MCPServerManager:
         api_key = connection.config.get("api_key")
         
         if not grafana_url or not api_key:
-            error_msg = "Missing required configuration for Grafana MCP server"
+            error_msg = "Missing required configuration (url, api_key) for Grafana MCP server"
             self.last_error[connection.id] = error_msg
-            mcp_logger.error(
-                error_msg,
-                extra={
-                    'correlation_id': correlation_id,
-                    'connection_id': connection.id,
-                    'connection_name': connection.name,
-                    'has_url': bool(grafana_url),
-                    'has_api_key': bool(api_key)
-                }
-            )
+            mcp_logger.error(error_msg, extra={'correlation_id': correlation_id, 'connection_id': connection.id})
             return None
+
+        dockerfile_path = "./Dockerfile.mcp-grafana" # Corrected filename
+        image_tag = "sherlog/grafana-mcp-server:latest"
+        build_context = "." # Assuming Dockerfile is at root or build context is root
+
+        # --- Build Image Step (Consider optimizing this) --- 
+        # TODO: Optimize image building - check existence first or build outside this flow.
+        build_cmd = [
+            "docker", "build", "-t", image_tag, "-f", dockerfile_path, build_context
+        ]
+        try:
+            mcp_logger.info(f"Building Grafana MCP image: {' '.join(build_cmd)}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+            build_process = await asyncio.create_subprocess_exec(
+                *build_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await build_process.communicate()
+            if build_process.returncode != 0:
+                error_msg = f"Failed to build Grafana MCP image. Exit code: {build_process.returncode}. Stderr: {stderr.decode(errors='ignore')}"
+                mcp_logger.error(error_msg, extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+                self.last_error[connection.id] = error_msg
+                return None
+            mcp_logger.info(f"Successfully built Grafana MCP image: {image_tag}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+        except Exception as build_e:
+            error_msg = f"Error during Grafana MCP image build: {build_e}"
+            mcp_logger.error(error_msg, extra={'correlation_id': correlation_id, 'connection_id': connection.id}, exc_info=True)
+            self.last_error[connection.id] = error_msg
+            return None
+        # --- End Build Image Step --- 
             
-        # Choose a port for local development (when not using Docker)
-        port = self._find_free_port(9101, 9200)
-        if not port:
+        # Find a free port for the host machine
+        container_port = 8000 # Assuming Dockerfile exposes 8000
+        host_port = self._find_free_port(start_port=9101, end_port=9200) # Example range
+        if not host_port:
             error_msg = "Could not find a free port for Grafana MCP server"
             self.last_error[connection.id] = error_msg
-            mcp_logger.error(
-                error_msg,
-                extra={
-                    'correlation_id': correlation_id,
-                    'connection_id': connection.id,
-                    'connection_name': connection.name
-                }
-            )
+            mcp_logger.error(error_msg, extra={'correlation_id': correlation_id, 'connection_id': connection.id})
             return None
             
-        # Set environment variables
-        env = os.environ.copy()
-        env["GRAFANA_URL"] = grafana_url
-        env["GRAFANA_API_KEY"] = api_key
+        # Prepare docker run command
+        run_cmd = [
+            "docker", "run", "-i", "--rm",
+            "-p", f"{host_port}:{container_port}",
+            "-e", f"GRAFANA_URL={grafana_url}",
+            "-e", f"GRAFANA_API_KEY={api_key}",
+            image_tag
+        ]
             
         try:
-            # When running in Docker, no need to start a process
-            # Check if we're running in Docker
-            is_docker = os.path.exists('/.dockerenv')
-            
-            # For Docker, we don't need to start a process
-            # Just record a placeholder in the processes dict for cleanup tracking
-            self.processes[connection.id] = None
-            
-            # Get the host name based on environment
-            if is_docker:
-                # Use the Docker Compose service name
-                # The internal port is 8000, not 9100
-                host = "sherlog-canvas-mcp-grafana"
-                port = 8000
-                address = f"{host}:{port}"
-                mcp_logger.info(
-                    "Using Docker MCP server",
-                    extra={
-                        'correlation_id': correlation_id,
-                        'connection_id': connection.id,
-                        'host': host,
-                        'port': port
-                    }
-                )
-            else:
-                # Use localhost when running outside Docker
-                address = f"localhost:{port}"
-                mcp_logger.info(
-                    "Using local MCP server",
-                    extra={
-                        'correlation_id': correlation_id,
-                        'connection_id': connection.id,
-                        'port': port
-                    }
-                )
-                
-            mcp_logger.info(
-                "Started Grafana MCP server",
-                extra={
-                    'correlation_id': correlation_id,
-                    'connection_id': connection.id,
-                    'connection_name': connection.name,
-                    'address': address
-                }
+            mcp_logger.info(f"Running Docker command: {' '.join(run_cmd)}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+            process = await asyncio.create_subprocess_exec(
+                *run_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
             )
-            return address
+            self.processes[connection.id] = process
+            mcp_logger.info(
+                f"Grafana MCP Docker process started (PID: {process.pid}) for connection {connection.id}",
+                 extra={'correlation_id': correlation_id}
+            )
+
+            await asyncio.sleep(3) # Give server time to start
+
+            if process.returncode is not None:
+                 stderr_output = await process.stderr.read() if process.stderr else b''
+                 error_msg = f"Grafana MCP Docker process failed to start or exited prematurely. Exit code: {process.returncode}. Stderr: {stderr_output.decode(errors='ignore')}"
+                 mcp_logger.error(error_msg, extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+                 self.last_error[connection.id] = error_msg
+                 self.processes.pop(connection.id, None)
+                 return None
+
+            server_address = f"http://localhost:{host_port}/sse"
+            mcp_logger.info(f"Grafana MCP server assumed running at {server_address}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+            return server_address
         
         except Exception as e:
-            error_msg = f"Error starting Grafana MCP server: {e}"
+            error_msg = f"Failed to start Grafana MCP Docker container: {str(e)}"
+            mcp_logger.error(error_msg, extra={'correlation_id': correlation_id, 'connection_id': connection.id}, exc_info=True)
             self.last_error[connection.id] = error_msg
-            mcp_logger.error(
-                error_msg,
-                extra={
-                    'correlation_id': correlation_id,
-                    'connection_id': connection.id,
-                    'error': str(e),
-                    'error_type': type(e).__name__
-                },
-                exc_info=True
-            )
+            if connection.id in self.processes and self.processes[connection.id]:
+                 try:
+                     self.processes[connection.id].terminate()
+                 except ProcessLookupError:
+                     pass 
+                 self.processes.pop(connection.id, None)
             return None
     
-    async def _start_kubernetes_mcp(self, connection: BaseConnectionConfig) -> Optional[str]:
-        """
-        Start a Kubernetes MCP server
-        
-        Args:
-            connection: The Kubernetes connection configuration
-            
-        Returns:
-            The MCP server address if successful, None otherwise
-        """
-        correlation_id = str(uuid4())
-        mcp_logger.info(
-            "Starting Kubernetes MCP server",
-            extra={
-                'correlation_id': correlation_id,
-                'connection_id': connection.id,
-                'connection_name': connection.name
-            }
-        )
-        
-        # Get configuration
-        kubeconfig = connection.config.get("kubeconfig")
-        context = connection.config.get("context")
-        
-        if not kubeconfig:
-            error_msg = "Missing required kubeconfig for Kubernetes MCP server"
-            self.last_error[connection.id] = error_msg
-            mcp_logger.error(
-                error_msg,
-                extra={
-                    'correlation_id': correlation_id,
-                    'connection_id': connection.id,
-                    'connection_name': connection.name
-                }
-            )
-            return None
-        
-        # Choose a port
-        port = self._find_free_port(9301, 9400)
-        if not port:
-            error_msg = "Could not find a free port for Kubernetes MCP server"
-            self.last_error[connection.id] = error_msg
-            mcp_logger.error(
-                error_msg,
-                extra={
-                    'correlation_id': correlation_id,
-                    'connection_id': connection.id,
-                    'connection_name': connection.name
-                }
-            )
-            return None
-        
-        mcp_logger.info(
-            "Using port for Kubernetes MCP server",
-            extra={
-                'correlation_id': correlation_id,
-                'connection_id': connection.id,
-                'port': port
-            }
-        )
-        
-        # Set environment variables
-        env = os.environ.copy()
-        
-        # Write the kubeconfig to a temporary file if it's provided as content
-        # Otherwise use the path directly
-        kubeconfig_path = None
-        if kubeconfig.startswith("{") or kubeconfig.startswith("apiVersion:"):
-            # This is a kubeconfig content rather than a path
-            import tempfile
-            kubeconfig_fd, kubeconfig_path = tempfile.mkstemp(suffix=".yaml")
-            with os.fdopen(kubeconfig_fd, 'w') as f:
-                f.write(kubeconfig)
-            env["KUBECONFIG"] = kubeconfig_path
-            mcp_logger.info(
-                "Created temporary kubeconfig file",
-                extra={
-                    'correlation_id': correlation_id,
-                    'connection_id': connection.id,
-                    'kubeconfig_path': kubeconfig_path
-                }
-            )
-        else:
-            # This is a path to the kubeconfig file
-            env["KUBECONFIG"] = os.path.expanduser(kubeconfig)
-            mcp_logger.info(
-                "Using existing kubeconfig file",
-                extra={
-                    'correlation_id': correlation_id,
-                    'connection_id': connection.id,
-                    'kubeconfig_path': env["KUBECONFIG"]
-                }
-            )
-            
-        # Set context if provided
-        if context:
-            env["KUBE_CONTEXT"] = context
-            mcp_logger.info(
-                "Using Kubernetes context",
-                extra={
-                    'correlation_id': correlation_id,
-                    'connection_id': connection.id,
-                    'context': context
-                }
-            )
-            
-        # Start the MCP server using the kubernetes MCP package
-        try:
-            # For local development, use node to run our custom server
-            cmd = [
-                "node",
-                "mcp-kubernetes/server.js"
-            ]
-            # Add port as an environment variable
-            env["PORT"] = str(port)
-            
-            mcp_logger.info(
-                "Starting Kubernetes MCP process",
-                extra={
-                    'correlation_id': correlation_id,
-                    'connection_id': connection.id,
-                    'command': ' '.join(cmd),
-                    'port': port
-                }
-            )
-            
-            # Create a process with pipes for stdout and stderr
-            process = subprocess.Popen(
-                cmd,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1  # Line buffered
-            )
-            
-            # Store the process
-            self.processes[connection.id] = process
-            
-            # Create async tasks to read stdout and stderr in real-time
-            async def read_stream(stream, is_error=False):
-                while True:
-                    line = stream.readline()
-                    if not line:
-                        break
-                    
-                    line = line.strip()
-                    if line:
-                        if is_error:
-                            mcp_logger.error(
-                                f"Kubernetes MCP stderr: {line}",
-                                extra={
-                                    'correlation_id': correlation_id,
-                                    'connection_id': connection.id,
-                                    'stream': 'stderr'
-                                }
-                            )
-                        else:
-                            mcp_logger.info(
-                                f"Kubernetes MCP stdout: {line}",
-                                extra={
-                                    'correlation_id': correlation_id,
-                                    'connection_id': connection.id,
-                                    'stream': 'stdout'
-                                }
-                            )
-            
-            # Start background tasks to read the output streams
-            asyncio.create_task(read_stream(process.stdout))
-            asyncio.create_task(read_stream(process.stderr, is_error=True))
-            
-            # Wait for server to start
-            mcp_logger.info(
-                "Waiting for Kubernetes MCP server to start",
-                extra={
-                    'correlation_id': correlation_id,
-                    'connection_id': connection.id,
-                    'wait_time_sec': 2
-                }
-            )
-            await asyncio.sleep(2)
-            
-            # Check if process is still running
-            if process.poll() is not None:
-                exit_code = process.poll()
-                stderr_output = ""
-                
-                # Try to capture any remaining stderr output
-                if process.stderr:
-                    stderr_output = process.stderr.read() or ""
-                
-                error_msg = f"Kubernetes MCP server failed to start (exit code: {exit_code}): {stderr_output}"
-                self.last_error[connection.id] = error_msg
-                
-                mcp_logger.error(
-                    "Kubernetes MCP server process exited prematurely",
-                    extra={
-                        'correlation_id': correlation_id,
-                        'connection_id': connection.id,
-                        'exit_code': exit_code,
-                        'stderr': stderr_output
-                    }
-                )
-                
-                # Clean up the temp file if we created one
-                if kubeconfig_path and kubeconfig.startswith(("{", "apiVersion:")):
-                    try:
-                        os.unlink(kubeconfig_path)
-                        mcp_logger.info(
-                            "Cleaned up temporary kubeconfig file",
-                            extra={
-                                'correlation_id': correlation_id,
-                                'connection_id': connection.id,
-                                'kubeconfig_path': kubeconfig_path
-                            }
-                        )
-                    except Exception as cleanup_error:
-                        mcp_logger.error(
-                            "Error cleaning up temporary kubeconfig file",
-                            extra={
-                                'correlation_id': correlation_id,
-                                'connection_id': connection.id,
-                                'error': str(cleanup_error)
-                            }
-                        )
-                        
-                return None
-            
-            # Check if we're running in Docker
-            is_docker = os.path.exists('/.dockerenv')
-            
-            # Get the host name based on environment
-            if is_docker:
-                # Use the Docker Compose service name
-                host = "sherlog-canvas-mcp-kubernetes"
-                # The internal port is 8000, not our dynamic port
-                port = 8000
-                mcp_logger.info(
-                    "Running in Docker, using container hostname",
-                    extra={
-                        'correlation_id': correlation_id,
-                        'connection_id': connection.id,
-                        'host': host,
-                        'port': port
-                    }
-                )
-            else:
-                # Use localhost when running outside Docker
-                host = "localhost" 
-                # Use the dynamically assigned port
-                mcp_logger.info(
-                    "Running locally, using localhost",
-                    extra={
-                        'correlation_id': correlation_id,
-                        'connection_id': connection.id,
-                        'host': host,
-                        'port': port
-                    }
-                )
-            
-            address = f"{host}:{port}"
-            mcp_logger.info(
-                "Kubernetes MCP server started successfully",
-                extra={
-                    'correlation_id': correlation_id,
-                    'connection_id': connection.id,
-                    'connection_name': connection.name,
-                    'address': address
-                }
-            )
-            return address
-        
-        except Exception as e:
-            error_msg = f"Error starting Kubernetes MCP server: {str(e)}"
-            self.last_error[connection.id] = error_msg
-            
-            mcp_logger.error(
-                "Exception starting Kubernetes MCP server",
-                extra={
-                    'correlation_id': correlation_id,
-                    'connection_id': connection.id,
-                    'error': str(e),
-                    'error_type': type(e).__name__
-                },
-                exc_info=True
-            )
-            
-            # Clean up the temp file if we created one
-            if kubeconfig_path and kubeconfig.startswith(("{", "apiVersion:")):
-                try:
-                    os.unlink(kubeconfig_path)
-                    mcp_logger.info(
-                        "Cleaned up temporary kubeconfig file",
-                        extra={
-                            'correlation_id': correlation_id,
-                            'connection_id': connection.id,
-                            'kubeconfig_path': kubeconfig_path
-                        }
-                    )
-                except Exception as cleanup_error:
-                    mcp_logger.error(
-                        "Error cleaning up temporary kubeconfig file",
-                        extra={
-                            'correlation_id': correlation_id,
-                            'connection_id': connection.id,
-                            'error': str(cleanup_error)
-                        }
-                    )
-                    
-            return None
-            
     async def _start_python_mcp(self, connection: BaseConnectionConfig) -> Optional[str]:
         """
         Start a Python MCP server for sandboxed code execution using Pydantic MCP
@@ -954,6 +630,101 @@ class MCPServerManager:
                 continue
         
         return None
+
+    async def _start_github_mcp(self, connection: BaseConnectionConfig) -> Optional[str]:
+        """Starts the GitHub MCP server using Docker."""
+        correlation_id = str(uuid4())
+        mcp_logger.info(
+            "Attempting to start GitHub MCP server", 
+            extra={
+                'correlation_id': correlation_id,
+                'connection_id': connection.id
+            }
+        )
+        
+        token = connection.config.get("github_personal_access_token")
+        if not token:
+            error_msg = "GitHub Personal Access Token not found in connection config."
+            mcp_logger.error(
+                error_msg,
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection.id
+                }
+            )
+            self.last_error[connection.id] = error_msg
+            return None
+
+        # Find a free port for the host machine
+        # Assuming GitHub MCP server listens on port 8000 internally by default
+        container_port = 8000 
+        host_port = self._find_free_port(start_port=8100, end_port=8200) # Example range
+        if host_port is None:
+            error_msg = "Could not find a free port for GitHub MCP server."
+            mcp_logger.error(
+                error_msg,
+                extra={
+                    'correlation_id': correlation_id,
+                    'connection_id': connection.id
+                }
+            )
+            self.last_error[connection.id] = error_msg
+            return None
+
+        docker_image = "ghcr.io/github/github-mcp-server"
+        cmd = [
+            "docker", "run", "-i", "--rm",
+            "-p", f"{host_port}:{container_port}",
+            "-e", f"GITHUB_PERSONAL_ACCESS_TOKEN={token}",
+            docker_image
+        ]
+
+        try:
+            mcp_logger.info(f"Running Docker command: {' '.join(cmd)}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+            
+            # Start the Docker container as a background process
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            self.processes[connection.id] = process
+            mcp_logger.info(
+                f"GitHub MCP Docker process started (PID: {process.pid}) for connection {connection.id}",
+                 extra={'correlation_id': correlation_id}
+            )
+
+            # Give the server a moment to start up
+            await asyncio.sleep(3) # Adjust sleep time if needed
+            
+            # Check if the process started successfully (quick check)
+            if process.returncode is not None:
+                 # Process already exited
+                 stderr_output = await process.stderr.read() if process.stderr else b''
+                 error_msg = f"GitHub MCP Docker process failed to start or exited prematurely. Exit code: {process.returncode}. Stderr: {stderr_output.decode(errors='ignore')}"
+                 mcp_logger.error(error_msg, extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+                 self.last_error[connection.id] = error_msg
+                 self.processes.pop(connection.id, None)
+                 return None
+
+            # Construct the address for the agent to connect to
+            # Pydantic AI MCPServerHTTP expects an SSE endpoint, often `/sse`
+            server_address = f"http://localhost:{host_port}/sse" 
+            mcp_logger.info(f"GitHub MCP server assumed running at {server_address}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+            return server_address
+
+        except Exception as e:
+            error_msg = f"Failed to start GitHub MCP Docker container: {str(e)}"
+            mcp_logger.error(error_msg, extra={'correlation_id': correlation_id, 'connection_id': connection.id}, exc_info=True)
+            self.last_error[connection.id] = error_msg
+            # Ensure process is cleaned up if creation failed mid-way
+            if connection.id in self.processes and self.processes[connection.id]:
+                 try:
+                     self.processes[connection.id].terminate()
+                 except ProcessLookupError:
+                     pass # Process already gone
+                 self.processes.pop(connection.id, None)
+            return None
 
 
 # Singleton instance

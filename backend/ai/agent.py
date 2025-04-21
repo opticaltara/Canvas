@@ -26,6 +26,7 @@ from pydantic_ai.messages import ModelMessage
 
 from backend.ai.log_query_agent import LogQueryAgent
 from backend.ai.metric_query_agent import MetricQueryAgent
+from backend.ai.github_query_agent import GitHubQueryAgent
 from backend.config import get_settings
 from backend.core.cell import AIQueryCell
 from backend.core.execution import ExecutionContext
@@ -52,12 +53,22 @@ class StepType(str, Enum):
     MARKDOWN = "markdown"
     LOG = "log"
     METRIC = "metric"
+    GITHUB = "github"
+
+
+class StepCategory(str, Enum):
+    PHASE = "phase"
+    DECISION = "decision"
 
 
 class InvestigationStepModel(BaseModel):
     """A step in the investigation plan"""
     step_id: str = Field(description="Unique identifier for this step")
     step_type: StepType = Field(description="Type of step (sql, python, markdown, etc.)")
+    category: StepCategory = Field(
+        description="PHASE for coarse step, DECISION for markdown decision cell",
+        default=StepCategory.PHASE
+    )
     description: str = Field(description="Description of what this step will do")
     dependencies: List[str] = Field(
         description="List of step IDs this step depends on",
@@ -66,10 +77,6 @@ class InvestigationStepModel(BaseModel):
     parameters: Dict[str, Any] = Field(
         description="Parameters for the step",
         default_factory=dict
-    )
-    is_decision_point: bool = Field(
-        description="Whether this step evaluates previous results and may change the plan",
-        default=False
     )
 
 
@@ -150,7 +157,7 @@ class AIAgent:
     def __init__(
         self, 
         notebook_id: str,
-        mcp_servers: Optional[List[MCPServerHTTP]] = None
+        mcp_server_map: Optional[Dict[str, MCPServerHTTP]] = None
     ):
         self.settings = get_settings()
         self.model = OpenAIModel(
@@ -160,20 +167,32 @@ class AIAgent:
                     api_key=self.settings.openrouter_api_key,
                 ),
         )
-        self.mcp_servers = mcp_servers or []
+        self.mcp_server_map = mcp_server_map or {}
         self.notebook_id = notebook_id
     
+        # Create the full list for general agents
+        all_mcps_list = list(self.mcp_server_map.values())
+        
         # Initialize investigation planner
         self.investigation_planner = Agent(
             self.model,
             deps_type=InvestigationDependencies,
             result_type=InvestigationPlanModel,
-            mcp_servers=self.mcp_servers,
+            mcp_servers=all_mcps_list,
             system_prompt="""
             You are the Lead Investigator in a distributed AI system designed to solve complex software incidents. 
             You coordinate a team of specialized agents by creating and adapting investigation plans.
 
             When analyzing a user query about a software incident:
+
+            **Simple Query Handling:**
+            If the user query is very straightforward and can be fully addressed with a single action 
+            (e.g., generating a markdown summary, running one specific log/metric query), 
+            generate a plan containing ONLY ONE step of the appropriate type (`markdown`, `log`, `metric`, `github`). 
+            Describe the action clearly in the step's description. Use `category=StepCategory.PHASE` for this step. In this case, the 'thinking' field can be brief or omitted.
+
+            **Complex Query Handling (Multi-Step Plan):**
+            If the query requires multiple steps or analysis across different data sources:
 
             1. CONTEXT ASSESSMENT
               • Extract the key incident characteristics (affected services, error patterns, timing)
@@ -181,26 +200,24 @@ class AIAgent:
               • Frame the investigation as a structured debugging process
 
             2. INVESTIGATION DESIGN
-              Create a structured, adaptable plan with:
-              
-              • Problem Definition: Clear statement of what's being investigated
-              • Expected Impact: How this issue affects users/systems
-              • Investigation Graph: Steps with clear dependencies and information flow
-              • Adaptation Points: Where plan might need revision based on findings
-              • Success Criteria: Specific conditions that indicate resolution
+              Produce **3–5 PHASES**, each a coarse investigative goal (e.g. "Identify error fingerprint",
+              "Correlate spikes with deploys").  Do **NOT** emit fine‑grained LogQL/PromQL/code;
+              micro‑agents will handle that.
 
             3. STEP SPECIFICATION
               For each step in your plan, define:
               
               • step_id: A unique identifier (use S1, S2, etc.)
-              • step_type: Must be one of ["log", "metric"]
+              • step_type: Choose the *primary* data source this phase will use ("log", "metric", or "github")
+              • category: Choose the *primary* category for this step ("PHASE" or "DECISION"). Always "phase" here.
               • description: Instructions for the specialized agent that will:
                 - State precisely what question this step answers
                 - Provide all context needed for the specialized agent
                 - Explain how to interpret the results
                 - Reference specific artifacts from previous steps when needed
               • dependencies: Array of step IDs required before this step can execute
-              • parameters: Configuration details relevant to this step type
+              • parameters: Configuration details relevant to this step type. 
+                - For "github" type, should contain 'connection_id' (string) referencing the relevant GitHub connection.
               • is_decision_point: Set to true for markdown steps that evaluate previous results
               
             4. DECISION POINTS
@@ -219,7 +236,7 @@ class AIAgent:
               • Contributing factors are understood
               • Potential remediation approaches
 
-            IMPORTANT CONSTRAINTS:
+            IMPORTANT CONSTRAINTS (for multi-step plans):
             • Keep the investigation plan concise. Aim for the minimum number of steps required to address the user's core query. 
             Do not generate more than 5 steps unless absolutely necessary for a complex investigation.
             • Stick strictly to the scope of the user's request. Do not add steps for tangential inquiries 
@@ -237,7 +254,7 @@ class AIAgent:
             self.model,
             deps_type=PlanRevisionRequest,
             result_type=PlanRevisionResult,
-            mcp_servers=self.mcp_servers,
+            mcp_servers=list(self.mcp_server_map.values()),
             system_prompt="""
             You are an Investigation Plan Reviser responsible for analyzing the results of executed steps and determining if the investigation plan should be adjusted.
 
@@ -278,7 +295,7 @@ class AIAgent:
         self.markdown_generator = Agent(
             self.model,
             result_type=MarkdownQueryResult,
-            mcp_servers=self.mcp_servers,
+            mcp_servers=list(self.mcp_server_map.values()),
             system_prompt="""
             You are an expert at technical documentation and result analysis. Create clear and **concise** markdown to address the user's request. 
             Your primary goal is brevity and clarity. Avoid unnecessary jargon or overly detailed explanations.
@@ -294,8 +311,14 @@ class AIAgent:
             """
         )
 
-        self.log_generator = LogQueryAgent(source="loki", notebook_id=self.notebook_id, mcp_servers=self.mcp_servers)
-        self.metric_generator = MetricQueryAgent(source="prometheus", notebook_id=self.notebook_id, mcp_servers=self.mcp_servers)
+        # Prepare filtered lists for specialized agents
+        grafana_mcp = [self.mcp_server_map['grafana']] if 'grafana' in self.mcp_server_map else []
+        github_mcp = [self.mcp_server_map['github']] if 'github' in self.mcp_server_map else []
+
+        # Initialize specialized agents with filtered lists
+        self.log_generator = LogQueryAgent(source="loki", notebook_id=self.notebook_id, mcp_servers=grafana_mcp) # Pass Grafana only
+        self.metric_generator = MetricQueryAgent(source="prometheus", notebook_id=self.notebook_id, mcp_servers=grafana_mcp) # Pass Grafana only
+        self.github_generator = GitHubQueryAgent(notebook_id=self.notebook_id, mcp_servers=github_mcp) # Pass GitHub only
 
     async def investigate(
         self, 
@@ -331,25 +354,80 @@ class AIAgent:
         plan = await self.create_investigation_plan(query, notebook_id, message_history)
         yield "plan_created", {"status": "plan_created", "thinking": plan.thinking, "agent_type": "investigation_planner"}
         
-        # Create a markdown cell explaining the plan
-        cell_params = CreateCellParams(
-            notebook_id=notebook_id,
-            cell_type="markdown",
-            content=f"# Investigation Plan\n\n{plan.thinking}\n\n## Steps:\n" + 
-                   "\n".join(f"- {step.description}" for step in plan.steps),
-            metadata={
-                "session_id": session_id,
-                "step_id": "plan",
-                "dependencies": []
+        # Check if it's a simple, single-step plan
+        if len(plan.steps) == 1:
+            ai_logger.info(f"Detected single-step plan for query: {query}")
+            single_step = plan.steps[0]
+            
+            # Generate content for the single step
+            result = await self.generate_content(
+                current_step=single_step,
+                step_type=single_step.step_type,
+                description=single_step.description,
+                executed_steps={},
+                step_results={}
+            )
+            
+            query_content = result.query
+            if single_step.step_type == StepType.MARKDOWN:
+                 # For markdown, the 'query' is the description, the 'data' is the generated content
+                query_content = str(result.data) # Ensure content is string for markdown cell
+            
+            # Create cell for the single step
+            cell_params_for_step = CreateCellParams(
+                notebook_id=notebook_id,
+                cell_type=single_step.step_type,
+                content=query_content, # Use generated content/query depending on type
+                metadata={
+                    "session_id": session_id,
+                    "step_id": single_step.step_id,
+                    "dependencies": single_step.dependencies
+                }
+            )
+            cell_result = await cell_tools.create_cell(
+                params=cell_params_for_step
+            )
+            
+            # Yield completion status for the single step
+            yield f"step_{single_step.step_id}_completed", {
+                "status": "step_completed",
+                "step_id": single_step.step_id,
+                "step_type": single_step.step_type,
+                "cell_id": cell_result.get("cell_id", ""),
+                "cell_params": cell_params_for_step.model_dump(),
+                "result": {
+                    "data": result.data,
+                    "query": result.query,
+                    "error": result.error,
+                    "metadata": result.metadata
+                },
+                "agent_type": single_step.step_type,
+                "is_single_step_plan": True # Indicate this was a direct execution
             }
-        )
-        cell_result = await cell_tools.create_cell(params=cell_params)
-        yield "plan_cell_created", {
-            "status": "plan_cell_created", 
-            "agent_type": "investigation_planner",
-            "cell_params": cell_params.model_dump(),
-            "cell_id": cell_result.get("cell_id", "")
-        }
+            ai_logger.info(f"Completed single-step plan execution for step: {single_step.step_id}")
+            return # End execution here for single-step plans
+        
+        # --- Proceed with multi-step plan execution if not handled above ---
+        else:
+            # Create a markdown cell explaining the plan (only for multi-step plans)
+            cell_params = CreateCellParams(
+                notebook_id=notebook_id,
+                cell_type="markdown",
+                content=f"# Investigation Plan\n\n{plan.thinking}\n\n## Steps:\n" + 
+                    "\n".join(f"- {step.description}" for step in plan.steps),
+                metadata={
+                    "session_id": session_id,
+                    "step_id": "plan",
+                    "dependencies": []
+                }
+            )
+            cell_result = await cell_tools.create_cell(params=cell_params)
+            yield "plan_cell_created", {
+                "status": "plan_cell_created", 
+                "agent_type": "investigation_planner",
+                "cell_params": cell_params.model_dump(),
+                "cell_id": cell_result.get("cell_id", "")
+            }
 
         # Execute steps in order with potential for plan revision
         executed_steps = {}
@@ -374,12 +452,24 @@ class AIAgent:
             remaining_steps.remove(current_step)
             
             # Generate content for this step
-            result = await self.generate_content(
-                current_step.step_type,
-                current_step.description,
-                executed_steps=executed_steps,
-                step_results=step_results
-            )
+            if current_step.category == StepCategory.PHASE:
+                result = await self.generate_content(
+                    current_step,
+                    current_step.step_type,
+                    current_step.description,
+                    executed_steps=executed_steps,
+                    step_results=step_results
+                )
+
+            elif current_step.category == StepCategory.DECISION:
+                markdown = await self.markdown_generator.run(
+                    current_step.description
+                )
+                if markdown and markdown.data and hasattr(markdown.data, 'data'):
+                    markdown_string = markdown.data.data
+                else:
+                    ai_logger.warning(f"Could not extract markdown data from result: {result}")
+                result = DataQueryResult(data=markdown, query=current_step.description)
 
             query = result.query
             
@@ -403,7 +493,7 @@ class AIAgent:
                 "step": current_step.model_dump(),
                 "content": result
             }
-            step_results[current_step.description] = result
+            step_results[current_step.step_id] = result
             
             # Stream status update with cell results
             yield f"step_{current_step.step_id}_completed", {
@@ -422,7 +512,7 @@ class AIAgent:
             }
             
             # Check if this is a decision point
-            if current_step.is_decision_point and current_step.step_type == "markdown":
+            if current_step.category == StepCategory.DECISION:
                 # This is a decision point, so we should revise the plan
                 plan_revision = await self.revise_plan(
                     original_plan=InvestigationPlanModel(
@@ -629,7 +719,7 @@ class AIAgent:
                 description=step_data.description,
                 dependencies=step_data.dependencies,
                 parameters=step_data.parameters,
-                is_decision_point=step_data.is_decision_point
+                category=step_data.category
             )
             steps.append(step)
 
@@ -678,7 +768,8 @@ class AIAgent:
 
     async def generate_content(
         self,
-        step_type: str,
+        current_step: InvestigationStepModel,
+        step_type: StepType,
         description: str,
         executed_steps: Dict[str, Any] | None = None,
         step_results: Dict[str, Any] = {}
@@ -687,6 +778,7 @@ class AIAgent:
         Generate content for a specific step type
         
         Args:
+            current_step: The current step in the investigation plan
             step_type: Type of step (sql, python, markdown, etc.)
             description: Description of what the step will do
             executed_steps: Previously executed steps (for context)
@@ -695,31 +787,29 @@ class AIAgent:
         Returns:
             Generated content for the step
         """
-        # If we already have results for this step, use them
         if description in step_results:
             return step_results[description]
             
         context = ""
         if executed_steps and step_results:
-            # Add context from previous steps if available
             context = f"\n\nContext from previous steps:\n{executed_steps}\n\nResults from previous steps:\n{step_results}"
-        
-        # Generate content based on step type with context
-        if step_type == "log":
+        if step_type == StepType.LOG:
             result = await self.log_generator.run_query(description + context)
             return result
-        elif step_type == "metric":
+        elif step_type == StepType.METRIC:
             result = await self.metric_generator.run_query(description + context)
             return result
-        elif step_type == "markdown":
+        elif step_type == StepType.MARKDOWN:
             result = await self.markdown_generator.run(description + context)
             markdown_string = ""
             if result and result.data and hasattr(result.data, 'data'):
                 markdown_string = result.data.data
             else:
                 ai_logger.warning(f"Could not extract markdown data from result: {result}")
-            # Return a DataQueryResult compatible object
             return DataQueryResult(data=markdown_string, query=description)
+        elif step_type == StepType.GITHUB:
+            result = await self.github_generator.run_query(description + context)
+            return result
         else:
             raise ValueError(f"Unsupported step type: {step_type}")
 
@@ -750,21 +840,41 @@ async def execute_ai_query_cell(cell: AIQueryCell, context: ExecutionContext) ->
                 await connection_config.start_mcp_server()
                 server_addresses[conn["id"]] = connection_config.mcp_status["address"]
         
-        # Create MCPServerHTTP instances for each connection
-        mcp_servers = []
+        # Create MCPServerHTTP instances for each connection, mapped by type
+        mcp_server_map: Dict[str, MCPServerHTTP] = {} # Changed from list to map
+        default_connection_ids = { # Helper to pick one if multiple of same type exist
+            conn_type: await connection_manager.get_default_connection(conn_type)
+            for conn_type in set(c['type'] for c in connections if 'type' in c) 
+        }
+        
         for conn in connections:
-            if isinstance(conn, dict) and "id" in conn and conn["id"] in server_addresses:
-                server_url = server_addresses[conn["id"]]
-                if server_url.startswith("http"):
-                    mcp_servers.append(MCPServerHTTP(url=f"{server_url}/sse"))
+            conn_id = conn.get("id")
+            conn_type = conn.get("type")
+            
+            if not conn_id or not conn_type or conn_id not in server_addresses:
+                continue # Skip if connection info or server address is missing
+                
+            server_url = server_addresses[conn_id]
+            if not server_url.startswith("http"):
+                 ai_logger.warning(f"MCP server address for {conn_id} is not HTTP: {server_url}")
+                 continue
+
+            # If this type isn't in the map OR if this is the default connection for the type
+            default_conn_obj = default_connection_ids.get(conn_type)
+            is_default = default_conn_obj and default_conn_obj.id == conn_id
+            
+            if conn_type not in mcp_server_map or is_default:
+                # Prioritize default, otherwise take the first one encountered
+                 mcp_server_map[conn_type] = MCPServerHTTP(url=f"{server_url}/sse") # Add /sse suffix
+                 ai_logger.info(f"Mapped MCPServerHTTP for type '{conn_type}' (ID: {conn_id}, Default: {is_default}) to {server_url}/sse")
         
         # Get notebook_id from cell metadata
         notebook_id = cell.metadata.get("notebook_id")
         if not notebook_id:
             raise ValueError("Cell metadata must contain notebook_id")
         
-        # Initialize the AI agent with MCP servers and notebook ID
-        agent = AIAgent(mcp_servers=mcp_servers, notebook_id=notebook_id)
+        # Initialize the AI agent with MCP server map and notebook ID
+        agent = AIAgent(mcp_server_map=mcp_server_map, notebook_id=notebook_id) # Pass map instead of list
         
         # Generate an investigation plan
         plan = await agent.create_investigation_plan(

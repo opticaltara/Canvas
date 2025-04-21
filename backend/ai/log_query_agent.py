@@ -9,7 +9,6 @@ from backend.ai import loki_system_prompt
 from backend.config import get_settings
 from backend.core.query_result import LogQueryResult
 
-# Logger for LogQueryAgent
 log_query_agent_logger = logging.getLogger("ai.log_query_agent")
 
 class LogQueryAgent:
@@ -58,9 +57,7 @@ class LogQueryAgent:
                     return result.data
                 else:
                     log_query_agent_logger.error(f"Agent did not return valid data. Raw result: {result}")
-                    # Return an empty LogQueryResult or raise an error, depending on desired behavior
                     return LogQueryResult(query=processed_query, data=[], error="Agent failed to return valid data")
         except Exception as e:
             log_query_agent_logger.error(f"Error during agent run: {e}", exc_info=True)
-            # Propagate the error or return a result indicating failure
             return LogQueryResult(query=processed_query, data=[], error=str(e))

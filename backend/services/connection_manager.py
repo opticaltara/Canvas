@@ -69,29 +69,10 @@ class GrafanaConnectionConfig(BaseConnectionConfig):
     url: str
     api_key: str
     
-class KubernetesConnectionConfig(BaseConnectionConfig):
-    """Kubernetes connection configuration"""
-    type: str = "kubernetes"
-    kubeconfig: str
-    context: Optional[str] = None
-    
-class S3ConnectionConfig(BaseConnectionConfig):
-    """S3 connection configuration"""
-    type: str = "s3"
-    bucket: str
-    aws_access_key_id: Optional[str] = None
-    aws_secret_access_key: Optional[str] = None
-    region: Optional[str] = None
-    endpoint: Optional[str] = None
-    
-class PostgresConnectionConfig(BaseConnectionConfig):
-    """PostgreSQL connection configuration"""
-    type: str = "postgres"
-    host: str
-    port: str
-    database: str
-    username: str
-    password: str
+class GithubConnectionConfig(BaseConnectionConfig):
+    """GitHub connection configuration (uses Docker MCP server)"""
+    type: str = "github"
+    github_personal_access_token: str
     
 # Generic fallback for other types
 class GenericConnectionConfig(BaseConnectionConfig):
@@ -102,9 +83,7 @@ class ConnectionConfig(BaseConnectionConfig):
     """Connection configuration"""
     def to_specific_config(self) -> Union[
         GrafanaConnectionConfig, 
-        KubernetesConnectionConfig,
-        S3ConnectionConfig,
-        PostgresConnectionConfig,
+        GithubConnectionConfig,
         GenericConnectionConfig
     ]:
         """Convert to a type-specific configuration"""
@@ -115,32 +94,11 @@ class ConnectionConfig(BaseConnectionConfig):
                 url=self.config.get("url", ""),
                 api_key=self.config.get("api_key", "")
             )
-        elif self.type == "kubernetes":
-            return KubernetesConnectionConfig(
+        elif self.type == "github":
+            return GithubConnectionConfig(
                 id=self.id,
                 name=self.name,
-                kubeconfig=self.config.get("kubeconfig", ""),
-                context=self.config.get("context")
-            )
-        elif self.type == "s3":
-            return S3ConnectionConfig(
-                id=self.id,
-                name=self.name,
-                bucket=self.config.get("bucket", ""),
-                aws_access_key_id=self.config.get("aws_access_key_id"),
-                aws_secret_access_key=self.config.get("aws_secret_access_key"),
-                region=self.config.get("region"),
-                endpoint=self.config.get("endpoint")
-            )
-        elif self.type == "postgres":
-            return PostgresConnectionConfig(
-                id=self.id,
-                name=self.name,
-                host=self.config.get("host", ""),
-                port=self.config.get("port", ""),
-                database=self.config.get("database", ""),
-                username=self.config.get("username", ""),
-                password=self.config.get("password", "")
+                github_personal_access_token=self.config.get("github_personal_access_token", "")
             )
         else:
             return GenericConnectionConfig(
@@ -153,9 +111,7 @@ class ConnectionConfig(BaseConnectionConfig):
     @classmethod
     def from_specific_config(cls, config: Union[
         GrafanaConnectionConfig, 
-        KubernetesConnectionConfig,
-        S3ConnectionConfig,
-        PostgresConnectionConfig,
+        GithubConnectionConfig,
         GenericConnectionConfig
     ]) -> 'ConnectionConfig':
         """Create from a type-specific configuration"""
@@ -169,48 +125,13 @@ class ConnectionConfig(BaseConnectionConfig):
                     "api_key": config.api_key
                 }
             )
-        elif isinstance(config, KubernetesConnectionConfig):
+        elif isinstance(config, GithubConnectionConfig):
             return cls(
                 id=config.id,
                 name=config.name,
                 type=config.type,
                 config={
-                    "kubeconfig": config.kubeconfig,
-                    "context": config.context if config.context else ""
-                }
-            )
-        elif isinstance(config, S3ConnectionConfig):
-            config_dict = {
-                "bucket": config.bucket
-            }
-            
-            # Add optional fields if they exist
-            if config.aws_access_key_id:
-                config_dict["aws_access_key_id"] = config.aws_access_key_id
-            if config.aws_secret_access_key:
-                config_dict["aws_secret_access_key"] = config.aws_secret_access_key
-            if config.region:
-                config_dict["region"] = config.region
-            if config.endpoint:
-                config_dict["endpoint"] = config.endpoint
-                
-            return cls(
-                id=config.id,
-                name=config.name,
-                type=config.type,
-                config=config_dict
-            )
-        elif isinstance(config, PostgresConnectionConfig):
-            return cls(
-                id=config.id,
-                name=config.name,
-                type=config.type,
-                config={
-                    "host": config.host,
-                    "port": config.port,
-                    "database": config.database,
-                    "username": config.username,
-                    "password": config.password
+                    "github_personal_access_token": config.github_personal_access_token
                 }
             )
         elif isinstance(config, GenericConnectionConfig):
@@ -655,21 +576,15 @@ class ConnectionManager:
                     logger.error(f"Failed to test Grafana connection: {str(e)}")
                     return False
             
-            elif connection_type == "kubernetes":
-                if not config.get("kubeconfig"):
-                    logger.warning("Kubernetes connection missing required field: kubeconfig")
+            elif connection_type == "github":
+                if not config.get("github_personal_access_token"):
+                    logger.warning("GitHub connection missing required field: github_personal_access_token")
                     return False
-                    
-                # TODO: Verify the kubeconfig is valid
-                return True
-            
-            elif connection_type == "s3":
-                if not config.get("bucket"):
-                    logger.warning("S3 connection missing required field: bucket")
-                    return False
-                    
-                # TODO: Verify the S3 bucket is accessible
-                return True
+                # Basic validation: token exists. Actual test requires starting MCP.
+                # We could try starting/stopping the MCP here like Grafana, but deferring for now.
+                # For now, just check token presence.
+                # TODO: Implement actual MCP start/stop test for GitHub connection.
+                return True 
             
             else:
                 logger.error(f"Unknown connection type: {connection_type}")
@@ -691,22 +606,19 @@ class ConnectionManager:
                 
                 # TODO: Actually test the connection to Grafana
                 return True, "Connection validated"
-            elif connection_type == "kubernetes":
-                if not config.get("kubeconfig"):
-                    logger.warning("Kubernetes connection missing required field: kubeconfig")
-                    return False, "Kubernetes connection missing required field: kubeconfig"
-                    
-                # TODO: Verify the kubeconfig is valid
-                return True, "Connection validated"
-            elif connection_type == "s3":
-                if not config.get("bucket"):
-                    logger.warning("S3 connection missing required field: bucket")
-                    return False, "S3 connection missing required field: bucket"
-                    
-                # TODO: Verify the S3 bucket is accessible
-                return True, "Connection validated"
+            elif connection_type == "github":
+                if not config.get("github_personal_access_token"):
+                    logger.warning("GitHub connection missing required field: github_personal_access_token")
+                    return False, "GitHub connection missing required field: github_personal_access_token"
+                # Allow generic and github through without specific validation for now
+                if connection_type not in ["generic", "github", "python"]: 
+                    logger.warning(f"No specific validation logic for connection type: {connection_type}")
+                return True, "Connection validated (or validation not implemented)"
             else:
-                return True, "Connection type not validated"
+                # Allow generic and github through without specific validation for now
+                if connection_type not in ["generic", "github", "python"]: 
+                    logger.warning(f"No specific validation logic for connection type: {connection_type}")
+                return True, "Connection validated (or validation not implemented)"
                 
         except Exception as e:
             logger.error(f"Error validating connection: {e}")
@@ -730,9 +642,6 @@ class ConnectionManager:
             if connection.type == "grafana":
                 # Fetch dashboards and datasources from Grafana
                 return {"message": "Grafana schema retrieval not implemented yet"}
-            elif connection.type == "kubernetes":
-                # Fetch list of resources 
-                return {"message": "Kubernetes schema retrieval not implemented yet"}
             else:
                 return {"message": f"Schema retrieval not implemented for {connection.type} connections"}
         except Exception as e:
@@ -751,7 +660,8 @@ class ConnectionManager:
         """
         sensitive_fields = [
             "password", "secret", "key", "token", "api_key", 
-            "aws_secret_access_key", "private_key"
+            "aws_secret_access_key", "private_key",
+            "github_personal_access_token"
         ]
         
         redacted_config = config.copy()

@@ -82,7 +82,6 @@ docker-compose ps
 echo "Sherlog Canvas is now running!"
 echo "Backend API: http://localhost:8080"
 echo "Next.js App: http://localhost:3003"
-echo "Grafana MCP: http://localhost:9110"
 echo ""
 echo "To stop all services, run:"
 echo "docker-compose down"

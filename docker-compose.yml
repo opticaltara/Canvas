@@ -24,56 +24,6 @@ services:
       timeout: 10s
       retries: 3
     restart: unless-stopped
-    
-  mcp-grafana:
-    # Using a custom build instead of the official image
-    build:
-      context: .
-      dockerfile: Dockerfile.mcp-grafana
-    container_name: sherlog-canvas-mcp-grafana
-    ports:
-      - "9110:8000"
-    environment:
-      - GRAFANA_URL=${GRAFANA_URL:-http://localhost:3000}
-      - GRAFANA_API_KEY=${GRAFANA_API_KEY:-}
-      - STANDBY_MODE=true  # Begin in standby mode (low resource usage)
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-    deploy:
-      resources:
-        limits:
-          cpus: '0.50'  # Limit CPU usage when in standby
-          memory: 256M  # Limit memory usage when in standby
-          
-  mcp-kubernetes:
-    build:
-      context: .
-      dockerfile: Dockerfile.mcp-kubernetes
-    container_name: sherlog-canvas-mcp-kubernetes
-    ports:
-      - "9310:8000"
-    volumes:
-      - ${HOME}/.kube:/root/.kube:ro  # Mount kubeconfig from host (read-only)
-    environment:
-      - STANDBY_MODE=true  # Begin in standby mode (low resource usage)
-      - KUBECONFIG=/root/.kube/config
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-    deploy:
-      resources:
-        limits:
-          cpus: '0.50'  # Limit CPU usage when in standby
-          memory: 256M  # Limit memory usage when in standby
 
 volumes:
   data:
