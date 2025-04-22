@@ -46,7 +46,7 @@ class GitHubQueryAgent:
 
         self.agent = Agent(
             self.model,
-            result_type=GithubQueryResult, # Use correct type
+            result_type=GithubQueryResult,
             mcp_servers=self.mcp_servers,
             system_prompt=system_prompt,
             tools=[] 
@@ -56,6 +56,13 @@ class GitHubQueryAgent:
     async def run_query(self, description: str) -> GithubQueryResult:
         """Run a query (natural language request) against the GitHub MCP server."""
         github_query_agent_logger.info(f"Running GitHub query. Original description: '{description}'")
+        
+        # Check if MCP servers are configured
+        if not self.mcp_servers:
+            error_msg = "GitHub MCP server (MCPServerHTTP) not configured for this agent."
+            github_query_agent_logger.error(error_msg)
+            return GithubQueryResult(query=description, data=None, error=error_msg)
+            
         current_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S %Z')
         enhanced_description = f"Current time is {current_time_utc}. User query: {description}"
         github_query_agent_logger.info(f"Enhanced description with time: '{enhanced_description}'")
@@ -65,11 +72,16 @@ class GitHubQueryAgent:
                 github_query_agent_logger.info(f"Calling self.agent.run...")
                 result = await self.agent.run(enhanced_description)
                 github_query_agent_logger.info(f"Agent run completed. Raw result: {result}")
-                if result and result.data:
+                if result and hasattr(result, 'data') and result.data:
                     github_query_agent_logger.info(f"Successfully parsed result data of type: {type(result.data)}")
-                    return GithubQueryResult(query=description, data=result.data) 
+                    if isinstance(result.data, GithubQueryResult):
+                         result.data.query = description # Ensure original query is set
+                         return result.data
+                    else:
+                         return GithubQueryResult(query=description, data=result.data) 
                 else:
-                    github_query_agent_logger.error(f"Agent did not return valid data. Raw result: {result}")
+                    error_detail = f"Raw result: {result}" if result else "Result was None"
+                    github_query_agent_logger.error(f"Agent did not return valid data. {error_detail}")
                     return GithubQueryResult(query=description, data=None, error="Agent failed to return valid data") 
         except Exception as e:
             github_query_agent_logger.error(f"Error during agent run: {e}", exc_info=True)

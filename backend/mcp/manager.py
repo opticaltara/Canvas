@@ -632,10 +632,10 @@ class MCPServerManager:
         return None
 
     async def _start_github_mcp(self, connection: BaseConnectionConfig) -> Optional[str]:
-        """Starts the GitHub MCP server using Docker."""
+        """Starts the GitHub MCP server wrapped by Supergateway over SSE."""
         correlation_id = str(uuid4())
         mcp_logger.info(
-            "Attempting to start GitHub MCP server", 
+            "Attempting to start GitHub MCP server via Supergateway",
             extra={
                 'correlation_id': correlation_id,
                 'connection_id': connection.id
@@ -655,12 +655,10 @@ class MCPServerManager:
             self.last_error[connection.id] = error_msg
             return None
 
-        # Find a free port for the host machine
-        # Assuming GitHub MCP server listens on port 8000 internally by default
-        container_port = 8000 
-        host_port = self._find_free_port(start_port=8100, end_port=8200) # Example range
-        if host_port is None:
-            error_msg = "Could not find a free port for GitHub MCP server."
+        # Find a free port on the host for Supergateway to expose
+        supergateway_host_port = self._find_free_port(start_port=8100, end_port=8200)
+        if supergateway_host_port is None:
+            error_msg = "Could not find a free port for GitHub MCP Supergateway."
             mcp_logger.error(
                 error_msg,
                 extra={
@@ -671,63 +669,83 @@ class MCPServerManager:
             self.last_error[connection.id] = error_msg
             return None
 
-        docker_image = "ghcr.io/github/github-mcp-server"
+        # Define the inner command: running the actual GitHub MCP server
+        # Note: We need to handle potential quoting issues if the token has special characters.
+        # For simplicity, assuming the token is safe for direct inclusion here.
+        # Consider shell escaping if tokens can be complex.
+        github_mcp_command = (
+            f"docker run -i --rm "
+            f"-e GITHUB_PERSONAL_ACCESS_TOKEN={token} "
+            f"ghcr.io/github/github-mcp-server"
+        )
+        
+        # Define the outer command: running Supergateway via Docker
+        supergateway_image = "supercorp/supergateway" # Or ghcr.io/supercorp-ai/supergateway
+        supergateway_internal_port = 8000 # Default port Supergateway listens on
+        sse_path = "/sse" # Default SSE path
+
         cmd = [
-            "docker", "run", "-i", "--rm",
-            "-p", f"{host_port}:{container_port}",
-            "-e", f"GITHUB_PERSONAL_ACCESS_TOKEN={token}",
-            docker_image
+            "docker", "run", "-i", "--rm", # Run supergateway interactively and remove on exit
+            "-p", f"{supergateway_host_port}:{supergateway_internal_port}", # Map host port to supergateway internal port
+            supergateway_image, # The supergateway image
+            "--stdio", github_mcp_command, # The command for supergateway to run
+            "--port", str(supergateway_internal_port), # Tell supergateway which port to use internally
+            "--ssePath", sse_path, # Tell supergateway which SSE path to use
+            # Optional: Add --logLevel none if supergateway logs are too noisy
+            # "--logLevel", "none"
         ]
 
         try:
-            mcp_logger.info(f"Running Docker command: {' '.join(cmd)}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+            mcp_logger.info(f"Running Supergateway Docker command: {' '.join(cmd)}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
             
-            # Start the Docker container as a background process
+            # Start the Supergateway container process
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            self.processes[connection.id] = process
+            self.processes[connection.id] = process # Store the supergateway process
             mcp_logger.info(
-                f"GitHub MCP Docker process started (PID: {process.pid}) for connection {connection.id}",
+                f"GitHub MCP Supergateway process started (PID: {process.pid}) for connection {connection.id}",
                  extra={'correlation_id': correlation_id}
             )
 
-            # Give the server a moment to start up
+            # Give the Supergateway server time to start up
             await asyncio.sleep(3) # Adjust sleep time if needed
             
-            # Check if the process started successfully (quick check)
+            # Check if the Supergateway process started successfully
             if process.returncode is not None:
-                 # Process already exited
                  stderr_output = await process.stderr.read() if process.stderr else b''
-                 error_msg = f"GitHub MCP Docker process failed to start or exited prematurely. Exit code: {process.returncode}. Stderr: {stderr_output.decode(errors='ignore')}"
+                 error_msg = f"GitHub MCP Supergateway process failed to start or exited prematurely. Exit code: {process.returncode}. Stderr: {stderr_output.decode(errors='ignore')}"
                  mcp_logger.error(error_msg, extra={'correlation_id': correlation_id, 'connection_id': connection.id})
                  self.last_error[connection.id] = error_msg
                  self.processes.pop(connection.id, None)
                  return None
 
-            # Construct the address for the agent to connect to
-            # Pydantic AI MCPServerHTTP expects an SSE endpoint, often `/sse`
-            server_address = f"http://localhost:{host_port}/sse" 
-            mcp_logger.info(f"GitHub MCP server assumed running at {server_address}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+            # Construct the SSE address exposed by Supergateway
+            server_address = f"http://localhost:{supergateway_host_port}{sse_path}" 
+            mcp_logger.info(f"GitHub MCP server via Supergateway assumed running at {server_address}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
             return server_address
 
         except Exception as e:
-            error_msg = f"Failed to start GitHub MCP Docker container: {str(e)}"
+            error_msg = f"Failed to start GitHub MCP Supergateway container: {str(e)}"
             mcp_logger.error(error_msg, extra={'correlation_id': correlation_id, 'connection_id': connection.id}, exc_info=True)
             self.last_error[connection.id] = error_msg
             # Ensure process is cleaned up if creation failed mid-way
             if connection.id in self.processes and self.processes[connection.id]:
                  try:
-                     self.processes[connection.id].terminate()
+                     # Ensure process is terminated if it exists
+                     if self.processes[connection.id].returncode is None:
+                         self.processes[connection.id].terminate()
                  except ProcessLookupError:
                      pass # Process already gone
-                 self.processes.pop(connection.id, None)
+                 except Exception as term_exc:
+                     mcp_logger.warning(f"Error terminating Supergateway process during cleanup: {term_exc}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+                 finally:
+                    self.processes.pop(connection.id, None)
             return None
 
 
-# Singleton instance
 _mcp_server_manager_instance = None
 _manager_lock = asyncio.Lock()
 

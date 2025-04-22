@@ -37,8 +37,9 @@ from backend.core.query_result import (
     MarkdownQueryResult, 
     GithubQueryResult
 )
-from backend.services.connection_manager import get_connection_manager, BaseConnectionConfig
+from backend.services.connection_manager import get_connection_manager, BaseConnectionConfig, ConnectionConfig
 from backend.ai.chat_tools import NotebookCellTools, CreateCellParams
+from backend.mcp.manager import get_mcp_server_manager, MCPServerStatus
 
 # Get logger for AI operations
 ai_logger = logging.getLogger("ai")
@@ -168,8 +169,9 @@ class AIAgent:
         self.mcp_server_map = mcp_server_map or {}
         self.notebook_id = notebook_id
     
-        # Create the full list for general agents
+        # Create the full list of MCPServerHTTP for general agents
         all_mcps_list = list(self.mcp_server_map.values())
+        ai_logger.debug(f"Initializing general agents with {len(all_mcps_list)} HTTP MCP servers.")
         
         # Initialize investigation planner
         self.investigation_planner = Agent(
@@ -252,7 +254,7 @@ class AIAgent:
             self.model,
             deps_type=PlanRevisionRequest,
             result_type=PlanRevisionResult,
-            mcp_servers=list(self.mcp_server_map.values()),
+            mcp_servers=all_mcps_list,
             system_prompt="""
             You are an Investigation Plan Reviser responsible for analyzing the results of executed steps and determining if the investigation plan should be adjusted.
 
@@ -293,7 +295,7 @@ class AIAgent:
         self.markdown_generator = Agent(
             self.model,
             result_type=MarkdownQueryResult,
-            mcp_servers=list(self.mcp_server_map.values()),
+            mcp_servers=all_mcps_list,
             system_prompt="""
             You are an expert at technical documentation and result analysis. Create clear and **concise** markdown to address the user's request. 
             Your primary goal is brevity and clarity. Avoid unnecessary jargon or overly detailed explanations.
@@ -309,14 +311,18 @@ class AIAgent:
             """
         )
 
-        # Prepare filtered lists for specialized agents
+        # Initialize specialized agents
+        # Prepare filtered lists for specialized agents (all are MCPServerHTTP now)
         grafana_mcp = [self.mcp_server_map['grafana']] if 'grafana' in self.mcp_server_map else []
         github_mcp = [self.mcp_server_map['github']] if 'github' in self.mcp_server_map else []
 
-        # Initialize specialized agents with filtered lists
-        self.log_generator = LogQueryAgent(source="loki", notebook_id=self.notebook_id, mcp_servers=grafana_mcp) # Pass Grafana only
-        self.metric_generator = MetricQueryAgent(source="prometheus", notebook_id=self.notebook_id, mcp_servers=grafana_mcp) # Pass Grafana only
-        self.github_generator = GitHubQueryAgent(notebook_id=self.notebook_id, mcp_servers=github_mcp) # Pass GitHub only
+        # Initialize specialized agents with MCPServerHTTP lists
+        self.log_generator = LogQueryAgent(source="loki", notebook_id=self.notebook_id, mcp_servers=grafana_mcp) 
+        self.metric_generator = MetricQueryAgent(source="prometheus", notebook_id=self.notebook_id, mcp_servers=grafana_mcp)
+        # Pass the MCPServerHTTP list back to GitHubQueryAgent
+        self.github_generator = GitHubQueryAgent(notebook_id=self.notebook_id, mcp_servers=github_mcp) 
+
+        ai_logger.info(f"AIAgent initialized for notebook {notebook_id}. All MCP clients are HTTP-based.")
 
     async def investigate(
         self, 
@@ -839,55 +845,60 @@ async def execute_ai_query_cell(cell: AIQueryCell, context: ExecutionContext) ->
         The result of executing the cell
     """
     try:
-        # Get connection manager
         connection_manager = get_connection_manager()
+        mcp_manager = get_mcp_server_manager() # Keep for status check
         
-        # Get all connections
         connections = await connection_manager.get_all_connections()
-        
-        # Start MCP servers for all connections
-        server_addresses = {}
-        for conn in connections:
-            if isinstance(conn, dict) and "id" in conn:
-                connection_config = BaseConnectionConfig(**conn)
-                await connection_config.start_mcp_server()
-                server_addresses[conn["id"]] = connection_config.mcp_status["address"]
-        
-        # Create MCPServerHTTP instances for each connection, mapped by type
-        mcp_server_map: Dict[str, MCPServerHTTP] = {} # Changed from list to map
-        default_connection_ids = { # Helper to pick one if multiple of same type exist
+        full_connection_configs: Dict[str, ConnectionConfig] = {
+             conn['id']: ConnectionConfig(**conn) for conn in connections if isinstance(conn, dict) and 'id' in conn
+        }
+
+        mcp_statuses = {}
+        for conn_id, connection_config in full_connection_configs.items():
+             await connection_config.start_mcp_server()
+             mcp_statuses[conn_id] = await connection_config.get_mcp_status()
+
+        # Create MCPServerHTTP instances for all connections, mapped by type
+        mcp_server_map: Dict[str, MCPServerHTTP] = {} # Map holds only MCPServerHTTP now
+
+        default_connection_ids = {
             conn_type: await connection_manager.get_default_connection(conn_type)
-            for conn_type in set(c['type'] for c in connections if 'type' in c) 
+            for conn_type in set(c.type for c in full_connection_configs.values())
         }
         
-        for conn in connections:
-            conn_id = conn.get("id")
-            conn_type = conn.get("type")
+        for conn_id, conn_config in full_connection_configs.items():
+            conn_type = conn_config.type
             
-            if not conn_id or not conn_type or conn_id not in server_addresses:
-                continue # Skip if connection info or server address is missing
+            if conn_id not in mcp_statuses:
+                continue
                 
-            server_url = server_addresses[conn_id]
-            if not server_url.startswith("http"):
-                 ai_logger.warning(f"MCP server address for {conn_id} is not HTTP: {server_url}")
+            status_info = mcp_statuses[conn_id]
+            status = status_info.get("status")
+            server_url = status_info.get("address") # Should always be an HTTP URL now
+            conn_error = status_info.get("error")
+
+            # Skip failed/stopped connections or those without a URL
+            if status != "running" or not server_url or not server_url.startswith("http"):
+                 ai_logger.warning(f"Skipping MCP connection {conn_id} ({conn_type}) due to status '{status}' or invalid/missing URL: {server_url}. Error: {conn_error}")
                  continue
 
-            # If this type isn't in the map OR if this is the default connection for the type
             default_conn_obj = default_connection_ids.get(conn_type)
             is_default = default_conn_obj and default_conn_obj.id == conn_id
             
+            # Map the MCPServerHTTP instance
             if conn_type not in mcp_server_map or is_default:
-                # Prioritize default, otherwise take the first one encountered
-                 mcp_server_map[conn_type] = MCPServerHTTP(url=f"{server_url}/sse") # Add /sse suffix
-                 ai_logger.info(f"Mapped MCPServerHTTP for type '{conn_type}' (ID: {conn_id}, Default: {is_default}) to {server_url}/sse")
+                 # Assume the URL from manager (via supergateway) already includes /sse if needed
+                 # Or add specific logic: e.g., if conn_type == 'grafana' and not server_url.endswith('/sse'): server_url += '/sse'
+                 mcp_client = MCPServerHTTP(url=server_url)
+                 mcp_server_map[conn_type] = mcp_client
+                 ai_logger.info(f"Mapped MCPServerHTTP for type '{conn_type}' (ID: {conn_id}, Default: {is_default}) to {server_url}")
         
-        # Get notebook_id from cell metadata
         notebook_id = cell.metadata.get("notebook_id")
         if not notebook_id:
             raise ValueError("Cell metadata must contain notebook_id")
         
-        # Initialize the AI agent with MCP server map and notebook ID
-        agent = AIAgent(mcp_server_map=mcp_server_map, notebook_id=notebook_id) # Pass map instead of list
+        # Initialize the AI agent with the map of MCPServerHTTP clients
+        agent = AIAgent(mcp_server_map=mcp_server_map, notebook_id=notebook_id)
         
         # Generate an investigation plan
         plan = await agent.create_investigation_plan(

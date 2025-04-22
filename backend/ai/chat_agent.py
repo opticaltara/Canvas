@@ -132,6 +132,7 @@ def to_chat_message(message: ModelMessage, agent: Optional[str] = None) -> ChatM
             )
     
     # If we can't convert, use a default representation
+    chat_agent_logger.info(f"Unable to convert message type: {type(message)}, using default representation.")
     return ChatMessage(
         role="unknown",
         content=str(message),
@@ -170,16 +171,21 @@ class ChatAgentService:
         
         # Determine available MCP server types
         mcp_server_types = []
+        chat_agent_logger.info("Detecting available MCP server types...")
         for server in self.mcp_servers:
             url_lower = server.url.lower()
+            server_type = "Unknown" # Default
             if "grafana" in url_lower:
-                mcp_server_types.append("Grafana")
+                server_type = "Grafana"
             elif "github" in url_lower:
-                mcp_server_types.append("GitHub")
+                server_type = "GitHub"
             # Add checks for other potential server types if needed
+            mcp_server_types.append(server_type)
+            chat_agent_logger.info(f"Detected MCP server: {server.url} as type: {server_type}")
         
         # Store available tools info for later use
         self.available_tools_info = f"You have access to the following data sources: {', '.join(mcp_server_types)}." if mcp_server_types else "No specific external data sources are currently connected."
+        chat_agent_logger.info(f"Available tools info constructed: {self.available_tools_info}")
 
         system_prompt = f"""
             You are an AI assistant with access to the following data sources:
@@ -203,6 +209,8 @@ class ChatAgentService:
             Focus on action and providing results based on the available tools. Avoid unnecessary conversational turns asking for clarification.
             """
         
+        chat_agent_logger.info(f"System prompt - {system_prompt} for chat agent constructed.")
+        
         # Create the chat agent
         self.chat_agent = Agent(
             model = OpenAIModel(
@@ -225,12 +233,18 @@ class ChatAgentService:
         # Store notebook ID for the session
         self.sessions[session_id] = notebook_id 
         mcp_server_map: Dict[str, MCPServerHTTP] = {}
+        chat_agent_logger.info(f"Mapping MCP servers for session {session_id}...")
         for server in self.mcp_servers:
+            chat_agent_logger.info(f"Found MCP server: {server.url}")
+            server_type = "Unknown" # Default
             if "grafana" in server.url.lower():
                 mcp_server_map['grafana'] = server
+                server_type = "Grafana"
             elif "github" in server.url.lower():
                  mcp_server_map['github'] = server
+                 server_type = "GitHub"
             # Add more types if needed
+            chat_agent_logger.info(f"Mapped MCP server {server.url} as type {server_type} for session {session_id}")
 
         self.ai_agent = AIAgent(mcp_server_map=mcp_server_map, notebook_id=notebook_id)
         self.cell_tools = NotebookCellTools(notebook_manager=self.notebook_manager)
@@ -255,15 +269,19 @@ class ChatAgentService:
             Tuples of (status_type, response) as updates occur
         """
         chat_agent_logger.info(f"Handling message in session {session_id}")
+        chat_agent_logger.info(f"Received prompt: '{prompt}'")
         start_time = time.time()
         
         try:
             # Get notebook_id for this session
             notebook_id = self.sessions.get(session_id)
+            chat_agent_logger.info(f"Retrieved notebook_id: {notebook_id} for session {session_id}")
             if not notebook_id:
+                chat_agent_logger.error(f"No notebook_id found for session {session_id}")
                 raise ValueError(f"No notebook_id found for session {session_id}")
             
             # First, check if we need clarification
+            chat_agent_logger.info(f"Checking if clarification is needed for session {session_id}...")
             clarification_result = await self.chat_agent.run(
                 f"Assess if this user request needs clarification before proceeding: '{prompt}'. "
                 f"Consider the available tools and context ({self.available_tools_info}). "
@@ -272,11 +290,11 @@ class ChatAgentService:
                 message_history=message_history,
             )
 
-            chat_agent_logger.info(f"Clarification result: {clarification_result}")
+            chat_agent_logger.info(f"Clarification check completed for session {session_id}. Result: {clarification_result.data.needs_clarification}")
             
             if clarification_result.data.needs_clarification and clarification_result.data.clarification_message:
                 # Ask for clarification
-                chat_agent_logger.info(f"Asking for clarification: {clarification_result.data.clarification_message}")
+                chat_agent_logger.info(f"Asking for clarification in session {session_id}: {clarification_result.data.clarification_message}")
                 clarification_response = ModelResponse(
                     parts=[StatusResponsePart(
                         content=clarification_result.data.clarification_message,
@@ -289,7 +307,7 @@ class ChatAgentService:
                 return
             
             # If no clarification needed, start investigation
-            chat_agent_logger.info(f"Starting investigation for prompt: {prompt}")
+            chat_agent_logger.info(f"Starting investigation for prompt: '{prompt}' in session {session_id}")
             async for status_type, status in self.ai_agent.investigate(
                 prompt,
                 session_id,
@@ -297,7 +315,7 @@ class ChatAgentService:
                 message_history=message_history,
                 cell_tools=self.cell_tools
             ):
-                chat_agent_logger.info(f"Status: {status}")
+                chat_agent_logger.info(f"Yielding status update for session {session_id}. Type: {status_type}")
                 
                 # Create appropriate response based on status type
                 if 'cell_params' in status:
@@ -325,7 +343,7 @@ class ChatAgentService:
             
             response_time = time.time() - start_time
             chat_agent_logger.info(
-                f"Message handled successfully",
+                f"Message handled successfully in session {session_id}",
                 extra={
                     'session_id': session_id,
                     'response_time_ms': int(response_time * 1000)
@@ -335,7 +353,7 @@ class ChatAgentService:
         except Exception as e:
             response_time = time.time() - start_time
             chat_agent_logger.error(
-                f"Error handling message",
+                f"Error handling message in session {session_id}",
                 extra={
                     'session_id': session_id,
                     'error': str(e),
