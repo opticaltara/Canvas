@@ -10,7 +10,6 @@ import logging
 import time
 import json
 from typing import Dict, List, Optional, Any, Tuple, AsyncGenerator
-from uuid import uuid4
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
@@ -174,26 +173,29 @@ class ChatAgentService:
                 mcp_server_types.append("GitHub")
             # Add checks for other potential server types if needed
         
-        available_tools_info = f"You have access to the following data sources: {', '.join(mcp_server_types)}." if mcp_server_types else "No specific external data sources are currently connected."
+        # Store available tools info for later use
+        self.available_tools_info = f"You have access to the following data sources: {', '.join(mcp_server_types)}." if mcp_server_types else "No specific external data sources are currently connected."
 
         system_prompt = f"""
-            You are an AI assistant integrated with Sherlog Canvas, a reactive notebook for software engineering investigations.
-            {available_tools_info}
+            You are an AI assistant with access to the following data sources:
+            {self.available_tools_info}
             
             Your primary responsibilities are:
-            1. Understanding user queries related to software engineering investigations using the available tools.
+            1. Understanding user queries using the available tools.
             2. Managing the conversation flow and maintaining context.
             3. Coordinating with the investigation agent for complex queries that require data retrieval or analysis.
             4. Presenting investigation results in a clear, user-friendly way.
             
             When a user asks to investigate something:
             1. Assess if the query can be addressed with the available data sources ({', '.join(mcp_server_types) or 'none'}).
-            2. If the request is unclear or requires information beyond the available sources, ask *specific* clarifying questions. However, **err on the side of proceeding with the investigation if the query seems reasonably understandable**. Avoid asking for clarification on simple or standard requests.
-            3. If the query is clear and actionable, pass it to the investigation agent.
-            4. Present the investigation results clearly.
-            5. Be ready for follow-up questions.
+            2. **Your default behavior is to proceed directly with the investigation if the query is reasonably understandable.** Do NOT ask for clarification unless the query is genuinely ambiguous or lacks essential information that prevents *any* meaningful investigation (e.g., the platform like GitHub/GitLab is required but missing, and the query doesn't specify).
+            3. For standard requests (e.g., 'recent pull requests', 'active repositories', 'recently contributed repositories on GitHub'), assume common definitions (like 'recent' meaning the last few weeks/months, 'active' or 'contributed' meaning commits/PRs) and proceed. Do not ask for clarification on timeframes or precise definitions unless the user explicitly asks for something non-standard.
+            4. If the query is clear and actionable according to these guidelines, pass it to the investigation agent.
+            5. Present the investigation results clearly.
+            6. Be ready for follow-up questions.
             
-            Always respond in a helpful, conversational manner while maintaining context. Assume standard investigation procedures unless specified otherwise. Focus on action and providing results based on the available tools.
+            Always respond in a helpful, conversational manner while maintaining context. 
+            Focus on action and providing results based on the available tools. Avoid unnecessary conversational turns asking for clarification.
             """
         
         # Create the chat agent
@@ -258,7 +260,10 @@ class ChatAgentService:
             
             # First, check if we need clarification
             clarification_result = await self.chat_agent.run(
-                f"Check if this query needs clarification: {prompt}. The current investigation notebook is {notebook_id}.",
+                f"Assess if this user request needs clarification before proceeding: '{prompt}'. "
+                f"Consider the available tools and context ({self.available_tools_info}). "
+                f"Only ask for clarification if the request is genuinely ambiguous "
+                f"or missing critical information needed to act.",
                 message_history=message_history,
             )
 
