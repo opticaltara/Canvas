@@ -13,7 +13,7 @@ with tools that connect to various data sources like SQL, Prometheus, Loki, and 
 """
 
 from enum import Enum
-from typing import Any, Dict, List, Optional, AsyncGenerator, Tuple
+from typing import Any, Dict, List, Optional, AsyncGenerator, Tuple, Union
 from uuid import UUID
 
 import logging
@@ -30,7 +30,13 @@ from backend.ai.github_query_agent import GitHubQueryAgent
 from backend.config import get_settings
 from backend.core.cell import AIQueryCell
 from backend.core.execution import ExecutionContext
-from backend.core.query_result import  MarkdownQueryResult
+from backend.core.query_result import (
+    QueryResult, 
+    LogQueryResult, 
+    MetricQueryResult, 
+    MarkdownQueryResult, 
+    GithubQueryResult
+)
 from backend.services.connection_manager import get_connection_manager, BaseConnectionConfig
 from backend.ai.chat_tools import NotebookCellTools, CreateCellParams
 
@@ -39,14 +45,6 @@ ai_logger = logging.getLogger("ai")
 
 # Get settings for API keys
 settings = get_settings()
-
-
-class DataQueryResult(BaseModel):
-    """Result of a data source query"""
-    data: Any = Field(description="The query result data")
-    query: str = Field(description="The executed query")
-    error: Optional[str] = Field(description="Error message if query failed", default=None)
-    metadata: Dict[str, Any] = Field(description="Additional metadata", default_factory=dict)
 
 
 class StepType(str, Enum):
@@ -468,8 +466,9 @@ class AIAgent:
                 if markdown and markdown.data and hasattr(markdown.data, 'data'):
                     markdown_string = markdown.data.data
                 else:
-                    ai_logger.warning(f"Could not extract markdown data from result: {result}")
-                result = DataQueryResult(data=markdown, query=current_step.description)
+                    ai_logger.warning(f"Could not extract markdown data from result: {markdown}")
+                    markdown_string = ""
+                result = MarkdownQueryResult(data=markdown_string, query=current_step.description)
 
             query = result.query
             
@@ -773,7 +772,7 @@ class AIAgent:
         description: str,
         executed_steps: Dict[str, Any] | None = None,
         step_results: Dict[str, Any] = {}
-    ):
+    ) -> Union[LogQueryResult, MetricQueryResult, MarkdownQueryResult, GithubQueryResult, QueryResult]:
         """
         Generate content for a specific step type
         
@@ -788,7 +787,15 @@ class AIAgent:
             Generated content for the step
         """
         if description in step_results:
-            return step_results[description]
+            # Ensure we return the correct type if cached
+            cached_result = step_results[description]
+            if isinstance(cached_result, QueryResult):
+                return cached_result
+            else:
+                 # If it's not a QueryResult subclass, log a warning and potentially wrap it
+                 ai_logger.warning(f"Cached result for '{description}' is not a QueryResult type: {type(cached_result)}. Attempting to use as data.")
+                 # Fallback: return a generic QueryResult - adjust if needed
+                 return QueryResult(query=description, data=cached_result) 
             
         context = ""
         if executed_steps and step_results:
@@ -801,16 +808,22 @@ class AIAgent:
             return result
         elif step_type == StepType.MARKDOWN:
             result = await self.markdown_generator.run(description + context)
-            markdown_string = ""
-            if result and result.data and hasattr(result.data, 'data'):
-                markdown_string = result.data.data
+            # Ensure we return the actual MarkdownQueryResult, not wrap it
+            if isinstance(result, MarkdownQueryResult):
+                 return result
+            elif result and hasattr(result, 'data') and isinstance(result.data, MarkdownQueryResult):
+                 # Handle cases where the result might be nested (e.g., within AgentRunResult)
+                 return result.data 
             else:
-                ai_logger.warning(f"Could not extract markdown data from result: {result}")
-            return DataQueryResult(data=markdown_string, query=description)
+                ai_logger.warning(f"Markdown generator did not return MarkdownQueryResult. Got: {type(result)}. Falling back.")
+                # Fallback if unexpected type is returned
+                fallback_content = str(getattr(result, 'data', getattr(result, 'output', ''))) if result else ''
+                return MarkdownQueryResult(query=description, data=fallback_content) 
         elif step_type == StepType.GITHUB:
             result = await self.github_generator.run_query(description + context)
             return result
         else:
+            ai_logger.error(f"Unsupported step type encountered in generate_content: {step_type}")
             raise ValueError(f"Unsupported step type: {step_type}")
 
 

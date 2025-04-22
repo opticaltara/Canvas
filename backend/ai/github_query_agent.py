@@ -13,18 +13,13 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.mcp import MCPServerHTTP
 
 from backend.config import get_settings
-from backend.ai.agent import DataQueryResult # For consistent return type
+from backend.core.query_result import GithubQueryResult 
 
 github_query_agent_logger = logging.getLogger("ai.github_query_agent")
-
-# Placeholder for a specific result type if needed later
-# from backend.core.query_result import GitHubQueryResult 
-GitHubQueryResult = Dict # Use Dict as result_type for now
 
 class GitHubQueryAgent:
     """Agent for interacting with GitHub MCP server."""
     def __init__(self, notebook_id: str, mcp_servers: Optional[List[MCPServerHTTP]] = None):
-        # Note: Unlike LogQueryAgent, we don't have different "sources", only the GitHub MCP.
         github_query_agent_logger.info(f"Initializing GitHubQueryAgent for notebook_id: {notebook_id}")
         self.settings = get_settings()
         self.model = OpenAIModel(
@@ -48,7 +43,7 @@ class GitHubQueryAgent:
 
         self.agent = Agent(
             self.model,
-            result_type=GitHubQueryResult, # Use Dict for now
+            result_type=GithubQueryResult, # Use correct type
             mcp_servers=self.mcp_servers,
             system_prompt=system_prompt,
             # Consider adding specific GitHub tools here if needed for structured output,
@@ -57,7 +52,7 @@ class GitHubQueryAgent:
         )
         github_query_agent_logger.info(f"GitHubQueryAgent initialized successfully.")
 
-    async def run_query(self, description: str) -> DataQueryResult:
+    async def run_query(self, description: str) -> GithubQueryResult: # Update return type hint
         """Run a query (natural language request) against the GitHub MCP server."""
         github_query_agent_logger.info(f"Running GitHub query. Description: '{description}'")
         
@@ -68,10 +63,13 @@ class GitHubQueryAgent:
                 github_query_agent_logger.debug(f"Agent run completed. Raw result: {result}")
                 if result and result.data:
                     github_query_agent_logger.info(f"Successfully parsed result data of type: {type(result.data)}")
-                    return DataQueryResult(query=description, data=result.data)
+                    # Return correct type
+                    return GithubQueryResult(query=description, data=result.data)
                 else:
                     github_query_agent_logger.error(f"Agent did not return valid data. Raw result: {result}")
-                    return DataQueryResult(query=description, data=[], error="Agent failed to return valid data")
+                    # Return correct type
+                    return GithubQueryResult(query=description, data=None, error="Agent failed to return valid data")
         except Exception as e:
             github_query_agent_logger.error(f"Error during agent run: {e}", exc_info=True)
-            return DataQueryResult(query=description, data=[], error=str(e))
+            # Return correct type
+            return GithubQueryResult(query=description, data=None, error=str(e))

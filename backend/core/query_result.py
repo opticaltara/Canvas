@@ -60,4 +60,17 @@ class MarkdownQueryResult(QueryResult):
         error: Optional error message if generation failed
         metadata: Additional metadata about the markdown content
     """
-    data: str 
+    data: str
+
+
+class GithubQueryResult(QueryResult):
+    """
+    Specialized query result for GitHub queries
+    
+    Attributes:
+        data: Data returned from the GitHub query (can be diverse)
+        query: The executed GitHub operation description
+        error: Optional error message if query failed
+        metadata: Additional metadata about the GitHub query result
+    """
+    data: Any  # GitHub queries can return various structures 

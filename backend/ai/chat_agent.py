@@ -164,6 +164,38 @@ class ChatAgentService:
         chat_agent_logger.info(f"AI model: {self.settings.ai_model}")
         chat_agent_logger.info(f"OpenRouter API key: {self.settings.openrouter_api_key}")
         
+        # Determine available MCP server types
+        mcp_server_types = []
+        for server in self.mcp_servers:
+            url_lower = server.url.lower()
+            if "grafana" in url_lower:
+                mcp_server_types.append("Grafana")
+            elif "github" in url_lower:
+                mcp_server_types.append("GitHub")
+            # Add checks for other potential server types if needed
+        
+        available_tools_info = f"You have access to the following data sources: {', '.join(mcp_server_types)}." if mcp_server_types else "No specific external data sources are currently connected."
+
+        system_prompt = f"""
+            You are an AI assistant integrated with Sherlog Canvas, a reactive notebook for software engineering investigations.
+            {available_tools_info}
+            
+            Your primary responsibilities are:
+            1. Understanding user queries related to software engineering investigations using the available tools.
+            2. Managing the conversation flow and maintaining context.
+            3. Coordinating with the investigation agent for complex queries that require data retrieval or analysis.
+            4. Presenting investigation results in a clear, user-friendly way.
+            
+            When a user asks to investigate something:
+            1. Assess if the query can be addressed with the available data sources ({', '.join(mcp_server_types) or 'none'}).
+            2. If the request is unclear or requires information beyond the available sources, ask *specific* clarifying questions. However, **err on the side of proceeding with the investigation if the query seems reasonably understandable**. Avoid asking for clarification on simple or standard requests.
+            3. If the query is clear and actionable, pass it to the investigation agent.
+            4. Present the investigation results clearly.
+            5. Be ready for follow-up questions.
+            
+            Always respond in a helpful, conversational manner while maintaining context. Assume standard investigation procedures unless specified otherwise. Focus on action and providing results based on the available tools.
+            """
+        
         # Create the chat agent
         self.chat_agent = Agent(
             model = OpenAIModel(
@@ -173,38 +205,31 @@ class ChatAgentService:
                     api_key=self.settings.openrouter_api_key,
                 ),
             ),
-            system_prompt="""
-            You are an AI assistant integrated with Sherlog Canvas, a reactive notebook for software engineering investigations.
-            
-            Your primary responsibilities are:
-            1. Understanding user queries and asking clarifying questions when needed
-            2. Managing the conversation flow and maintaining context
-            3. Coordinating with the investigation agent for complex queries
-            4. Presenting investigation results in a clear, user-friendly way
-            
-            When a user asks to investigate something:
-            1. First, ensure you understand their request completely. Ask clarifying questions if needed
-            2. Once clear, pass the query to the investigation agent
-            3. Present the investigation results in a clear, organized way
-            4. Be ready to answer follow-up questions about the investigation
-            
-            Always respond in a helpful, conversational manner while maintaining context of the investigation.
-            """,
+            system_prompt=system_prompt,
             result_type=ClarificationResult
         )
         
         chat_agent_logger.info("Chat agent service initialized")
 
-    async def create_session(self, session_id: Optional[str] = None, notebook_id: Optional[str] = None) -> str:
-        """Create a new chat session"""
-        session_id = session_id or str(uuid4())
-        if notebook_id:
-            self.sessions[session_id] = notebook_id
-            # Initialize the AI agent with the notebook ID
-            self.ai_agent = AIAgent(mcp_servers=self.mcp_servers, notebook_id=notebook_id)
-        chat_agent_logger.info(f"Creating new chat session: {session_id} with notebook: {notebook_id}")
-        return session_id
-    
+    async def create_session(self, session_id: str, notebook_id: str):
+        """Create a new chat session and initialize necessary components."""
+        chat_agent_logger.info(f"Creating new chat session: {session_id} for notebook: {notebook_id}")
+        
+        # Store notebook ID for the session
+        self.sessions[session_id] = notebook_id 
+        mcp_server_map: Dict[str, MCPServerHTTP] = {}
+        for server in self.mcp_servers:
+            if "grafana" in server.url.lower():
+                mcp_server_map['grafana'] = server
+            elif "github" in server.url.lower():
+                 mcp_server_map['github'] = server
+            # Add more types if needed
+
+        self.ai_agent = AIAgent(mcp_server_map=mcp_server_map, notebook_id=notebook_id)
+        self.cell_tools = NotebookCellTools(notebook_manager=self.notebook_manager)
+        
+        chat_agent_logger.info(f"Chat session {session_id} created successfully.")
+
     async def handle_message(
         self, 
         prompt: str, 
