@@ -6,6 +6,7 @@ Agent for handling GitHub interactions via a locally running MCP server.
 
 import logging
 from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
 
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIModel
@@ -37,6 +38,8 @@ class GitHubQueryAgent:
             "You are a specialized agent interacting with a GitHub MCP server. "
             "Use the available tools provided by the MCP server to answer the user's request about GitHub resources "
             "(like repositories, issues, pull requests, users, etc.). "
+            "Pay attention to the current date and time provided at the beginning of the user's query "
+            "to accurately interpret time-related requests (e.g., 'recent', 'last week'). "
             "Be precise in your tool usage based on the request."
         )
         github_query_agent_logger.debug(f"Using GitHub system prompt.")
@@ -46,30 +49,28 @@ class GitHubQueryAgent:
             result_type=GithubQueryResult, # Use correct type
             mcp_servers=self.mcp_servers,
             system_prompt=system_prompt,
-            # Consider adding specific GitHub tools here if needed for structured output,
-            # but relying on MCP discovery is the primary mechanism.
             tools=[] 
         )
         github_query_agent_logger.info(f"GitHubQueryAgent initialized successfully.")
 
-    async def run_query(self, description: str) -> GithubQueryResult: # Update return type hint
+    async def run_query(self, description: str) -> GithubQueryResult:
         """Run a query (natural language request) against the GitHub MCP server."""
-        github_query_agent_logger.info(f"Running GitHub query. Description: '{description}'")
-        
+        github_query_agent_logger.info(f"Running GitHub query. Original description: '{description}'")
+        current_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S %Z')
+        enhanced_description = f"Current time is {current_time_utc}. User query: {description}"
+        github_query_agent_logger.info(f"Enhanced description with time: '{enhanced_description}'")
+
         try:
             async with self.agent.run_mcp_servers():
-                github_query_agent_logger.debug(f"Calling self.agent.run...")
-                result = await self.agent.run(description)
-                github_query_agent_logger.debug(f"Agent run completed. Raw result: {result}")
+                github_query_agent_logger.info(f"Calling self.agent.run...")
+                result = await self.agent.run(enhanced_description)
+                github_query_agent_logger.info(f"Agent run completed. Raw result: {result}")
                 if result and result.data:
                     github_query_agent_logger.info(f"Successfully parsed result data of type: {type(result.data)}")
-                    # Return correct type
-                    return GithubQueryResult(query=description, data=result.data)
+                    return GithubQueryResult(query=description, data=result.data) 
                 else:
                     github_query_agent_logger.error(f"Agent did not return valid data. Raw result: {result}")
-                    # Return correct type
-                    return GithubQueryResult(query=description, data=None, error="Agent failed to return valid data")
+                    return GithubQueryResult(query=description, data=None, error="Agent failed to return valid data") 
         except Exception as e:
             github_query_agent_logger.error(f"Error during agent run: {e}", exc_info=True)
-            # Return correct type
             return GithubQueryResult(query=description, data=None, error=str(e))

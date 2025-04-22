@@ -61,7 +61,12 @@ class CellResponsePart(TextPart):
             "agent_type": self.agent_type
         }
         if self.result:
-            dump["result"] = self.result
+            if 'data' in self.result and isinstance(self.result['data'], BaseModel):
+                serializable_result = self.result.copy()
+                serializable_result['data'] = self.result['data'].model_dump()
+                dump["result"] = serializable_result
+            else:
+                dump["result"] = self.result
         return dump
 
 class StatusResponsePart(TextPart):
