@@ -396,7 +396,7 @@ class MCPServerManager:
             "error": self.last_error.get(connection_id)
         }
         
-        mcp_logger.debug(
+        mcp_logger.info(
             "Retrieved server status",
             extra={
                 'connection_id': connection_id,
@@ -702,7 +702,7 @@ class MCPServerManager:
             error_detected = False
             output_lines = []
             try:
-                # Read for up to 10 seconds
+                # Read for up to 30 seconds
                 tasks = []
                 if process.stdout:
                     tasks.append(asyncio.create_task(process.stdout.readline()))
@@ -714,45 +714,84 @@ class MCPServerManager:
                     mcp_logger.error("Supergateway process started with no stdout/stderr pipes.", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
                     error_detected = True
                 else:
-                    # Wait for output or timeout
-                    done, pending = await asyncio.wait(tasks, timeout=10.0, return_when=asyncio.FIRST_COMPLETED)
+                    # Wait for output or timeout (increased to 30s)
+                    end_time = asyncio.get_event_loop().time() + 30.0
+                    while asyncio.get_event_loop().time() < end_time:
+                        # Check if process exited prematurely
+                        if process.returncode is not None:
+                             mcp_logger.error(f"Supergateway process exited prematurely during startup check. Code: {process.returncode}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+                             error_detected = True
+                             break # Exit loop if process exited
 
-                    # Process completed tasks
-                    for task in done:
-                        line_bytes = await task
-                        if line_bytes:
-                            line = line_bytes.decode(errors='ignore').strip()
-                            output_lines.append(line)
-                            mcp_logger.debug(f"Supergateway Output ({connection.id}): {line}", extra={'correlation_id': correlation_id})
-                            if "GitHub MCP Server running on stdio" in line:
-                                startup_confirmed = True
-                                mcp_logger.info("GitHub MCP Server confirmed running via Supergateway output.", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
-                            if "[supergateway] stdio: docker" in line or "Usage:  docker [OPTIONS] COMMAND" in line:
-                                 error_detected = True
-                                 mcp_logger.error("Supergateway output indicates stdio command failed (Docker help shown).", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+                        # Recreate tasks for next readline attempts
+                        current_tasks = []
+                        stdout_task = None
+                        stderr_task = None
+                        if process.stdout and not process.stdout.at_eof():
+                            stdout_task = asyncio.create_task(process.stdout.readline())
+                            current_tasks.append(stdout_task)
+                        if process.stderr and not process.stderr.at_eof():
+                            stderr_task = asyncio.create_task(process.stderr.readline())
+                            current_tasks.append(stderr_task)
 
-                    # Cancel pending tasks (if any, e.g., if only one stream produced output)
-                    for task in pending:
-                        task.cancel()
+                        if not current_tasks:
+                             mcp_logger.info("Supergateway stdout/stderr streams closed or at EOF during startup check.", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+                             break # Exit loop if no streams left to read
+
+                        remaining_time = end_time - asyncio.get_event_loop().time()
+                        if remaining_time <= 0:
+                            break # Exit loop if time is up
+
                         try:
-                            await task # Allow cancellation to propagate
-                        except asyncio.CancelledError:
-                            pass
+                            # Wait for the next line of output or partial timeout
+                            done, pending = await asyncio.wait(
+                                current_tasks, 
+                                timeout=min(remaining_time, 1.0), # Wait up to 1 sec or remaining time
+                                return_when=asyncio.FIRST_COMPLETED
+                            )
+                        except asyncio.TimeoutError:
+                            # Timeout waiting for this specific readline, continue outer loop
+                            continue
 
-                    # Check process exit code *after* reading initial output
-                    if process.returncode is not None:
-                        error_detected = True # Process exited during startup check
-                        mcp_logger.error(f"Supergateway process exited prematurely during startup check. Code: {process.returncode}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+                        # Process completed tasks
+                        for task in done:
+                            try:
+                                line_bytes = await task
+                                if line_bytes:
+                                    line = line_bytes.decode(errors='ignore').strip()
+                                    output_lines.append(line)
+                                    mcp_logger.info(f"Supergateway Output ({connection.id}): {line}", extra={'correlation_id': correlation_id})
+                                    if "GitHub MCP Server running on stdio" in line:
+                                        startup_confirmed = True
+                                        mcp_logger.info("GitHub MCP Server confirmed running via Supergateway output.", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+                                    if "[supergateway] stdio: docker" in line or "Usage:  docker [OPTIONS] COMMAND" in line:
+                                        error_detected = True
+                                        mcp_logger.error("Supergateway output indicates stdio command failed (Docker help shown).", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+                                else:
+                                    # Empty read likely means EOF for that stream
+                                    pass
+                            except Exception as task_read_exc:
+                                mcp_logger.warning(f"Exception reading line from Supergateway stream: {task_read_exc}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
 
+                        # Cancel pending tasks for this iteration
+                        for task in pending:
+                            task.cancel()
+                            try: await task
+                            except asyncio.CancelledError: pass
 
-            except asyncio.TimeoutError:
-                mcp_logger.warning("Timeout waiting for Supergateway startup confirmation.", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
-                # Check if process is still running; if not, it's an error
-                if process.returncode is not None:
-                     error_detected = True
-            except Exception as read_exc:
-                 mcp_logger.error(f"Error reading Supergateway startup output: {read_exc}", extra={'correlation_id': correlation_id, 'connection_id': connection.id}, exc_info=True)
-                 error_detected = True # Treat read errors as startup failure
+                        # If we confirmed startup or detected an error, exit the loop
+                        if startup_confirmed or error_detected:
+                            break
+                    # End of while loop
+
+                    # Final check on process exit code after loop finishes
+                    if process.returncode is not None and not error_detected:
+                         mcp_logger.error(f"Supergateway process exited after startup check loop completed without confirmation/error. Code: {process.returncode}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+                         error_detected = True
+
+            except Exception as outer_read_exc:
+                 mcp_logger.error(f"Outer error during Supergateway startup check: {outer_read_exc}", extra={'correlation_id': correlation_id, 'connection_id': connection.id}, exc_info=True)
+                 error_detected = True # Treat outer errors as startup failure
 
             if not startup_confirmed or error_detected:
                  error_msg = f"Failed to confirm GitHub MCP server startup via Supergateway. Output: {' | '.join(output_lines)}"
