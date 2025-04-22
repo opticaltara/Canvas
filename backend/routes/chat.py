@@ -7,7 +7,7 @@ This module implements the chat API endpoints for interacting with the AI agent.
 import json
 import logging
 import time
-from typing import Dict
+from typing import Dict, List, Tuple
 from uuid import uuid4
 from datetime import datetime, timezone
 
@@ -20,6 +20,7 @@ from backend.ai.chat_agent import ChatAgentService, ChatRequest, ChatMessage, to
 from backend.db.chat_db import ChatDatabase
 from backend.services.notebook_manager import NotebookManager, get_notebook_manager
 from backend.mcp.manager import MCPServerManager, get_mcp_server_manager
+from backend.services.connection_manager import ConnectionManager, get_connection_manager
 
 # Initialize logger
 chat_logger = logging.getLogger("routes.chat")
@@ -41,17 +42,32 @@ router = APIRouter()
 # Dependency to get chat agent service
 async def get_chat_agent_service(
     notebook_manager: NotebookManager = Depends(get_notebook_manager),
-    mcp_manager: MCPServerManager = Depends(get_mcp_server_manager)
+    mcp_manager: MCPServerManager = Depends(get_mcp_server_manager),
+    connection_manager: ConnectionManager = Depends(get_connection_manager)
 ) -> ChatAgentService:
     """Get the chat agent service singleton"""
-    # Create MCPServerHTTP instances from active server addresses
-    mcp_servers_list = [
-        MCPServerHTTP(url=address) 
-        for address in mcp_manager.servers.values() 
-        if isinstance(address, str) and address.startswith("http") # Ensure it's a valid URL string
-    ]
-    chat_logger.debug(f"Passing {len(mcp_servers_list)} MCP servers to ChatAgentService")
-    return ChatAgentService(notebook_manager, mcp_servers=mcp_servers_list) # Pass the list
+    # Create a list to hold (connection_id, type, url) tuples
+    mcp_server_info_list: List[Tuple[str, str, str]] = [] 
+    
+    # Iterate through active MCP servers (connection_id -> address)
+    for conn_id, address in mcp_manager.servers.items():
+        if isinstance(address, str) and address.startswith("http"): # Ensure valid address
+            try:
+                # Get the connection details to find the type
+                connection = await connection_manager.get_connection(conn_id)
+                if connection and connection.type:
+                    # Append tuple (connection_id, type, url)
+                    mcp_server_info_list.append((conn_id, connection.type, address))
+                    chat_logger.info(f"Retrieved type '{connection.type}' for MCP server (Conn ID: {conn_id}, Addr: {address})")
+                else:
+                     chat_logger.warning(f"Could not find connection details or type for active MCP server with connection_id: {conn_id}")
+            except Exception as e:
+                 chat_logger.error(f"Error fetching connection details for conn_id {conn_id}: {e}", exc_info=True)
+
+    chat_logger.info(f"Passing {len(mcp_server_info_list)} MCP server info items to ChatAgentService")
+    chat_logger.info(f"MCP Server Info List: {mcp_server_info_list}")
+    # Pass the enriched list instead of the old mcp_servers_list
+    return ChatAgentService(notebook_manager, mcp_server_info=mcp_server_info_list)
 
 
 # Dependency to get chat database

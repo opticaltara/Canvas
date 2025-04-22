@@ -156,11 +156,12 @@ class ChatAgentService:
     def __init__(
         self, 
         notebook_manager: NotebookManager,
-        mcp_servers: Optional[List[MCPServerHTTP]] = None
+        mcp_server_info: Optional[List[Tuple[str, str, str]]] = None
     ):
         self.settings = get_settings()
+        chat_agent_logger.info(f"Initializing ChatAgentService with mcp_server_info: {mcp_server_info}")
         self.notebook_manager = notebook_manager
-        self.mcp_servers = mcp_servers or []
+        self.mcp_server_info = mcp_server_info or []
         self.sessions: Dict[str, str] = {}  # Store session_id -> notebook_id mapping
         
         # Initialize cell tools
@@ -169,23 +170,22 @@ class ChatAgentService:
         chat_agent_logger.info(f"AI model: {self.settings.ai_model}")
         chat_agent_logger.info(f"OpenRouter API key: {self.settings.openrouter_api_key}")
         
-        # Determine available MCP server types
+        # Determine available MCP server types from the provided info
         mcp_server_types = []
-        chat_agent_logger.info("Detecting available MCP server types...")
-        for server in self.mcp_servers:
-            url_lower = server.url.lower()
-            server_type = "Unknown" # Default
-            if "grafana" in url_lower:
-                server_type = "Grafana"
-            elif "github" in url_lower:
-                server_type = "GitHub"
-            # Add checks for other potential server types if needed
-            mcp_server_types.append(server_type)
-            chat_agent_logger.info(f"Detected MCP server: {server.url} as type: {server_type}")
+        chat_agent_logger.info("Detecting available MCP server types from mcp_server_info...")
+        seen_types = set()
+        for conn_id, conn_type, url in self.mcp_server_info:
+             # Use title case for display, store unique types
+             display_type = conn_type.title() 
+             if display_type not in seen_types:
+                 mcp_server_types.append(display_type)
+                 seen_types.add(display_type)
+             chat_agent_logger.info(f"Detected MCP server: {url} (Conn ID: {conn_id}) as type: {conn_type}")
         
-        # Store available tools info for later use
+        # Store available tools info for later use (using the detected types)
         self.available_tools_info = f"You have access to the following data sources: {', '.join(mcp_server_types)}." if mcp_server_types else "No specific external data sources are currently connected."
         chat_agent_logger.info(f"Available tools info constructed: {self.available_tools_info}")
+        chat_agent_logger.info(f"Detected MCP server types for tools info: {list(seen_types)}")
 
         system_prompt = f"""
             You are an AI assistant with access to the following data sources:
@@ -233,19 +233,23 @@ class ChatAgentService:
         # Store notebook ID for the session
         self.sessions[session_id] = notebook_id 
         mcp_server_map: Dict[str, MCPServerHTTP] = {}
-        chat_agent_logger.info(f"Mapping MCP servers for session {session_id}...")
-        for server in self.mcp_servers:
-            chat_agent_logger.info(f"Found MCP server: {server.url}")
-            server_type = "Unknown" # Default
-            if "grafana" in server.url.lower():
-                mcp_server_map['grafana'] = server
-                server_type = "Grafana"
-            elif "github" in server.url.lower():
-                 mcp_server_map['github'] = server
-                 server_type = "GitHub"
-            # Add more types if needed
-            chat_agent_logger.info(f"Mapped MCP server {server.url} as type {server_type} for session {session_id}")
+        chat_agent_logger.info(f"Mapping MCP servers for session {session_id} using mcp_server_info: {self.mcp_server_info}")
+        
+        # Iterate through the provided server info (conn_id, type, url)
+        for conn_id, conn_type, url in self.mcp_server_info:
+            server_type_key = conn_type.lower() # Use lower case for map keys
 
+            # If this type isn't mapped yet, add it.
+            # This implicitly prefers the first encountered server for a given type.
+            # TODO: Consider logic to prefer default connections if multiple exist.
+            if server_type_key not in mcp_server_map:
+                mcp_server_map[server_type_key] = MCPServerHTTP(url=url)
+                chat_agent_logger.info(f"Mapped MCP server {url} (Conn ID: {conn_id}) as type {server_type_key} for session {session_id}")
+            else:
+                 chat_agent_logger.info(f"Skipping additional MCP server {url} (Conn ID: {conn_id}) for already mapped type {server_type_key}")
+
+        # Initialize AIAgent with the correctly constructed map
+        chat_agent_logger.info(f"Initializing AIAgent with mcp_server_map: {mcp_server_map}")
         self.ai_agent = AIAgent(mcp_server_map=mcp_server_map, notebook_id=notebook_id)
         self.cell_tools = NotebookCellTools(notebook_manager=self.notebook_manager)
         
