@@ -42,7 +42,7 @@ class GitHubQueryAgent:
             "to accurately interpret time-related requests (e.g., 'recent', 'last week'). "
             "Be precise in your tool usage based on the request."
         )
-        github_query_agent_logger.debug(f"Using GitHub system prompt.")
+        github_query_agent_logger.info(f"Using GitHub system prompt - {system_prompt}.")
 
         self.agent = Agent(
             self.model,

@@ -28,7 +28,7 @@ class LogQueryAgent:
     
         if source == "loki":
             system_prompt = loki_system_prompt.system_prompt
-            log_query_agent_logger.debug(f"Using Loki system prompt.")
+            log_query_agent_logger.info(f"Using Loki system prompt - {system_prompt}.")
         else:
             system_prompt = ""
             log_query_agent_logger.warning(f"No specific system prompt for source: {source}")
@@ -45,13 +45,13 @@ class LogQueryAgent:
         """Run a log query"""
         log_query_agent_logger.info(f"Running log query. Original query: '{query}', Time range: {time_range}")
         processed_query = f"Query: {query} in the Time range: {time_range}"
-        log_query_agent_logger.debug(f"Formatted query for agent: '{processed_query}'")
+        log_query_agent_logger.info(f"Formatted query for agent: '{processed_query}'")
         
         try:
             async with self.agent.run_mcp_servers():
-                log_query_agent_logger.debug(f"Calling self.agent.run...")
+                log_query_agent_logger.info(f"Calling self.agent.run...")
                 result = await self.agent.run(processed_query)
-                log_query_agent_logger.debug(f"Agent run completed. Raw result: {result}")
+                log_query_agent_logger.info(f"Agent run completed. Raw result: {result}")
                 if result and result.data:
                     log_query_agent_logger.info(f"Successfully parsed result data of type: {type(result.data)}")
                     return result.data

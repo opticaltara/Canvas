@@ -19,6 +19,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     unzip \
     docker-ce-cli \
+    nodejs \
+    npm \
  && rm -rf /var/lib/apt/lists/* \
  && curl -fsSL https://deno.land/x/install/install.sh | sh \
  && mv /root/.deno/bin/deno /usr/local/bin/deno

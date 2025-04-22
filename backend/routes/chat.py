@@ -14,10 +14,12 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from pydantic_ai.mcp import MCPServerHTTP
 
 from backend.ai.chat_agent import ChatAgentService, ChatRequest, ChatMessage, to_chat_message, CellResponsePart
 from backend.db.chat_db import ChatDatabase
 from backend.services.notebook_manager import NotebookManager, get_notebook_manager
+from backend.mcp.manager import MCPServerManager, get_mcp_server_manager
 
 # Initialize logger
 chat_logger = logging.getLogger("routes.chat")
@@ -38,10 +40,18 @@ router = APIRouter()
 
 # Dependency to get chat agent service
 async def get_chat_agent_service(
-    notebook_manager: NotebookManager = Depends(get_notebook_manager)
+    notebook_manager: NotebookManager = Depends(get_notebook_manager),
+    mcp_manager: MCPServerManager = Depends(get_mcp_server_manager)
 ) -> ChatAgentService:
     """Get the chat agent service singleton"""
-    return ChatAgentService(notebook_manager)
+    # Create MCPServerHTTP instances from active server addresses
+    mcp_servers_list = [
+        MCPServerHTTP(url=address) 
+        for address in mcp_manager.servers.values() 
+        if isinstance(address, str) and address.startswith("http") # Ensure it's a valid URL string
+    ]
+    chat_logger.debug(f"Passing {len(mcp_servers_list)} MCP servers to ChatAgentService")
+    return ChatAgentService(notebook_manager, mcp_servers=mcp_servers_list) # Pass the list
 
 
 # Dependency to get chat database

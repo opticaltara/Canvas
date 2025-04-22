@@ -168,10 +168,13 @@ class AIAgent:
         )
         self.mcp_server_map = mcp_server_map or {}
         self.notebook_id = notebook_id
-    
+        
+        # Log the received MCP server map
+        ai_logger.info(f"AIAgent for notebook {self.notebook_id} initialized with mcp_server_map: {self.mcp_server_map}")
+        
         # Create the full list of MCPServerHTTP for general agents
         all_mcps_list = list(self.mcp_server_map.values())
-        ai_logger.debug(f"Initializing general agents with {len(all_mcps_list)} HTTP MCP servers.")
+        ai_logger.info(f"Initializing general agents with {len(all_mcps_list)} HTTP MCP servers.")
         
         # Initialize investigation planner
         self.investigation_planner = Agent(

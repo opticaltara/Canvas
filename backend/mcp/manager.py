@@ -546,10 +546,6 @@ class MCPServerManager:
         Returns:
             The MCP server address if successful, None otherwise
         """
-        # For Python MCP, there's no specific configuration needed since
-        # it's a utility server rather than a data connection
-        
-        # Choose a port for local development (when not using Docker)
         port = self._find_free_port(9401, 9500)
         if not port:
             self.last_error[connection.id] = f"Could not find a free port for Python MCP server"
@@ -632,10 +628,10 @@ class MCPServerManager:
         return None
 
     async def _start_github_mcp(self, connection: BaseConnectionConfig) -> Optional[str]:
-        """Starts the GitHub MCP server wrapped by Supergateway over SSE."""
+        """Starts the GitHub MCP server wrapped by Supergateway over SSE using npx."""
         correlation_id = str(uuid4())
         mcp_logger.info(
-            "Attempting to start GitHub MCP server via Supergateway",
+            "Attempting to start GitHub MCP server via Supergateway (npx)",
             extra={
                 'correlation_id': correlation_id,
                 'connection_id': connection.id
@@ -655,10 +651,10 @@ class MCPServerManager:
             self.last_error[connection.id] = error_msg
             return None
 
-        # Find a free port on the host for Supergateway to expose
+        # Find a free port on the host/container for Supergateway to listen on
         supergateway_host_port = self._find_free_port(start_port=8100, end_port=8200)
         if supergateway_host_port is None:
-            error_msg = "Could not find a free port for GitHub MCP Supergateway."
+            error_msg = "Could not find a free port for GitHub MCP Supergateway (npx)."
             mcp_logger.error(
                 error_msg,
                 extra={
@@ -669,80 +665,90 @@ class MCPServerManager:
             self.last_error[connection.id] = error_msg
             return None
 
-        # Define the inner command: running the actual GitHub MCP server
-        # Note: We need to handle potential quoting issues if the token has special characters.
-        # For simplicity, assuming the token is safe for direct inclusion here.
-        # Consider shell escaping if tokens can be complex.
-        github_mcp_command = (
-            f"docker run -i --rm "
-            f"-e GITHUB_PERSONAL_ACCESS_TOKEN={token} "
-            f"ghcr.io/github/github-mcp-server"
+        escaped_token = token.replace('"', '\\"').replace("'", "\\'")
+        github_mcp_stdio_command = (
+            f'docker run -i --rm '
+            f'-e GITHUB_PERSONAL_ACCESS_TOKEN="{escaped_token}" '
+            f'ghcr.io/github/github-mcp-server'
         )
         
-        # Define the outer command: running Supergateway via Docker
-        supergateway_image = "supercorp/supergateway" # Or ghcr.io/supercorp-ai/supergateway
-        supergateway_internal_port = 8000 # Default port Supergateway listens on
-        sse_path = "/sse" # Default SSE path
+        # Define the command to run Supergateway via npx
+        sse_path = "/sse" # Default SSE path for Supergateway itself
 
         cmd = [
-            "docker", "run", "-i", "--rm", # Run supergateway interactively and remove on exit
-            "-p", f"{supergateway_host_port}:{supergateway_internal_port}", # Map host port to supergateway internal port
-            supergateway_image, # The supergateway image
-            "--stdio", github_mcp_command, # The command for supergateway to run
-            "--port", str(supergateway_internal_port), # Tell supergateway which port to use internally
-            "--ssePath", sse_path, # Tell supergateway which SSE path to use
+            "npx", "-y", "supergateway", # Use npx to fetch and run supergateway
+            "--stdio", github_mcp_stdio_command, # The command for supergateway to run via stdio
+            "--port", str(supergateway_host_port), # Port for Supergateway to listen on
+            "--ssePath", sse_path, # SSE path for Supergateway
             # Optional: Add --logLevel none if supergateway logs are too noisy
             # "--logLevel", "none"
+            # Optional: Enable CORS if needed from a browser UI
+            # "--cors" 
         ]
 
         try:
-            mcp_logger.info(f"Running Supergateway Docker command: {' '.join(cmd)}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+            mcp_logger.info(f"Running Supergateway npx command: {' '.join(cmd)}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
             
-            # Start the Supergateway container process
+            # Start the Supergateway npx process
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            self.processes[connection.id] = process # Store the supergateway process
+            self.processes[connection.id] = process # Store the supergateway npx process
             mcp_logger.info(
-                f"GitHub MCP Supergateway process started (PID: {process.pid}) for connection {connection.id}",
+                f"GitHub MCP Supergateway npx process started (PID: {process.pid}) for connection {connection.id}",
                  extra={'correlation_id': correlation_id}
             )
 
-            # Give the Supergateway server time to start up
-            await asyncio.sleep(3) # Adjust sleep time if needed
+            # Give the Supergateway server and the underlying docker container time to start up
+            await asyncio.sleep(5) # Increased sleep slightly, adjust if needed
             
             # Check if the Supergateway process started successfully
             if process.returncode is not None:
                  stderr_output = await process.stderr.read() if process.stderr else b''
-                 error_msg = f"GitHub MCP Supergateway process failed to start or exited prematurely. Exit code: {process.returncode}. Stderr: {stderr_output.decode(errors='ignore')}"
+                 stdout_output = await process.stdout.read() if process.stdout else b''
+                 error_msg = (f"GitHub MCP Supergateway npx process failed to start or exited prematurely. "
+                              f"Exit code: {process.returncode}. \n"
+                              f"Stderr: {stderr_output.decode(errors='ignore')}\n"
+                              f"Stdout: {stdout_output.decode(errors='ignore')}")
                  mcp_logger.error(error_msg, extra={'correlation_id': correlation_id, 'connection_id': connection.id})
                  self.last_error[connection.id] = error_msg
                  self.processes.pop(connection.id, None)
                  return None
 
-            # Construct the SSE address exposed by Supergateway
+            # Construct the SSE address exposed by Supergateway (running via npx)
+            # Assuming access via localhost within the backend container's context
             server_address = f"http://localhost:{supergateway_host_port}{sse_path}" 
-            mcp_logger.info(f"GitHub MCP server via Supergateway assumed running at {server_address}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+            mcp_logger.info(f"GitHub MCP server via Supergateway (npx) assumed running at {server_address}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
             return server_address
 
+        except FileNotFoundError:
+             error_msg = "Failed to start GitHub MCP Supergateway: 'npx' command not found. Is Node.js/npx installed in the environment?"
+             mcp_logger.error(error_msg, extra={'correlation_id': correlation_id, 'connection_id': connection.id}, exc_info=True)
+             self.last_error[connection.id] = error_msg
+             self.processes.pop(connection.id, None) # Clean up potential partial process entry
+             return None
         except Exception as e:
-            error_msg = f"Failed to start GitHub MCP Supergateway container: {str(e)}"
+            error_msg = f"Failed to start GitHub MCP Supergateway via npx: {str(e)}"
             mcp_logger.error(error_msg, extra={'correlation_id': correlation_id, 'connection_id': connection.id}, exc_info=True)
             self.last_error[connection.id] = error_msg
-            # Ensure process is cleaned up if creation failed mid-way
+            # Ensure process is cleaned up if creation failed mid-way or during checks
             if connection.id in self.processes and self.processes[connection.id]:
-                 try:
-                     # Ensure process is terminated if it exists
-                     if self.processes[connection.id].returncode is None:
-                         self.processes[connection.id].terminate()
-                 except ProcessLookupError:
-                     pass # Process already gone
-                 except Exception as term_exc:
-                     mcp_logger.warning(f"Error terminating Supergateway process during cleanup: {term_exc}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
-                 finally:
-                    self.processes.pop(connection.id, None)
+                 process_to_term = self.processes[connection.id]
+                 if process_to_term and process_to_term.returncode is None:
+                     try:
+                         process_to_term.terminate()
+                         # Allow some time for termination
+                         await asyncio.wait_for(process_to_term.wait(), timeout=2.0)
+                     except asyncio.TimeoutError:
+                          mcp_logger.warning(f"Supergateway process {process_to_term.pid} did not terminate gracefully, killing.", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+                          process_to_term.kill()
+                     except ProcessLookupError:
+                         pass # Process already gone
+                     except Exception as term_exc:
+                         mcp_logger.warning(f"Error terminating Supergateway npx process during cleanup: {term_exc}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+                 self.processes.pop(connection.id, None) # Remove after attempting termination
             return None
 
 
