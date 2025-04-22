@@ -665,11 +665,10 @@ class MCPServerManager:
             self.last_error[connection.id] = error_msg
             return None
 
-        escaped_token = token.replace('"', '\\"').replace("'", "\\'")
         github_mcp_stdio_command = (
-            f'docker run -i --rm '
-            f'-e GITHUB_PERSONAL_ACCESS_TOKEN="{escaped_token}" '
-            f'ghcr.io/github/github-mcp-server'
+            f"docker run -i --rm "
+            f"-e GITHUB_PERSONAL_ACCESS_TOKEN='{token}' "
+            f"ghcr.io/github/github-mcp-server"
         )
         
         # Define the command to run Supergateway via npx
@@ -680,10 +679,6 @@ class MCPServerManager:
             "--stdio", github_mcp_stdio_command, # The command for supergateway to run via stdio
             "--port", str(supergateway_host_port), # Port for Supergateway to listen on
             "--ssePath", sse_path, # SSE path for Supergateway
-            # Optional: Add --logLevel none if supergateway logs are too noisy
-            # "--logLevel", "none"
-            # Optional: Enable CORS if needed from a browser UI
-            # "--cors" 
         ]
 
         try:
@@ -701,26 +696,83 @@ class MCPServerManager:
                  extra={'correlation_id': correlation_id}
             )
 
-            # Give the Supergateway server and the underlying docker container time to start up
-            await asyncio.sleep(5) # Increased sleep slightly, adjust if needed
-            
-            # Check if the Supergateway process started successfully
-            if process.returncode is not None:
-                 stderr_output = await process.stderr.read() if process.stderr else b''
-                 stdout_output = await process.stdout.read() if process.stdout else b''
-                 error_msg = (f"GitHub MCP Supergateway npx process failed to start or exited prematurely. "
-                              f"Exit code: {process.returncode}. \n"
-                              f"Stderr: {stderr_output.decode(errors='ignore')}\n"
-                              f"Stdout: {stdout_output.decode(errors='ignore')}")
+            # --- Check Supergateway Output ---
+            # Read stdout/stderr for a short time to confirm startup
+            startup_confirmed = False
+            error_detected = False
+            output_lines = []
+            try:
+                # Read for up to 10 seconds
+                tasks = []
+                if process.stdout:
+                    tasks.append(asyncio.create_task(process.stdout.readline()))
+                if process.stderr:
+                    tasks.append(asyncio.create_task(process.stderr.readline()))
+
+                if not tasks:
+                    # If neither stdout nor stderr is available, we can't confirm startup
+                    mcp_logger.error("Supergateway process started with no stdout/stderr pipes.", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+                    error_detected = True
+                else:
+                    # Wait for output or timeout
+                    done, pending = await asyncio.wait(tasks, timeout=10.0, return_when=asyncio.FIRST_COMPLETED)
+
+                    # Process completed tasks
+                    for task in done:
+                        line_bytes = await task
+                        if line_bytes:
+                            line = line_bytes.decode(errors='ignore').strip()
+                            output_lines.append(line)
+                            mcp_logger.debug(f"Supergateway Output ({connection.id}): {line}", extra={'correlation_id': correlation_id})
+                            if "GitHub MCP Server running on stdio" in line:
+                                startup_confirmed = True
+                                mcp_logger.info("GitHub MCP Server confirmed running via Supergateway output.", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+                            if "[supergateway] stdio: docker" in line or "Usage:  docker [OPTIONS] COMMAND" in line:
+                                 error_detected = True
+                                 mcp_logger.error("Supergateway output indicates stdio command failed (Docker help shown).", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+
+                    # Cancel pending tasks (if any, e.g., if only one stream produced output)
+                    for task in pending:
+                        task.cancel()
+                        try:
+                            await task # Allow cancellation to propagate
+                        except asyncio.CancelledError:
+                            pass
+
+                    # Check process exit code *after* reading initial output
+                    if process.returncode is not None:
+                        error_detected = True # Process exited during startup check
+                        mcp_logger.error(f"Supergateway process exited prematurely during startup check. Code: {process.returncode}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+
+
+            except asyncio.TimeoutError:
+                mcp_logger.warning("Timeout waiting for Supergateway startup confirmation.", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+                # Check if process is still running; if not, it's an error
+                if process.returncode is not None:
+                     error_detected = True
+            except Exception as read_exc:
+                 mcp_logger.error(f"Error reading Supergateway startup output: {read_exc}", extra={'correlation_id': correlation_id, 'connection_id': connection.id}, exc_info=True)
+                 error_detected = True # Treat read errors as startup failure
+
+            if not startup_confirmed or error_detected:
+                 error_msg = f"Failed to confirm GitHub MCP server startup via Supergateway. Output: {' | '.join(output_lines)}"
                  mcp_logger.error(error_msg, extra={'correlation_id': correlation_id, 'connection_id': connection.id})
                  self.last_error[connection.id] = error_msg
+                 # Attempt to terminate the potentially problematic process
+                 if process.returncode is None:
+                     try:
+                         process.terminate()
+                     except ProcessLookupError:
+                          pass # Already gone
                  self.processes.pop(connection.id, None)
                  return None
+            # --- End Check Supergateway Output ---
+
 
             # Construct the SSE address exposed by Supergateway (running via npx)
             # Assuming access via localhost within the backend container's context
-            server_address = f"http://localhost:{supergateway_host_port}{sse_path}" 
-            mcp_logger.info(f"GitHub MCP server via Supergateway (npx) assumed running at {server_address}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+            server_address = f"http://localhost:{supergateway_host_port}{sse_path}"
+            mcp_logger.info(f"GitHub MCP server via Supergateway (npx) confirmed running at {server_address}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
             return server_address
 
         except FileNotFoundError:
