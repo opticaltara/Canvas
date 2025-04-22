@@ -676,6 +676,7 @@ class MCPServerManager:
 
         cmd = [
             "npx", "-y", "supergateway", # Use npx to fetch and run supergateway
+            "--log-level", "info", # Enable info-level logging for Supergateway
             "--stdio", github_mcp_stdio_command, # The command for supergateway to run via stdio
             "--port", str(supergateway_host_port), # Port for Supergateway to listen on
             "--ssePath", sse_path, # SSE path for Supergateway
@@ -705,26 +706,27 @@ class MCPServerManager:
                 if not stream:
                     return
                 try:
+                    # Keep reading for the full duration, even after confirmation, for logging.
                     async for line_bytes in stream:
-                        if flags["confirmed"] or flags["error"]:
-                            break # Stop reading if outcome is decided
                         line = line_bytes.decode(errors='ignore').strip()
                         if line:
                             output_lines.append(f"[{stream_name}] {line}")
                             mcp_logger.info(f"Supergateway Output ({connection.id}, {stream_name}): {line}", extra={'correlation_id': correlation_id})
-                            # Check for success
-                            if "GitHub MCP Server running on stdio" in line:
+                            # Check for success but DO NOT break
+                            if not flags["confirmed"] and "GitHub MCP Server running on stdio" in line:
                                 mcp_logger.info("GitHub MCP Server confirmed running via Supergateway output.", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
                                 flags["confirmed"] = True
-                                break
+                                # !! We removed the 'break' here to continue logging !!
                             # Check for known error patterns
-                            if "[supergateway] stdio: docker" in line or "Usage:  docker [OPTIONS] COMMAND" in line:
+                            if not flags["error"] and ("[supergateway] stdio: docker" in line or "Usage:  docker [OPTIONS] COMMAND" in line):
                                 mcp_logger.error("Supergateway output indicates stdio command failed (Docker help shown).", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
                                 flags["error"] = True
-                                break
-                        # Check timeout explicitly within the loop as well
+                                # We can break on definitive error
+                                break 
+                        # Check timeout explicitly within the loop
                         if asyncio.get_event_loop().time() - start_time > 30.0:
-                            break
+                             mcp_logger.debug(f"Stream reader ({stream_name}) hit 30s timeout.", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
+                             break
                 except Exception as e:
                     # Log errors reading from the stream but don't necessarily stop the check
                     mcp_logger.warning(f"Error reading from Supergateway {stream_name}: {e}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
@@ -772,10 +774,9 @@ class MCPServerManager:
                 return None
             # --- End Check Supergateway Output ---
 
-
             # Construct the SSE address exposed by Supergateway (running via npx)
-            # Assuming access via localhost within the backend container's context
-            server_address = f"http://localhost:{supergateway_host_port}{sse_path}"
+            # Use the service name 'backend' for internal container communication
+            server_address = f"http://backend:{supergateway_host_port}{sse_path}"
             mcp_logger.info(f"GitHub MCP server via Supergateway (npx) confirmed running at {server_address}", extra={'correlation_id': correlation_id, 'connection_id': connection.id})
             return server_address
 
@@ -783,7 +784,7 @@ class MCPServerManager:
              error_msg = "Failed to start GitHub MCP Supergateway: 'npx' command not found. Is Node.js/npx installed in the environment?"
              mcp_logger.error(error_msg, extra={'correlation_id': correlation_id, 'connection_id': connection.id}, exc_info=True)
              self.last_error[connection.id] = error_msg
-             self.processes.pop(connection.id, None) # Clean up potential partial process entry
+             self.processes.pop(connection.id, None)
              return None
         except Exception as e:
             error_msg = f"Failed to start GitHub MCP Supergateway via npx: {str(e)}"

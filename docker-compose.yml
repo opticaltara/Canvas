@@ -17,6 +17,7 @@ services:
       - SHERLOG_AI_MODEL=${SHERLOG_AI_MODEL:-anthropic/claude-3.7-sonnet}
     ports:
       - "9091:8000"
+      - "9092:8100"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s

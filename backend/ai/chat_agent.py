@@ -234,20 +234,14 @@ class ChatAgentService:
         mcp_server_map: Dict[str, MCPServerHTTP] = {}
         chat_agent_logger.info(f"Mapping MCP servers for session {session_id} using mcp_server_info: {self.mcp_server_info}")
         
-        # Iterate through the provided server info (conn_id, type, url)
         for conn_id, conn_type, url in self.mcp_server_info:
-            server_type_key = conn_type.lower() # Use lower case for map keys
-
-            # If this type isn't mapped yet, add it.
-            # This implicitly prefers the first encountered server for a given type.
-            # TODO: Consider logic to prefer default connections if multiple exist.
+            server_type_key = conn_type.lower()
             if server_type_key not in mcp_server_map:
                 mcp_server_map[server_type_key] = MCPServerHTTP(url=url)
                 chat_agent_logger.info(f"Mapped MCP server {url} (Conn ID: {conn_id}) as type {server_type_key} for session {session_id}")
             else:
                  chat_agent_logger.info(f"Skipping additional MCP server {url} (Conn ID: {conn_id}) for already mapped type {server_type_key}")
 
-        # Initialize AIAgent with the correctly constructed map
         chat_agent_logger.info(f"Initializing AIAgent with mcp_server_map: {mcp_server_map}")
         self.ai_agent = AIAgent(mcp_server_map=mcp_server_map, notebook_id=notebook_id)
         self.cell_tools = NotebookCellTools(notebook_manager=self.notebook_manager)
@@ -276,14 +270,12 @@ class ChatAgentService:
         start_time = time.time()
         
         try:
-            # Get notebook_id for this session
             notebook_id = self.sessions.get(session_id)
             chat_agent_logger.info(f"Retrieved notebook_id: {notebook_id} for session {session_id}")
             if not notebook_id:
                 chat_agent_logger.error(f"No notebook_id found for session {session_id}")
                 raise ValueError(f"No notebook_id found for session {session_id}")
             
-            # First, check if we need clarification
             chat_agent_logger.info(f"Checking if clarification is needed for session {session_id}...")
             clarification_result = await self.chat_agent.run(
                 f"Assess if this user request needs clarification before proceeding: '{prompt}'. "
@@ -296,7 +288,6 @@ class ChatAgentService:
             chat_agent_logger.info(f"Clarification check completed for session {session_id}. Result: {clarification_result.data.needs_clarification}")
             
             if clarification_result.data.needs_clarification and clarification_result.data.clarification_message:
-                # Ask for clarification
                 chat_agent_logger.info(f"Asking for clarification in session {session_id}: {clarification_result.data.clarification_message}")
                 clarification_response = ModelResponse(
                     parts=[StatusResponsePart(
@@ -305,11 +296,8 @@ class ChatAgentService:
                     )],
                     timestamp=datetime.now(timezone.utc)
                 )
-                # Include chat_agent as the source
                 yield "clarification", clarification_response
                 return
-            
-            # If no clarification needed, start investigation
             chat_agent_logger.info(f"Starting investigation for prompt: '{prompt}' in session {session_id}")
             async for status_type, status in self.ai_agent.investigate(
                 prompt,
@@ -320,7 +308,6 @@ class ChatAgentService:
             ):
                 chat_agent_logger.info(f"Yielding status update for session {session_id}. Type: {status_type}")
                 
-                # Create appropriate response based on status type
                 if 'cell_params' in status:
                     response = ModelResponse(
                         parts=[CellResponsePart(
