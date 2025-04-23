@@ -23,12 +23,12 @@ from pydantic_ai.messages import (
     TextPart, 
     UserPromptPart
 )
-from pydantic_ai.mcp import MCPServerHTTP
 
 from backend.config import get_settings
 from backend.ai.chat_tools import NotebookCellTools
 from backend.services.notebook_manager import NotebookManager
 from backend.ai.agent import AIAgent
+from backend.services.connection_manager import ConnectionManager, get_connection_manager
 
 # Initialize logger
 chat_agent_logger = logging.getLogger("ai.chat_agent")
@@ -156,59 +156,24 @@ class ChatAgentService:
     def __init__(
         self, 
         notebook_manager: NotebookManager,
-        mcp_server_info: Optional[List[Tuple[str, str, str]]] = None
+        connection_manager: Optional[ConnectionManager] = None # Allow None initially
     ):
         self.settings = get_settings()
-        chat_agent_logger.info(f"Initializing ChatAgentService with mcp_server_info: {mcp_server_info}")
+        chat_agent_logger.info(f"Initializing ChatAgentService...")
         self.notebook_manager = notebook_manager
-        self.mcp_server_info = mcp_server_info or []
-        self.sessions: Dict[str, str] = {}  # Store session_id -> notebook_id mapping
+        self.sessions: Dict[str, str] = {}
         
         # Initialize cell tools
         self.cell_tools = NotebookCellTools(notebook_manager)
 
         chat_agent_logger.info(f"AI model: {self.settings.ai_model}")
         chat_agent_logger.info(f"OpenRouter API key: {self.settings.openrouter_api_key}")
+        self.available_tools_info: Optional[str] = None # Initialize as None
+        self._available_data_source_types: Optional[List[str]] = None # Store the actual list of types
+        self._connection_manager = connection_manager or get_connection_manager() # Store connection manager instance
+        system_prompt = self._generate_system_prompt()
         
-        # Determine available MCP server types from the provided info
-        mcp_server_types = []
-        chat_agent_logger.info("Detecting available MCP server types from mcp_server_info...")
-        seen_types = set()
-        for conn_id, conn_type, url in self.mcp_server_info:
-             # Use title case for display, store unique types
-             display_type = conn_type.title() 
-             if display_type not in seen_types:
-                 mcp_server_types.append(display_type)
-                 seen_types.add(display_type)
-             chat_agent_logger.info(f"Detected MCP server: {url} (Conn ID: {conn_id}) as type: {conn_type}")
-        
-        # Store available tools info for later use (using the detected types)
-        self.available_tools_info = f"You have access to the following data sources: {', '.join(mcp_server_types)}." if mcp_server_types else "No specific external data sources are currently connected."
-        chat_agent_logger.info(f"Available tools info constructed: {self.available_tools_info}")
-        chat_agent_logger.info(f"Detected MCP server types for tools info: {list(seen_types)}")
-
-        system_prompt = f"""
-            You are an AI assistant managing conversations and coordinating data investigations.
-            You have access to the following data sources: {self.available_tools_info}
-
-            Your primary responsibilities are:
-            1. Understanding user queries.
-            2. Managing the conversation flow.
-            3. Coordinating investigations using available data sources.
-            4. Presenting results clearly.
-
-            When a user asks to investigate something (e.g., regarding GitHub, Grafana, etc.):
-            1. Assess if the query can be addressed with the available data sources ({', '.join(mcp_server_types) or 'none'}).
-            2. **CRITICAL: Proceed DIRECTLY with the investigation if the query is reasonably understandable.** Do NOT ask for clarification unless the query is fundamentally ambiguous (e.g., completely unclear intent) or lacks ESSENTIAL information that prevents *any* meaningful action (e.g., the specific platform like GitHub is absolutely required but missing, and the query doesn't imply it).
-            3. **DO NOT ask for usernames (like GitHub username) if the relevant data source (e.g., GitHub MCP) is listed as available.** Assume the connection provides the necessary user context.
-            4. For standard requests (e.g., 'recent pull requests', 'active repositories', 'my recent commits'), assume common definitions (like 'recent' means the last few weeks/month, 'active' involves recent activity) and PROCEED. Do not ask for clarification on timeframes or precise definitions unless the user explicitly requests something non-standard or highly specific.
-            5. If the query is clear and actionable according to these strict guidelines, pass it for investigation.
-            6. Present investigation results clearly. Be ready for follow-up questions.
-
-            Your goal is to be proactive and action-oriented. Avoid unnecessary conversational turns. Focus on executing the request based on the available tools and context.
-            """
-        
-        chat_agent_logger.info(f"System prompt - {system_prompt} for chat agent constructed.")
+        chat_agent_logger.info(f"System prompt - preparing for chat agent.")
         
         # Create the chat agent
         self.chat_agent = Agent(
@@ -223,7 +188,56 @@ class ChatAgentService:
             result_type=ClarificationResult
         )
         
-        chat_agent_logger.info("Chat agent service initialized")
+        chat_agent_logger.info("Chat agent service initialized (will fetch connection types async).")
+
+    async def _fetch_and_set_available_tools_info(self):
+        """Fetches connection types and sets the available_tools_info string."""
+        if self.available_tools_info is None:
+            try:
+                connections = await self._connection_manager.get_all_connections()
+                # Explicitly filter for dictionaries and string types, then sort
+                valid_types = [
+                    str(conn.get("type")) 
+                    for conn in connections 
+                    if isinstance(conn, dict) and isinstance(conn.get("type"), str)
+                ]
+                unique_types = sorted(list(set(valid_types)))
+                display_types = [t.title() for t in unique_types]
+                if display_types:
+                    self.available_tools_info = f"You have access to the following data sources: {', '.join(display_types)}."
+                else:
+                    self.available_tools_info = "No specific external data sources are currently connected."
+                self._available_data_source_types = unique_types
+                chat_agent_logger.info(f"Fetched connection types. Available tools info: {self.available_tools_info}")
+            except Exception as e:
+                chat_agent_logger.error(f"Failed to fetch connection types: {e}", exc_info=True)
+                self.available_tools_info = "Error fetching available data sources."
+                self._available_data_source_types = [] # Set to empty list on error
+
+    def _generate_system_prompt(self) -> str:
+        """Generates the system prompt, using placeholder if types not fetched yet."""
+        tools_info = self.available_tools_info or "(Data source information is loading...)" 
+        
+        return f"""
+            You are an AI assistant managing conversations and coordinating data investigations.
+            {tools_info}
+
+            Your primary responsibilities are:
+            1. Understanding user queries.
+            2. Managing the conversation flow.
+            3. Coordinating investigations using available data sources.
+            4. Presenting results clearly.
+
+            When a user asks to investigate something:
+            1. Assess if the query can be addressed with the available data sources ({tools_info}).
+            2. **CRITICAL: Proceed DIRECTLY with the investigation if the query is reasonably understandable.** Do NOT ask for clarification unless the query is fundamentally ambiguous (e.g., completely unclear intent) or lacks ESSENTIAL information that prevents *any* meaningful action (e.g., the specific platform like GitHub is absolutely required but missing, and the query doesn't imply it).
+            3. **DO NOT ask for usernames (like GitHub username) if the relevant data source (e.g., GitHub MCP) is listed as available.** Assume the connection provides the necessary user context.
+            4. For standard requests (e.g., 'recent pull requests', 'active repositories', 'my recent commits'), assume common definitions (like 'recent' means the last few weeks/month, 'active' involves recent activity) and PROCEED. Do not ask for clarification on timeframes or precise definitions unless the user explicitly requests something non-standard or highly specific.
+            5. If the query is clear and actionable according to these strict guidelines, pass it for investigation.
+            6. Present investigation results clearly. Be ready for follow-up questions.
+
+            Your goal is to be proactive and action-oriented. Avoid unnecessary conversational turns. Focus on executing the request based on the available tools and context.
+            """
 
     async def create_session(self, session_id: str, notebook_id: str):
         """Create a new chat session and initialize necessary components."""
@@ -231,19 +245,16 @@ class ChatAgentService:
         
         # Store notebook ID for the session
         self.sessions[session_id] = notebook_id 
-        mcp_server_map: Dict[str, MCPServerHTTP] = {}
-        chat_agent_logger.info(f"Mapping MCP servers for session {session_id} using mcp_server_info: {self.mcp_server_info}")
         
-        for conn_id, conn_type, url in self.mcp_server_info:
-            server_type_key = conn_type.lower()
-            if server_type_key not in mcp_server_map:
-                mcp_server_map[server_type_key] = MCPServerHTTP(url=url)
-                chat_agent_logger.info(f"Mapped MCP server {url} (Conn ID: {conn_id}) as type {server_type_key} for session {session_id}")
-            else:
-                 chat_agent_logger.info(f"Skipping additional MCP server {url} (Conn ID: {conn_id}) for already mapped type {server_type_key}")
-
-        chat_agent_logger.info(f"Initializing AIAgent with mcp_server_map: {mcp_server_map}")
-        self.ai_agent = AIAgent(mcp_server_map=mcp_server_map, notebook_id=notebook_id)
+        # Ensure connection types are fetched before initializing AIAgent
+        await self._fetch_and_set_available_tools_info()
+        
+        # Initialize AIAgent with the fetched data sources
+        chat_agent_logger.info(f"Initializing AIAgent for session {session_id} with sources: {self._available_data_source_types}")
+        self.ai_agent = AIAgent(
+            notebook_id=notebook_id,
+            available_data_sources=self._available_data_source_types or [] # Pass the fetched list
+        )
         self.cell_tools = NotebookCellTools(notebook_manager=self.notebook_manager)
         
         chat_agent_logger.info(f"Chat session {session_id} created successfully.")
@@ -270,6 +281,9 @@ class ChatAgentService:
         start_time = time.time()
         
         try:
+            # Ensure available tools info is fetched before proceeding
+            await self._fetch_and_set_available_tools_info()
+
             notebook_id = self.sessions.get(session_id)
             chat_agent_logger.info(f"Retrieved notebook_id: {notebook_id} for session {session_id}")
             if not notebook_id:
@@ -279,7 +293,7 @@ class ChatAgentService:
             chat_agent_logger.info(f"Checking if clarification is needed for session {session_id}...")
             clarification_result = await self.chat_agent.run(
                 f"Assess if this user request needs clarification before proceeding: '{prompt}'. "
-                f"Consider the available tools and context ({self.available_tools_info}). "
+                f"Consider the available tools and context ({self.available_tools_info or '(loading...)'}). "
                 f"Only ask for clarification if the request is genuinely ambiguous "
                 f"or missing critical information needed to act.",
                 message_history=message_history,

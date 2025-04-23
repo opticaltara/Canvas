@@ -2,12 +2,12 @@
 Connection API Endpoints
 """
 
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from uuid import uuid4
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.services.connection_manager import (
     ConnectionManager, 
@@ -87,14 +87,16 @@ class ConnectionCreate(BaseModel):
 
 class ConnectionUpdate(BaseModel):
     """Parameters for updating a connection"""
-    name: str
-    config: Dict
+    name: Optional[str] = None
+    config: Optional[Dict] = None
+    github_personal_access_token: Optional[str] = None
 
 
 class ConnectionTest(BaseModel):
     """Parameters for testing a connection"""
     type: str  # "grafana", "sql", "prometheus", "loki", "s3", "kubernetes", etc.
     config: Dict
+    github_personal_access_token: Optional[str] = None
 
 
 @router.get("/")
@@ -205,7 +207,8 @@ async def get_connection(
             raise HTTPException(status_code=404, detail=f"Connection {connection_id} not found")
         
         # Convert to type-specific configuration
-        specific_config = connection.to_specific_config()
+        # Note: to_specific_config helps with type hinting but the actual data is in connection.config
+        specific_config = connection.to_specific_config() 
         
         # Create response based on connection type
         response: Dict[str, Any] = {
@@ -214,17 +217,26 @@ async def get_connection(
             "type": connection.type
         }
         
-        # Add type-specific fields based on connection type
+        # Add type-specific fields based on connection type, reading from the stored config
         if isinstance(specific_config, GrafanaConnectionConfig):
-            response["url"] = specific_config.url
-            response["api_key"] = "********" if specific_config.api_key else ""
+            # For Grafana stdio, get url/key from the stored config dictionary
+            response["url"] = connection.config.get("grafana_url", "")
+            response["api_key"] = "***REDACTED***" # Always redact API key
+            response["config"] = connection_manager._redact_sensitive_fields(
+                connection.config, # Pass the full config for redaction
+                connection_type="grafana"
+            )
         elif isinstance(specific_config, GithubConnectionConfig):
-            response["github_personal_access_token"] = "********" if specific_config.github_personal_access_token else ""
+            # GitHub config holds command/args template/pat
+            response["config"] = connection_manager._redact_sensitive_fields(
+                connection.config, # Pass the full config for redaction
+                connection_type="github"
+            )
         elif isinstance(specific_config, GenericConnectionConfig):
-            # For GenericConnectionConfig, include the full config dictionary
-            response["config"] = connection_manager._redact_sensitive_fields(specific_config.config)
+            # For GenericConnectionConfig, include the full redacted config dictionary
+            response["config"] = connection_manager._redact_sensitive_fields(connection.config)
         else:
-            # Ultimate fallback - use the original config
+            # Ultimate fallback - redact the original config
             response["config"] = connection_manager._redact_sensitive_fields(connection.config)
         
         process_time = time.time() - start_time
@@ -262,7 +274,7 @@ async def create_grafana_connection(
     connection_manager: ConnectionManager = Depends(get_connection_manager)
 ) -> Dict:
     """
-    Create a new Grafana connection
+    Create a new Grafana connection (now uses stdio MCP)
     
     Args:
         connection_data: Parameters for creating the Grafana connection
@@ -272,16 +284,18 @@ async def create_grafana_connection(
     """
     start_time = time.time()
     try:
-        # Convert to the generic format used by connection manager
-        config = {
-            "url": connection_data.url,
-            "api_key": connection_data.api_key
+        # Pass url and api_key via kwargs for validation and inclusion in the prepared config
+        config = {} # Start with an empty config, manager prepares it
+        cm_kwargs = {
+            "grafana_url": connection_data.url,
+            "grafana_api_key": connection_data.api_key
         }
         
         connection = await connection_manager.create_connection(
             name=connection_data.name,
             type="grafana",
-            config=config
+            config=config, # Empty, prepared by manager
+            **cm_kwargs
         )
         
         process_time = time.time() - start_time
@@ -298,7 +312,8 @@ async def create_grafana_connection(
             "id": connection.id,
             "name": connection.name,
             "type": connection.type,
-            "config": connection_manager._redact_sensitive_fields(connection.config)
+            # Redact the final prepared config, specifying the type for correct redaction
+            "config": connection_manager._redact_sensitive_fields(connection.config, connection_type="grafana")
         }
     except ValueError as e:
         process_time = time.time() - start_time
@@ -343,15 +358,18 @@ async def create_github_connection(
     """
     start_time = time.time()
     try:
-        # Convert to the generic format used by connection manager
-        config = {
+        # Config dict itself is now prepared by connection manager during validation
+        # We just pass the PAT via kwargs
+        config = {}
+        cm_kwargs = {
             "github_personal_access_token": connection_data.github_personal_access_token
         }
         
         connection = await connection_manager.create_connection(
             name=connection_data.name,
             type="github",
-            config=config
+            config=config,
+            **cm_kwargs
         )
         
         process_time = time.time() - start_time
@@ -368,7 +386,7 @@ async def create_github_connection(
             "id": connection.id,
             "name": connection.name,
             "type": connection.type,
-            "config": connection_manager._redact_sensitive_fields(connection.config)
+            "config": connection_manager._redact_sensitive_fields(connection.config, connection_type="github")
         }
     except ValueError as e:
         process_time = time.time() - start_time
@@ -414,10 +432,27 @@ async def create_connection(
     """
     start_time = time.time()
     try:
+        # Prepare kwargs for potential PAT update
+        cm_kwargs = {}
+        if connection_data.type == "github" and connection_data.config.get("github_personal_access_token"):
+            cm_kwargs["github_personal_access_token"] = connection_data.config["github_personal_access_token"]
+        
+        # Ensure name and config are provided if they exist in the request
+        update_name = connection_data.name if connection_data.name is not None else None
+        update_config = connection_data.config if connection_data.config is not None else {}
+        
+        # Get current connection details to provide original name if not updated
+        current_connection = await connection_manager.get_connection(connection_data.name)
+        if not current_connection:
+            raise HTTPException(status_code=404, detail=f"Connection {connection_data.name} not found")
+        
+        final_name = update_name if update_name is not None else current_connection.name
+        
         connection = await connection_manager.create_connection(
-            name=connection_data.name,
+            name=final_name,
             type=connection_data.type,
-            config=connection_data.config
+            config=update_config,
+            **cm_kwargs
         )
         
         process_time = time.time() - start_time
@@ -435,7 +470,7 @@ async def create_connection(
             "id": connection.id,
             "name": connection.name,
             "type": connection.type,
-            "config": connection_manager._redact_sensitive_fields(connection.config)
+            "config": connection_manager._redact_sensitive_fields(connection.config, connection_type=connection.type)
         }
     except ValueError as e:
         process_time = time.time() - start_time
@@ -485,10 +520,27 @@ async def update_connection(
     """
     start_time = time.time()
     try:
+        # Prepare kwargs for potential PAT update
+        cm_kwargs = {}
+        if connection_data.github_personal_access_token:
+            cm_kwargs["github_personal_access_token"] = connection_data.github_personal_access_token
+        
+        # Ensure name and config are provided if they exist in the request
+        update_name = connection_data.name if connection_data.name is not None else None
+        update_config = connection_data.config if connection_data.config is not None else {}
+        
+        # Get current connection details to provide original name if not updated
+        current_connection = await connection_manager.get_connection(connection_id)
+        if not current_connection:
+            raise HTTPException(status_code=404, detail=f"Connection {connection_id} not found")
+        
+        final_name = update_name if update_name is not None else current_connection.name
+        
         connection = await connection_manager.update_connection(
             connection_id=connection_id,
-            name=connection_data.name,
-            config=connection_data.config
+            name=final_name,
+            config=update_config,
+            **cm_kwargs
         )
         
         process_time = time.time() - start_time
@@ -506,7 +558,7 @@ async def update_connection(
             "id": connection.id,
             "name": connection.name,
             "type": connection.type,
-            "config": connection_manager._redact_sensitive_fields(connection.config)
+            "config": connection_manager._redact_sensitive_fields(connection.config, connection_type=connection.type)
         }
     except ValueError as e:
         process_time = time.time() - start_time
@@ -592,7 +644,7 @@ async def delete_connection(
 async def test_connection(
     connection_data: ConnectionTest,
     connection_manager: ConnectionManager = Depends(get_connection_manager)
-) -> Dict:
+) -> Dict[str, Any]:
     """
     Test a connection configuration
     
@@ -604,9 +656,15 @@ async def test_connection(
     """
     start_time = time.time()
     try:
-        is_valid = await connection_manager.test_connection(
+        # Prepare kwargs for type-specific test data (like PAT)
+        test_kwargs = {}
+        if connection_data.type == "github" and connection_data.github_personal_access_token:
+            test_kwargs["github_personal_access_token"] = connection_data.github_personal_access_token
+        
+        is_valid, message = await connection_manager.test_connection(
             connection_type=connection_data.type,
-            config=connection_data.config
+            config=connection_data.config,
+            **test_kwargs
         )
         
         process_time = time.time() - start_time
@@ -621,7 +679,7 @@ async def test_connection(
         
         return {
             "valid": is_valid,
-            "message": "Connection test successful" if is_valid else "Connection test failed"
+            "message": message
         }
     except ValueError as e:
         process_time = time.time() - start_time
@@ -730,238 +788,3 @@ async def get_connection_schema(
     except Exception as e: # Catch other potential errors
         connection_logger.error(f"Error getting schema for {connection_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to retrieve connection schema")
-
-
-@router.get("/{connection_id}/mcp/status")
-async def get_mcp_server_status(
-    connection_id: str,
-    connection_manager: ConnectionManager = Depends(get_connection_manager)
-) -> Dict:
-    """
-    Get the status of the MCP server for a connection
-    
-    Args:
-        connection_id: The ID of the connection
-        
-    Returns:
-        Status information for the MCP server
-    """
-    try:
-        # Get the connection
-        connection = await connection_manager.get_connection(connection_id)
-        
-        if not connection:
-            raise HTTPException(status_code=404, detail=f"Connection {connection_id} not found")
-        
-        # Convert to BaseConnectionConfig
-        base_connection = BaseConnectionConfig(
-            id=connection.id,
-            name=connection.name,
-            type=connection.type,
-            config=connection.config
-        )
-        
-        # Get the status from the connection
-        status = await base_connection.get_mcp_status()
-        
-        return {
-            "connection_id": connection_id,
-            "connection_name": connection.name,
-            "connection_type": connection.type,
-            "status": status["status"],
-            "address": status.get("address"),
-            "error": status.get("error")
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/{connection_id}/mcp/start")
-async def start_mcp_server(
-    connection_id: str,
-    connection_manager: ConnectionManager = Depends(get_connection_manager)
-) -> Dict:
-    """
-    Start the MCP server for a connection
-    
-    Args:
-        connection_id: The ID of the connection
-        
-    Returns:
-        Status information for the MCP server
-    """
-    correlation_id = str(uuid4())
-    connection_logger.info(
-        "Starting MCP server for connection",
-        extra={
-            'correlation_id': correlation_id,
-            'connection_id': connection_id
-        }
-    )
-    
-    try:
-        # Get the connection
-        connection = await connection_manager.get_connection(connection_id)
-        
-        if not connection:
-            raise HTTPException(status_code=404, detail=f"Connection {connection_id} not found")
-        
-        # Convert to BaseConnectionConfig
-        base_connection = BaseConnectionConfig(
-            id=connection.id,
-            name=connection.name,
-            type=connection.type,
-            config=connection.config
-        )
-        
-        # Start the MCP server
-        await base_connection.start_mcp_server()
-        
-        # Get the updated status
-        status = await base_connection.get_mcp_status()
-        
-        return {
-            "connection_id": connection_id,
-            "connection_name": connection.name,
-            "connection_type": connection.type,
-            "status": status["status"],
-            "address": status.get("address"),
-            "error": status.get("error")
-        }
-    except Exception as e:
-        connection_logger.error(
-            f"Failed to start MCP server",
-            extra={
-                'correlation_id': correlation_id,
-                'connection_id': connection_id,
-                'error': str(e)
-            },
-            exc_info=True
-        )
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/{connection_id}/mcp/stop")
-async def stop_mcp_server(
-    connection_id: str,
-    connection_manager: ConnectionManager = Depends(get_connection_manager)
-) -> Dict:
-    """
-    Stop the MCP server for a connection
-    
-    Args:
-        connection_id: The ID of the connection
-        
-    Returns:
-        Status information for the MCP server
-    """
-    correlation_id = str(uuid4())
-    connection_logger.info(
-        "Stopping MCP server for connection",
-        extra={
-            'correlation_id': correlation_id,
-            'connection_id': connection_id
-        }
-    )
-    
-    try:
-        # Get the connection
-        connection = await connection_manager.get_connection(connection_id)
-        
-        if not connection:
-            raise HTTPException(status_code=404, detail=f"Connection {connection_id} not found")
-        
-        # Convert to BaseConnectionConfig
-        base_connection = BaseConnectionConfig(
-            id=connection.id,
-            name=connection.name,
-            type=connection.type,
-            config=connection.config
-        )
-        
-        # Stop the MCP server
-        await base_connection.stop_mcp_server()
-        
-        # Get the updated status
-        status = await base_connection.get_mcp_status()
-        
-        return {
-            "connection_id": connection_id,
-            "connection_name": connection.name,
-            "connection_type": connection.type,
-            "status": status["status"],
-            "address": status.get("address"),
-            "error": status.get("error")
-        }
-    except Exception as e:
-        connection_logger.error(
-            f"Failed to stop MCP server",
-            extra={
-                'correlation_id': correlation_id,
-                'connection_id': connection_id,
-                'error': str(e)
-            },
-            exc_info=True
-        )
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/mcp/status")
-async def get_all_mcp_server_statuses(
-    request: Request
-) -> Dict:
-    """
-    Get the status of all MCP servers
-    
-    Returns:
-        Status information for all MCP servers
-    """
-    try:
-        # Get managers from the application state
-        mcp_manager = request.app.state.mcp_manager
-        connection_manager = request.app.state.connection_manager
-        
-        # Get statuses of locally managed MCPs
-        local_mcp_statuses = mcp_manager.get_all_server_statuses()
-        
-        # Get all connections
-        all_connections = await connection_manager.get_all_connections() # Assuming this returns List[Dict] or similar
-        
-        all_statuses = {}
-        for conn_dict in all_connections:
-            conn_id = conn_dict['id']
-            conn_type = conn_dict['type']
-            conn_name = conn_dict['name']
-            
-            status_info = {
-                "connection_id": conn_id,
-                "connection_name": conn_name,
-                "connection_type": conn_type,
-                "status": "unknown", # Default status
-                "address": None,
-                "error": None
-            }
-
-            if conn_id in local_mcp_statuses:
-                # Use status from the MCP manager for locally managed servers
-                local_status = local_mcp_statuses[conn_id]
-                status_info["status"] = local_status.get("status", "unknown")
-                status_info["address"] = local_status.get("address")
-                status_info["error"] = local_status.get("error")
-            else:
-                # Locally managed type but not in mcp_manager status (e.g., never started)
-                status_info["status"] = "stopped"
-                
-            all_statuses[conn_id] = status_info
-            
-        return {"servers": all_statuses}
-    except Exception as e:
-        connection_logger.error(
-            "Error retrieving all MCP server statuses",
-            extra={
-                'error': str(e),
-                'error_type': type(e).__name__
-            },
-            exc_info=True
-        )
-        raise HTTPException(status_code=500, detail=str(e))

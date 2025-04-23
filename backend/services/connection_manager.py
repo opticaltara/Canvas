@@ -9,10 +9,13 @@ import logging
 import os
 from typing import Dict, List, Optional, Tuple, Union, Any
 from uuid import uuid4
+import asyncio
 
 from pydantic import BaseModel, Field
 import aiofiles
-from sqlalchemy.ext.asyncio import AsyncSession
+
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
 from backend.config import get_settings
 from backend.db.database import get_db_session
@@ -32,48 +35,33 @@ class CorrelationIdFilter(logging.Filter):
 # Add the filter to our logger
 logger.addFilter(CorrelationIdFilter())
 
+# Define the command/args template for GitHub MCP stdio
+GITHUB_MCP_COMMAND = ["docker", "run", "-i", "--rm"]
+GITHUB_MCP_ARGS_TEMPLATE = [
+    # PAT environment variable will be added dynamically during validation/agent execution
+    "ghcr.io/github/github-mcp-server"
+]
+GRAFANA_MCP_COMMAND = ["mcp-grafana"] # New Grafana command
+
 class BaseConnectionConfig(BaseModel):
     """Base connection configuration"""
     id: str
     name: str
     type: str
     config: Dict[str, Any] = Field(default_factory=dict)
-    mcp_status: Dict[str, Any] = Field(default_factory=lambda: {"status": "stopped"})
-    
-    async def get_mcp_status(self) -> Dict[str, Any]:
-        """Get the MCP server status"""
-        # Get the MCP server manager to get the actual status
-        from backend.mcp.manager import get_mcp_server_manager
-        mcp_manager = get_mcp_server_manager()
-        status = mcp_manager.get_server_status(self.id)
-        self.mcp_status = status
-        return status
-    
-    async def start_mcp_server(self) -> None:
-        """Start the MCP server"""
-        from backend.mcp.manager import get_mcp_server_manager
-        mcp_manager = get_mcp_server_manager()
-        await mcp_manager.start_mcp_server(self)
-        self.mcp_status = mcp_manager.get_server_status(self.id)
-    
-    async def stop_mcp_server(self) -> None:
-        """Stop the MCP server"""
-        from backend.mcp.manager import get_mcp_server_manager
-        mcp_manager = get_mcp_server_manager()
-        await mcp_manager.stop_server(self.id)
-        self.mcp_status = mcp_manager.get_server_status(self.id)
 
 class GrafanaConnectionConfig(BaseConnectionConfig):
-    """Grafana connection configuration"""
+    """Grafana stdio connection configuration"""
     type: str = "grafana"
-    url: str
-    api_key: str
-    
+    # url and api_key are now stored within the base 'config' dict, specifically under 'env'
+    # config field is inherited from BaseConnectionConfig
+
 class GithubConnectionConfig(BaseConnectionConfig):
-    """GitHub connection configuration (uses Docker MCP server)"""
+    """GitHub connection configuration (uses stdio MCP server)"""
     type: str = "github"
-    github_personal_access_token: str
-    
+    # Stores stdio command/args template in base 'config', PAT is handled separately within 'config'
+    # config field is inherited from BaseConnectionConfig
+
 # Generic fallback for other types
 class GenericConnectionConfig(BaseConnectionConfig):
     """Generic connection configuration"""
@@ -88,17 +76,18 @@ class ConnectionConfig(BaseConnectionConfig):
     ]:
         """Convert to a type-specific configuration"""
         if self.type == "grafana":
+            # Returns the Grafana config, the base 'config' dict holds the details (command, args, env, url, api_key)
             return GrafanaConnectionConfig(
                 id=self.id,
                 name=self.name,
-                url=self.config.get("url", ""),
-                api_key=self.config.get("api_key", "")
+                config=self.config
             )
         elif self.type == "github":
+            # Returns the GitHub config, the base 'config' dict holds the details (command, args template, pat)
             return GithubConnectionConfig(
                 id=self.id,
                 name=self.name,
-                github_personal_access_token=self.config.get("github_personal_access_token", "")
+                config=self.config # Contains command and args template now
             )
         else:
             return GenericConnectionConfig(
@@ -115,31 +104,13 @@ class ConnectionConfig(BaseConnectionConfig):
         GenericConnectionConfig
     ]) -> 'ConnectionConfig':
         """Create from a type-specific configuration"""
-        if isinstance(config, GrafanaConnectionConfig):
-            return cls(
+        # For stdio types (Grafana, GitHub) and Generic, the relevant details are already in the specific config's 'config' dict
+        if isinstance(config, (GrafanaConnectionConfig, GithubConnectionConfig, GenericConnectionConfig)):
+             return cls(
                 id=config.id,
                 name=config.name,
                 type=config.type,
-                config={
-                    "url": config.url,
-                    "api_key": config.api_key
-                }
-            )
-        elif isinstance(config, GithubConnectionConfig):
-            return cls(
-                id=config.id,
-                name=config.name,
-                type=config.type,
-                config={
-                    "github_personal_access_token": config.github_personal_access_token
-                }
-            )
-        elif isinstance(config, GenericConnectionConfig):
-            return cls(
-                id=config.id,
-                name=config.name,
-                type=config.type,
-                config=config.config
+                config=config.config # The specific config's 'config' dict holds everything needed for the base config
             )
         else:
             raise ValueError(f"Unsupported config type: {type(config)}")
@@ -164,7 +135,6 @@ class ConnectionManager:
         self.connections: Dict[str, ConnectionConfig] = {}
         self.default_connections: Dict[str, str] = {}
         self.settings = get_settings()
-        self.active_mcp_servers = {}
     
     async def initialize(self) -> None:
         """Initialize and load connections"""
@@ -177,13 +147,7 @@ class ConnectionManager:
     async def close(self) -> None:
         """Close all connections and cleanup resources"""
         correlation_id = str(uuid4())
-        logger.info("Closing ConnectionManager and cleaning up resources", extra={'correlation_id': correlation_id})
-        # Stop any running MCP servers
-        for server_id, server in self.active_mcp_servers.items():
-            if hasattr(server, 'stop') and callable(server.stop):
-                logger.debug(f"Stopping MCP server {server_id}", extra={'correlation_id': correlation_id})
-                await server.stop()
-        
+        logger.info("Closing ConnectionManager", extra={'correlation_id': correlation_id})
         logger.info("ConnectionManager closed successfully", extra={'correlation_id': correlation_id})
     
     async def get_connection(self, connection_id: str) -> Optional[ConnectionConfig]:
@@ -281,7 +245,7 @@ class ConnectionManager:
                         "id": conn.to_dict()["id"],
                         "name": conn.to_dict()["name"],
                         "type": conn.to_dict()["type"],
-                        "config": self._redact_sensitive_fields(conn.to_dict()["config"])
+                        "config": self._redact_sensitive_fields(conn.to_dict()["config"], conn_dict["type"])
                     }
                     for conn in db_connections
                 ]
@@ -293,7 +257,7 @@ class ConnectionManager:
                     "id": conn.id,
                     "name": conn.name,
                     "type": conn.type,
-                    "config": self._redact_sensitive_fields(conn.config)
+                    "config": self._redact_sensitive_fields(conn.config, conn.type)
                 }
                 for conn in self.connections.values()
             ]
@@ -363,14 +327,15 @@ class ConnectionManager:
         # No connection found
         return None
     
-    async def create_connection(self, name: str, type: str, config: Dict) -> ConnectionConfig:
+    async def create_connection(self, name: str, type: str, config: Dict, **kwargs) -> ConnectionConfig:
         """
         Create a new connection
         
         Args:
             name: The name of the connection
             type: The type of connection
-            config: The connection configuration
+            config: The base connection configuration (may be empty for some types)
+            **kwargs: Additional type-specific arguments (e.g., github_pat)
             
         Returns:
             The created connection
@@ -380,18 +345,27 @@ class ConnectionManager:
         """
         correlation_id = str(uuid4())
         logger.info(f"Creating new {type} connection: {name}", extra={'correlation_id': correlation_id})
-        
-        # Validate the connection
+
+        # Validate the connection and prepare final config
         logger.debug(f"Validating connection {name}", extra={'correlation_id': correlation_id})
-        is_valid, message = self._validate_and_prepare_connection(None, type, config)
+        
+        # Pass kwargs for type-specific validation data (like PAT)
+        is_valid, message, prepared_config = await self._validate_and_prepare_connection(
+            connection_id=None, 
+            connection_type=type, 
+            initial_config=config, 
+            **kwargs 
+        )
+        
         if not is_valid:
             logger.error(f"Connection validation failed for {name}: {message}", extra={'correlation_id': correlation_id})
             raise ValueError(message)
-        
-        # Create the connection in the database
+
+        # Create the connection in the database with the prepared config
         async with get_db_session() as session:
             repo = ConnectionRepository(session)
-            db_connection = await repo.create(name, type, config)
+            # Use prepared_config which contains validated/structured data (like command/args for github)
+            db_connection = await repo.create(name, type, prepared_config) 
             
             # Convert to ConnectionConfig model
             connection_dict = db_connection.to_dict()
@@ -399,29 +373,32 @@ class ConnectionManager:
                 id=connection_dict["id"],
                 name=connection_dict["name"],
                 type=connection_dict["type"],
-                config=connection_dict["config"]
+                config=connection_dict["config"] # This is the prepared_config
             )
-        
+
         # Add to in-memory connections
         self.connections[connection.id] = connection
-        
+
         # If this is the first connection for this type, set it as default
-        if not self.get_default_connection(type):
+        # Check default *after* potential creation
+        existing_default = await self.get_default_connection(type)
+        if not existing_default:
             logger.info(f"Setting {name} ({connection.id}) as default {type} connection", extra={'correlation_id': correlation_id})
             self.default_connections[type] = connection.id
             await self.set_default_connection(connection.id)
-        
+
         logger.info(f"Successfully created connection {name} ({connection.id})", extra={'correlation_id': correlation_id})
         return connection
     
-    async def update_connection(self, connection_id: str, name: str, config: Dict) -> ConnectionConfig:
+    async def update_connection(self, connection_id: str, name: str, config: Dict, **kwargs) -> ConnectionConfig:
         """
         Update an existing connection
         
         Args:
             connection_id: The ID of the connection to update
             name: The new name of the connection
-            config: The new connection configuration
+            config: The new base connection configuration
+            **kwargs: Additional type-specific arguments (e.g., github_pat for re-validation)
             
         Returns:
             The updated connection
@@ -429,40 +406,48 @@ class ConnectionManager:
         Raises:
             ValueError: If the connection is not found or validation fails
         """
-        logger.info(f"Updating connection {connection_id} with new name: {name}")
+        correlation_id = str(uuid4())
+        logger.info(f"Updating connection {connection_id} with new name: {name}", extra={'correlation_id': correlation_id})
         connection = await self.get_connection(connection_id)
         if not connection:
-            logger.error(f"Connection not found for update: {connection_id}")
+            logger.error(f"Connection not found for update: {connection_id}", extra={'correlation_id': correlation_id})
             raise ValueError(f"Connection not found: {connection_id}")
+
+        # Validate the connection and prepare final config
+        logger.debug(f"Validating updated connection {name} ({connection_id})", extra={'correlation_id': correlation_id})
         
-        # Validate the connection
-        logger.debug(f"Validating updated connection {name} ({connection_id})")
-        is_valid, message = self._validate_and_prepare_connection(connection_id, connection.type, config)
+        is_valid, message, prepared_config = await self._validate_and_prepare_connection(
+            connection_id=connection_id, 
+            connection_type=connection.type, 
+            initial_config=config, 
+            **kwargs # Pass PAT if provided for re-validation
+        )
+        
         if not is_valid:
-            logger.error(f"Connection validation failed for update {name} ({connection_id}): {message}")
+            logger.error(f"Connection validation failed for update {name} ({connection_id}): {message}", extra={'correlation_id': correlation_id})
             raise ValueError(message)
-        
-        # Update the connection in the database
+
+        # Update the connection in the database with the prepared config
         async with get_db_session() as session:
             repo = ConnectionRepository(session)
-            db_connection = await repo.update(connection_id, name, config)
+            db_connection = await repo.update(connection_id, name, prepared_config)
             if not db_connection:
-                logger.error(f"Failed to update connection {connection_id} in database")
+                logger.error(f"Failed to update connection {connection_id} in database", extra={'correlation_id': correlation_id})
                 raise ValueError(f"Failed to update connection: {connection_id}")
-            
+
             # Convert to ConnectionConfig model
             connection_dict = db_connection.to_dict()
             updated_connection = ConnectionConfig(
                 id=connection_dict["id"],
                 name=connection_dict["name"],
                 type=connection_dict["type"],
-                config=connection_dict["config"]
+                config=connection_dict["config"] # This is the prepared_config
             )
-        
+
         # Update the in-memory connection
         self.connections[connection_id] = updated_connection
-        
-        logger.info(f"Successfully updated connection {name} ({connection_id})")
+
+        logger.info(f"Successfully updated connection {name} ({connection_id})", extra={'correlation_id': correlation_id})
         return updated_connection
     
     async def delete_connection(self, connection_id: str) -> None:
@@ -533,96 +518,318 @@ class ConnectionManager:
             repo = ConnectionRepository(session)
             await repo.set_default_connection(connection.type, connection_id)
     
-    async def test_connection(self, connection_type: str, config: Dict) -> bool:
+    async def test_connection(self, connection_type: str, config: Dict, **kwargs) -> Tuple[bool, str]:
         """
-        Test a connection configuration
+        Test a connection configuration without saving it.
         
         Args:
             connection_type: The type of connection
             config: The connection configuration to test
+            **kwargs: Additional type-specific arguments (e.g., github_pat)
             
         Returns:
-            True if the connection is valid, False otherwise
+            Tuple (is_valid: bool, message: str)
         """
-        logger.debug(f"Testing {connection_type} connection")
+        logger.debug(f"Testing {connection_type} connection configuration")
         try:
-            # Basic validation for each type
-            if connection_type == "grafana":
-                if not config.get("url") or not config.get("api_key"):
-                    logger.warning("Grafana connection missing required fields: url or api_key")
-                    return False
-                
-                # Test connection by contacting MCP server
-                from backend.mcp.manager import get_mcp_server_manager
-                
-                # Create a temporary connection config to test
-                test_conn = ConnectionConfig(
-                    id=str(uuid4()),
-                    name="Test Connection", 
-                    type="grafana",
-                    config=config
-                )
-                
-                # Start MCP server for test connection
-                mcp_manager = get_mcp_server_manager()
-                try:
-                    server_addresses = await mcp_manager.start_mcp_servers([test_conn])
-                    if test_conn.id in server_addresses:
-                        # Successfully started MCP server
-                        await mcp_manager.stop_server(test_conn.id)
-                        return True
-                    return False
-                except Exception as e:
-                    logger.error(f"Failed to test Grafana connection: {str(e)}")
-                    return False
-            
-            elif connection_type == "github":
-                if not config.get("github_personal_access_token"):
-                    logger.warning("GitHub connection missing required field: github_personal_access_token")
-                    return False
-                # Basic validation: token exists. Actual test requires starting MCP.
-                # We could try starting/stopping the MCP here like Grafana, but deferring for now.
-                # For now, just check token presence.
-                # TODO: Implement actual MCP start/stop test for GitHub connection.
-                return True 
-            
-            else:
-                logger.error(f"Unknown connection type: {connection_type}")
-                return False
+            # Delegate to the validation logic
+            is_valid, message, _ = await self._validate_and_prepare_connection(
+                connection_id=None, # No ID for testing
+                connection_type=connection_type,
+                initial_config=config,
+                is_test_run=True, # Indicate this is just a test
+                **kwargs # Pass PAT etc.
+            )
+            return is_valid, message
+        except Exception as e:
+            logger.error(f"Error testing connection configuration: {str(e)}")
+            return False, f"Error testing connection: {str(e)}"
+
+    async def _validate_and_prepare_connection(
+        self, 
+        connection_id: Optional[str], 
+        connection_type: str, 
+        initial_config: Dict,
+        is_test_run: bool = False, # Flag to indicate if this is just a test
+        **kwargs
+    ) -> Tuple[bool, str, Dict]:
+        """
+        Validate a connection configuration and prepare it for saving.
         
-        except Exception as e:
-            logger.error(f"Error testing connection: {str(e)}")
-            return False
-    
-    def _validate_and_prepare_connection(self, connection_id, connection_type, config) -> Tuple[bool, str]:
+        Args:
+            connection_id: ID if updating, None if creating or testing.
+            connection_type: Type of connection.
+            initial_config: Configuration dictionary from the request.
+            is_test_run: If True, don't prepare for saving, just validate.
+            **kwargs: Additional type-specific arguments (e.g., github_pat).
+
+        Returns:
+            Tuple (is_valid: bool, message: str, prepared_config: Dict)
+            prepared_config is the config to be saved to the DB.
         """
-        Validate a connection configuration
-        """
+        correlation_id = kwargs.get('correlation_id', str(uuid4()))
+        logger.debug(f"Validating connection type {connection_type}", extra={'correlation_id': correlation_id})
+        
         try:
             if connection_type == "grafana":
-                if not config.get("url") or not config.get("api_key"):
-                    logger.warning("Grafana connection missing required fields: url, api_key")
-                    return False, "Grafana connection missing required fields: url, api_key"
-                
-                # TODO: Actually test the connection to Grafana
-                return True, "Connection validated"
+                grafana_url = kwargs.get("grafana_url")
+                grafana_api_key = kwargs.get("grafana_api_key")
+
+                # Attempt to retrieve from existing config if not provided (e.g., during a test or update without changes)
+                if not grafana_url and connection_id:
+                    existing_conn = await self.get_connection(connection_id)
+                    if existing_conn and existing_conn.config.get("grafana_url"):
+                         grafana_url = existing_conn.config["grafana_url"]
+                         logger.info("Using existing Grafana URL for validation.", extra={'correlation_id': correlation_id})
+                if not grafana_api_key and connection_id:
+                     existing_conn = await self.get_connection(connection_id)
+                     # Check both the direct key and inside env for robustness
+                     if existing_conn and existing_conn.config.get("grafana_api_key"):
+                         grafana_api_key = existing_conn.config["grafana_api_key"]
+                         logger.info("Using existing Grafana API Key (top-level) for validation.", extra={'correlation_id': correlation_id})
+                     elif existing_conn and isinstance(existing_conn.config.get("env"), dict) and existing_conn.config["env"].get("GRAFANA_API_KEY"):
+                         grafana_api_key = existing_conn.config["env"]["GRAFANA_API_KEY"]
+                         logger.info("Using existing Grafana API Key (from env) for validation.", extra={'correlation_id': correlation_id})
+
+
+                if not grafana_url or not grafana_api_key:
+                    raise ValueError("Grafana URL and API Key are required.")
+
+                is_valid, message = await self._validate_grafana_stdio(grafana_url, grafana_api_key, correlation_id)
+                if not is_valid:
+                    return False, message, {}
+
+                # Prepare config for saving (command, args, env, and original url/key for reference)
+                prepared_config = {
+                    "mcp_command": GRAFANA_MCP_COMMAND,
+                    "mcp_args": [], # Grafana MCP takes no command line args
+                    "env": {
+                        "GRAFANA_URL": grafana_url,
+                        "GRAFANA_API_KEY": grafana_api_key # Needs redaction before display
+                    },
+                    # Store original values for easier reference/updates, mark api_key for redaction
+                    "grafana_url": grafana_url,
+                    "grafana_api_key": grafana_api_key
+                }
+                logger.warning("Storing Grafana API Key directly in config. Needs encryption/redaction!", extra={'correlation_id': correlation_id})
+                return True, "Grafana stdio connection validated successfully", prepared_config
+
             elif connection_type == "github":
-                if not config.get("github_personal_access_token"):
-                    logger.warning("GitHub connection missing required field: github_personal_access_token")
-                    return False, "GitHub connection missing required field: github_personal_access_token"
-                # Allow generic and github through without specific validation for now
-                if connection_type not in ["generic", "github", "python"]: 
-                    logger.warning(f"No specific validation logic for connection type: {connection_type}")
-                return True, "Connection validated (or validation not implemented)"
-            else:
-                # Allow generic and github through without specific validation for now
-                if connection_type not in ["generic", "github", "python"]: 
-                    logger.warning(f"No specific validation logic for connection type: {connection_type}")
-                return True, "Connection validated (or validation not implemented)"
+                # GitHub stdio validation
+                github_pat = kwargs.get("github_personal_access_token")
+                existing_config = None
                 
+                if not github_pat:
+                    # If updating/testing and PAT not provided, try to get it from existing config
+                    if connection_id:
+                        existing_conn = await self.get_connection(connection_id)
+                        if existing_conn and existing_conn.config.get("github_pat"):
+                            # Ensure retrieved PAT is a string
+                            potential_pat = existing_conn.config.get("github_pat")
+                            if isinstance(potential_pat, str):
+                                github_pat = potential_pat
+                            else:
+                                # Log error if PAT exists but is not a string?
+                                logger.error(f"Stored github_pat for {connection_id} is not a string.", extra={'correlation_id': correlation_id})
+                                # Proceed as if PAT was not found
+                                pass 
+                            existing_config = existing_conn.config # Keep existing config if validation passes
+                            logger.info("Using existing GitHub PAT from DB for validation.", extra={'correlation_id': correlation_id})
+                        else:
+                            # If no PAT provided and none exists in DB, fail validation unless just updating name
+                            if not is_test_run and not kwargs.get("config"): # Allow name-only updates without PAT
+                                logger.info("GitHub PAT not provided or found, but allowing name-only update.", extra={'correlation_id': correlation_id})
+                                existing_conn_config = existing_conn.config if existing_conn else {}
+                                return True, "GitHub PAT not provided, name update allowed.", existing_conn_config
+                            else:
+                                msg = "GitHub connection requires Personal Access Token for validation (not provided and not found in existing config)."
+                                logger.warning(msg, extra={'correlation_id': correlation_id})
+                                return False, msg, {}
+                    else: # Create or Test requires PAT if not updating
+                        msg = "GitHub connection requires Personal Access Token for validation."
+                        logger.warning(msg, extra={'correlation_id': correlation_id})
+                        return False, msg, {}
+
+                # Check if github_pat is now a valid string before validating
+                if not isinstance(github_pat, str) or not github_pat:
+                    # This case should ideally be caught earlier, but double-check
+                    msg = "Failed to obtain a valid GitHub PAT for validation."
+                    logger.error(msg, extra={'correlation_id': correlation_id})
+                    return False, msg, {}
+                
+                # Perform validation using the obtained PAT
+                is_valid, message = await self._validate_github_stdio(github_pat, correlation_id)
+                
+                if not is_valid:
+                    return False, message, {}
+                
+                # If validation passed using an existing PAT, return the existing config
+                if existing_config is not None:
+                    logger.info("Validation with existing PAT successful, returning existing config.", extra={'correlation_id': correlation_id})
+                    return True, message, existing_config
+                    
+                # Prepare config for saving (command, args template, AND PAT)
+                # !!! SECURITY WARNING: Storing PAT plaintext is not recommended! Encrypt in production. !!!
+                prepared_config = {
+                    "mcp_command": GITHUB_MCP_COMMAND,
+                    "mcp_args_template": GITHUB_MCP_ARGS_TEMPLATE,
+                    "github_pat": github_pat # Store PAT directly (NEEDS ENCRYPTION IN PROD)
+                }
+                logger.warning("Storing GitHub PAT directly in config. Needs encryption!", extra={'correlation_id': correlation_id})
+                return True, "GitHub stdio connection validated successfully", prepared_config
+                
+            elif connection_type == "python":
+                # No specific validation needed for python type currently
+                logger.info("No specific validation for Python connection type.", extra={'correlation_id': correlation_id})
+                return True, "Python connection validated", initial_config # Return initial config
+
+            else:
+                # Allow generic/unknown through without specific validation for now
+                logger.warning(f"No specific validation logic for connection type: {connection_type}", extra={'correlation_id': correlation_id})
+                return True, f"Connection validated (or validation not implemented for type {connection_type})", initial_config # Return initial config
+
         except Exception as e:
-            logger.error(f"Error validating connection: {e}")
-            return False, f"Error validating connection: {str(e)}"
+            logger.error(f"Error validating connection: {e}", extra={'correlation_id': correlation_id}, exc_info=True)
+            return False, f"Error validating connection: {str(e)}", {}
+
+    async def _validate_github_stdio(self, github_pat: str, correlation_id: str) -> Tuple[bool, str]:
+        """
+        Validate GitHub connection by running a test MCP stdio session.
+        
+        Args:
+            github_pat: The GitHub Personal Access Token.
+            correlation_id: For logging.
+
+        Returns:
+            Tuple (is_valid: bool, message: str)
+        """
+        logger.info("Performing GitHub stdio validation", extra={'correlation_id': correlation_id})
+        
+        # Dynamically create args with the PAT environment variable
+        dynamic_args = [
+            f"-e", f"GITHUB_PERSONAL_ACCESS_TOKEN={github_pat}",
+            *GITHUB_MCP_ARGS_TEMPLATE # Append the rest of the template
+        ]
+        
+        server_params = StdioServerParameters(
+            command=GITHUB_MCP_COMMAND[0], # 'docker'
+            args=GITHUB_MCP_COMMAND[1:] + dynamic_args, # combine 'run -i --rm' with dynamic args
+            # TODO: Consider adding working directory if needed
+            # env={"GITHUB_PERSONAL_ACCESS_TOKEN": github_pat} # Alternative: pass via env if StdioServerParameters supports it directly
+        )
+        
+        try:
+            logger.debug(f"Attempting stdio_client connection with params: {server_params}", extra={'correlation_id': correlation_id})
+            async with stdio_client(server_params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    logger.info("Initializing MCP session for GitHub validation...", extra={'correlation_id': correlation_id})
+                    # Set a timeout for initialization
+                    init_task = asyncio.create_task(session.initialize())
+                    try:
+                        await asyncio.wait_for(init_task, timeout=30.0) # 30 second timeout for initialize
+                    except asyncio.TimeoutError:
+                         logger.error("Timeout during GitHub MCP session initialization", extra={'correlation_id': correlation_id})
+                         return False, "Validation failed: Timeout initializing MCP session. Check Docker, PAT, and network."
+                    except Exception as init_err:
+                        logger.error(f"Error during GitHub MCP session initialization: {init_err}", extra={'correlation_id': correlation_id})
+                        return False, f"Validation failed: Error initializing MCP session: {init_err}"
+
+                    logger.info("Listing tools via MCP session for GitHub validation...", extra={'correlation_id': correlation_id})
+                    # Set a timeout for list_tools
+                    list_tools_task = asyncio.create_task(session.list_tools())
+                    try:
+                         tools = await asyncio.wait_for(list_tools_task, timeout=15.0) # 15 second timeout
+                    except asyncio.TimeoutError:
+                         logger.error("Timeout during GitHub MCP list_tools call", extra={'correlation_id': correlation_id})
+                         return False, "Validation failed: Timeout listing tools via MCP. Check server logs."
+                    except Exception as list_err:
+                        logger.error(f"Error during GitHub MCP list_tools call: {list_err}", extra={'correlation_id': correlation_id})
+                        return False, f"Validation failed: Error listing tools via MCP: {list_err}"
+
+                    # Basic check: Did we get a response with tools?
+                    if tools and tools.tools:
+                        logger.info(f"GitHub stdio validation successful. Found {len(tools.tools)} tools.", extra={'correlation_id': correlation_id})
+                        return True, "GitHub stdio connection validated successfully."
+                    else:
+                        logger.warning("GitHub stdio validation potentially failed: No tools listed.", extra={'correlation_id': correlation_id})
+                        # Consider this a failure, as we expect tools
+                        return False, "Validation failed: MCP server connected but reported no tools."
+
+        except FileNotFoundError as e:
+             logger.error(f"Validation failed: Command not found - {e}. Is Docker installed and in PATH?", extra={'correlation_id': correlation_id})
+             return False, f"Validation failed: Required command '{e.filename}' not found. Ensure Docker is installed and accessible."
+        except ConnectionRefusedError as e:
+             logger.error(f"Validation failed: Connection refused - {e}. Docker daemon running? Permissions correct?", extra={'correlation_id': correlation_id})
+             return False, "Validation failed: Connection refused. Ensure Docker daemon is running and accessible."
+        except Exception as e:
+            logger.error(f"GitHub stdio validation failed with exception: {e}", extra={'correlation_id': correlation_id}, exc_info=True)
+            # Provide a more user-friendly message
+            error_type = type(e).__name__
+            return False, f"Validation failed: An unexpected error occurred ({error_type}). Check logs and ensure Docker is configured correctly."
+
+    async def _validate_grafana_stdio(self, grafana_url: str, grafana_api_key: str, correlation_id: str) -> Tuple[bool, str]:
+        """Validate Grafana connection by running a test MCP stdio session."""
+        logger.info("Performing Grafana stdio validation", extra={'correlation_id': correlation_id})
+
+        env_vars = {
+            "GRAFANA_URL": grafana_url,
+            "GRAFANA_API_KEY": grafana_api_key
+        }
+
+        # mcp-grafana takes no command line args, config is via env vars
+        server_params = StdioServerParameters(
+            command=GRAFANA_MCP_COMMAND[0], # 'mcp-grafana'
+            args=[],
+            env=env_vars
+        )
+
+        try:
+            logger.debug(f"Attempting stdio_client connection with Grafana params: {server_params}", extra={'correlation_id': correlation_id})
+            async with stdio_client(server_params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    logger.info("Initializing MCP session for Grafana validation...", extra={'correlation_id': correlation_id})
+                    # Set a timeout for initialization
+                    init_task = asyncio.create_task(session.initialize())
+                    try:
+                        await asyncio.wait_for(init_task, timeout=30.0) # 30 second timeout
+                    except asyncio.TimeoutError:
+                         logger.error("Timeout during Grafana MCP session initialization", extra={'correlation_id': correlation_id})
+                         return False, "Validation failed: Timeout initializing Grafana MCP session. Check mcp-grafana binary, URL, API key, and network."
+                    except Exception as init_err:
+                        logger.error(f"Error during Grafana MCP session initialization: {init_err}", extra={'correlation_id': correlation_id})
+                        # Provide more specific error if possible, e.g., connection refused
+                        return False, f"Validation failed: Error initializing Grafana MCP session: {init_err}"
+
+                    logger.info("Listing tools via MCP session for Grafana validation...", extra={'correlation_id': correlation_id})
+                    # Set a timeout for list_tools
+                    list_tools_task = asyncio.create_task(session.list_tools())
+                    try:
+                         tools = await asyncio.wait_for(list_tools_task, timeout=15.0) # 15 second timeout
+                    except asyncio.TimeoutError:
+                         logger.error("Timeout during Grafana MCP list_tools call", extra={'correlation_id': correlation_id})
+                         return False, "Validation failed: Timeout listing tools via Grafana MCP. Check server logs."
+                    except Exception as list_err:
+                        logger.error(f"Error during Grafana MCP list_tools call: {list_err}", extra={'correlation_id': correlation_id})
+                        return False, f"Validation failed: Error listing tools via Grafana MCP: {list_err}"
+
+                    # Basic check: Did we get tools? Grafana MCP should provide some.
+                    if tools and tools.tools:
+                        logger.info(f"Grafana stdio validation successful. Found {len(tools.tools)} tools.", extra={'correlation_id': correlation_id})
+                        return True, "Grafana stdio connection validated successfully."
+                    else:
+                        logger.warning("Grafana stdio validation potentially failed: No tools listed.", extra={'correlation_id': correlation_id})
+                        # Consider this a failure, as we expect tools (e.g., query_prometheus, query_loki)
+                        return False, "Validation failed: Grafana MCP server connected but reported no tools. Check Grafana setup or mcp-grafana logs."
+
+        except FileNotFoundError:
+             logger.error(f"Validation failed: Command '{GRAFANA_MCP_COMMAND[0]}' not found. Was it installed correctly in the Docker image?", extra={'correlation_id': correlation_id})
+             return False, f"Validation failed: Required command '{GRAFANA_MCP_COMMAND[0]}' not found. Ensure it's installed and in PATH."
+        except Exception as e:
+            # Catch potential OS errors during process start e.g. permission denied
+            logger.error(f"Error during Grafana stdio validation process startup or communication: {e}", extra={'correlation_id': correlation_id}, exc_info=True)
+            return False, f"Validation failed due to system error: {str(e)}"
+        # Fallback if logic doesn't return explicitly
+        return False, "Unknown validation error for Grafana stdio."
 
     async def get_connection_schema(self, connection_id: str) -> Dict:
         """
@@ -648,12 +855,13 @@ class ConnectionManager:
             logger.error(f"Error retrieving schema: {e}")
             return {"error": f"Error retrieving schema: {str(e)}"}
     
-    def _redact_sensitive_fields(self, config: Dict) -> Dict:
+    def _redact_sensitive_fields(self, config: Dict, connection_type: Optional[str] = None) -> Dict:
         """
         Redact sensitive fields from a connection configuration
         
         Args:
             config: The configuration to redact
+            connection_type: The type of connection (for context, e.g., github should show PAT)
             
         Returns:
             The redacted configuration
@@ -661,15 +869,41 @@ class ConnectionManager:
         sensitive_fields = [
             "password", "secret", "key", "token", "api_key", 
             "aws_secret_access_key", "private_key",
-            "github_personal_access_token"
+            "github_pat", # Add github_pat to the sensitive list
+            "github_personal_access_token" # Keep this for redacting input if ever present
         ]
         
         redacted_config = config.copy()
         
-        for key in redacted_config:
-            if any(sensitive in key.lower() for sensitive in sensitive_fields):
+        # Remove PAT if present, regardless of type, before general redaction
+        if "github_pat" in redacted_config:
+            redacted_config["github_pat"] = "********"
+        if "github_personal_access_token" in redacted_config: # Also redact this input key if present
+            redacted_config["github_personal_access_token"] = "********"
+
+        # General redaction based on key names
+        for key in list(redacted_config.keys()): # Iterate over keys list for safe removal
+            # Skip keys already redacted
+            if redacted_config[key] == "********":
+                continue
+            if isinstance(redacted_config[key], str) and any(sensitive_part in key.lower() for sensitive_part in sensitive_fields):
                 redacted_config[key] = "********"
-        
+
+        # Type-specific redaction (e.g., nested keys)
+        if connection_type == "github": # No change needed here if github_pat is already covered
+            pass
+        elif connection_type == "grafana":
+            # Redact the top-level key if present
+            if "grafana_api_key" in redacted_config:
+                 redacted_config["grafana_api_key"] = "***REDACTED***"
+            # Redact the key within the 'env' dict
+            if "env" in redacted_config and isinstance(redacted_config["env"], dict):
+                 if "GRAFANA_API_KEY" in redacted_config["env"]:
+                     # Ensure we modify a copy if 'env' might be shared or reused
+                     if redacted_config["env"] is config.get("env"): # Check if it's the same dict instance
+                          redacted_config["env"] = redacted_config["env"].copy()
+                     redacted_config["env"]["GRAFANA_API_KEY"] = "***REDACTED***"
+
         return redacted_config
     
     async def _load_connections(self) -> None:

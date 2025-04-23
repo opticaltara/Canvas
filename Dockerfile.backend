@@ -2,11 +2,12 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies, Docker CLI, and Deno
+# Install system dependencies, Docker CLI, Deno, and Go
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     gnupg \
+    golang-go \
  && install -m 0755 -d /etc/apt/keyrings \
  && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
  && chmod a+r /etc/apt/keyrings/docker.asc \
@@ -21,7 +22,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     docker-ce-cli \
     nodejs \
     npm \
+    # Clean up apt lists and Go build cache
  && rm -rf /var/lib/apt/lists/* \
+ && rm -rf /root/.cache/go-build \
  && curl -fsSL https://deno.land/x/install/install.sh | sh \
  && mv /root/.deno/bin/deno /usr/local/bin/deno
 
@@ -36,6 +39,10 @@ RUN mkdir -p node_modules && chmod 777 node_modules
 
 # Warm up the Pyodide environment
 RUN deno run -A --unstable-worker-options jsr:@pydantic/mcp-run-python warmup
+
+# Install mcp-grafana
+ENV GOBIN=/usr/local/bin
+RUN go install github.com/grafana/mcp-grafana/cmd/mcp-grafana@latest
 
 # Copy application code
 COPY backend/ ./backend/
