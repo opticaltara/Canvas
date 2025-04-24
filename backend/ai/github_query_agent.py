@@ -5,10 +5,10 @@ Agent for handling GitHub interactions via a locally running MCP server.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import  Optional
 from datetime import datetime, timezone
 
-from pydantic_ai import Agent
+from pydantic_ai import Agent, capture_run_messages, UnexpectedModelBehavior
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.mcp import MCPServerStdio
@@ -119,22 +119,28 @@ class GitHubQueryAgent:
         github_query_agent_logger.info(f"Enhanced description with time: '{enhanced_description}'")
 
         try:
-            # Run the stdio server within the context manager
-            async with agent.run_mcp_servers():
-                github_query_agent_logger.info(f"Calling agent.run...")
-                result = await agent.run(enhanced_description)
-                github_query_agent_logger.info(f"Agent run completed. Raw result: {result}")
-                if result and hasattr(result, 'data') and result.data:
-                    github_query_agent_logger.info(f"Successfully parsed result data of type: {type(result.data)}")
-                    if isinstance(result.data, GithubQueryResult):
-                         result.data.query = description
-                         return result.data
-                    else:
-                         return GithubQueryResult(query=description, data=result.data)
-                else:
-                    error_detail = f"Raw result: {result}" if result else "Result was None"
-                    github_query_agent_logger.error(f"Agent did not return valid data. {error_detail}")
-                    return GithubQueryResult(query=description, data=None, error="Agent failed to return valid data") 
+            with capture_run_messages() as messages:
+                try:
+                    async with agent.run_mcp_servers():
+                        github_query_agent_logger.info(f"Calling agent.run...")
+                        result = await agent.run(enhanced_description)
+                        github_query_agent_logger.info(f"Agent run completed. Raw result: {result}")
+                        if result and hasattr(result, 'data') and result.data:
+                            github_query_agent_logger.info(f"Successfully parsed result data of type: {type(result.data)}")
+                            if isinstance(result.data, GithubQueryResult):
+                                result.data.query = description
+                                return result.data
+                            else:
+                                return GithubQueryResult(query=description, data=result.data)
+                        else:
+                            error_detail = f"Raw result: {result}" if result else "Result was None"
+                            github_query_agent_logger.error(f"Agent did not return valid data. {error_detail}")
+                            return GithubQueryResult(query=description, data=None, error="Agent failed to return valid data")
+                except UnexpectedModelBehavior as e:
+                    github_query_agent_logger.error(f"Error occured during agent run: {e}", exc_info=True)
+                    github_query_agent_logger.error(f"Error cause: {e.__cause__}")
+                    github_query_agent_logger.error(f"Agent messages : {messages}")
+                    return GithubQueryResult(query=description, data=None, error=f"Agent run failed: {str(e)}")
         except Exception as e:
             github_query_agent_logger.error(f"Error during agent run: {e}", exc_info=True)
             error_details = str(e)

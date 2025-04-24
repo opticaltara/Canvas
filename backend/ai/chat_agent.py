@@ -242,14 +242,8 @@ class ChatAgentService:
     async def create_session(self, session_id: str, notebook_id: str):
         """Create a new chat session and initialize necessary components."""
         chat_agent_logger.info(f"Creating new chat session: {session_id} for notebook: {notebook_id}")
-        
-        # Store notebook ID for the session
         self.sessions[session_id] = notebook_id 
-        
-        # Ensure connection types are fetched before initializing AIAgent
         await self._fetch_and_set_available_tools_info()
-        
-        # Initialize AIAgent with the fetched data sources
         chat_agent_logger.info(f"Initializing AIAgent for session {session_id} with sources: {self._available_data_source_types}")
         self.ai_agent = AIAgent(
             notebook_id=notebook_id,
@@ -278,6 +272,9 @@ class ChatAgentService:
         """
         chat_agent_logger.info(f"Handling message in session {session_id}")
         chat_agent_logger.info(f"Received prompt: '{prompt}'")
+        chat_agent_logger.info(f"Received message_history length: {len(message_history)} for session {session_id}")
+        if message_history:
+            chat_agent_logger.debug(f"Last message in history: {str(message_history[-1])}") 
         start_time = time.time()
         
         try:

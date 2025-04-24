@@ -1,13 +1,27 @@
+# Use an official Go image as the first stage
+FROM golang:1.24-bookworm AS go_builder
+# No further commands needed here, we just need the Go installation
+
+# Start the final stage from the Python image
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies, Docker CLI, Deno, and Go
+# Set path to include Go copied from the builder stage
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# Install system dependencies, Docker CLI
+# No need for GO_VERSION or GO_SHA256 anymore
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     gnupg \
-    golang-go \
+    # build-essential might still be needed for other things later
+    build-essential \
+    unzip \
+    nodejs \
+    npm \
+    wget \
  && install -m 0755 -d /etc/apt/keyrings \
  && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
  && chmod a+r /etc/apt/keyrings/docker.asc \
@@ -17,15 +31,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       tee /etc/apt/sources.list.d/docker.list > /dev/null \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-    build-essential \
-    unzip \
     docker-ce-cli \
-    nodejs \
-    npm \
-    # Clean up apt lists and Go build cache
- && rm -rf /var/lib/apt/lists/* \
- && rm -rf /root/.cache/go-build \
- && curl -fsSL https://deno.land/x/install/install.sh | sh \
+ && rm -rf /var/lib/apt/lists/*
+
+# Copy Go installation from the builder stage
+COPY --from=go_builder /usr/local/go /usr/local/go
+
+# Verify Go installation
+RUN go version
+
+# Install Deno
+RUN curl -fsSL https://deno.land/x/install/install.sh | sh \
  && mv /root/.deno/bin/deno /usr/local/bin/deno
 
 # Copy requirements first for better caching
