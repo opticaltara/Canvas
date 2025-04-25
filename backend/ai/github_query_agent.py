@@ -9,12 +9,10 @@ from typing import  Optional, AsyncGenerator, Union, Dict, Any
 from datetime import datetime, timezone
 
 from pydantic_ai import Agent, UnexpectedModelBehavior
-# Try importing ToolCallPart from messages first
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.mcp import MCPServerStdio
-# Try importing Nodes directly from pydantic_graph
 from pydantic_ai import CallToolsNode
 from mcp import StdioServerParameters
 from mcp.shared.exceptions import McpError 
@@ -146,6 +144,10 @@ class GitHubQueryAgent:
                     github_query_agent_logger.info(f"GitHub Query Attempt {attempt + 1}/{max_attempts}")
                     yield {"status": "attempt_start", "attempt": attempt + 1, "max_attempts": max_attempts}
 
+                    # Store last tool call info for this attempt
+                    last_tool_name: Optional[str] = None
+                    last_tool_args: Optional[Dict[str, Any]] = None
+                    
                     try:
                         # Run the agent query using iteration
                         github_query_agent_logger.info(f"Starting agent iteration with description (length {len(current_description)})...")
@@ -155,18 +157,20 @@ class GitHubQueryAgent:
                         async with agent.iter(current_description) as agent_run:
                              async for node in agent_run:
                                 github_query_agent_logger.info(f"Agent step: {type(node).__name__}")
+                                # Check for tool calls within CallToolsNode
                                 if isinstance(node, CallToolsNode):
                                      tool_node = node
                                      if hasattr(tool_node, 'model_response') and tool_node.model_response and hasattr(tool_node.model_response, 'parts'):
                                          for part in tool_node.model_response.parts:
                                              if isinstance(part, ToolCallPart):
-                                                 # Log the detected tool call details
+                                                 # Log and store the detected tool call details
                                                  tool_name = getattr(part, 'name', 'UnknownTool')
                                                  tool_args = getattr(part, 'args', {})
                                                  github_query_agent_logger.info(f"Tool call detected: Name='{tool_name}', Args={tool_args}")
+                                                 last_tool_name = tool_name # Update last seen tool call
+                                                 last_tool_args = tool_args
                                                  yield {"status": "tool_call", "attempt": attempt + 1, "tool_name": tool_name, "tool_args": tool_args}
-                             # After iteration, get the final result
-                             run_result = agent_run.result # agent_run.result is likely AgentRunResult
+                             run_result = agent_run.result
                              github_query_agent_logger.info(f"Agent iteration finished. Raw result: {run_result}")
 
                         github_query_agent_logger.info(f"Agent iteration attempt {attempt + 1} completed.")
@@ -181,23 +185,27 @@ class GitHubQueryAgent:
                            github_query_agent_logger.warning(f"AgentRunResult structure unexpected: {run_result}. Attempting to use directly.")
                            result_data_obj = run_result
 
-                        # Check if the extracted result is the expected GithubQueryResult type and has data
                         if result_data_obj and isinstance(result_data_obj, GithubQueryResult) and result_data_obj.data is not None:
                              github_query_agent_logger.info(f"Successfully parsed GithubQueryResult data on attempt {attempt + 1}. Data type: {type(result_data_obj.data)}")
                              yield {"status": "parsing_success", "attempt": attempt + 1}
                              final_result_data = result_data_obj
-                             final_result_data.query = description # Ensure original query is set
-                             yield final_result_data # Yield final success result
-                             return # Exit after success
-                        # Check if we got some other data structure that isn't None
+                             final_result_data.query = description
+                             final_result_data.tool_name = last_tool_name # Add last tool info
+                             final_result_data.tool_args = last_tool_args
+                             yield final_result_data
+                             return
                         elif result_data_obj is not None:
                              github_query_agent_logger.info(f"Agent returned data, but not GithubQueryResult: {type(result_data_obj)}. Wrapping it. Attempt {attempt + 1}.")
                              yield {"status": "parsing_success", "attempt": attempt + 1}
-                             # Wrap the data
-                             final_result_data = GithubQueryResult(query=description, data=result_data_obj)
-                             yield final_result_data # Yield final success result
-                             return # Exit after success
-                        # Handle case where agent run finishes but doesn't return valid data
+                             # Wrap the data and add tool info
+                             final_result_data = GithubQueryResult(
+                                 query=description, 
+                                 data=result_data_obj,
+                                 tool_name=last_tool_name, # Add last tool info
+                                 tool_args=last_tool_args
+                             )
+                             yield final_result_data
+                             return
                         else:
                              error_detail = f"Final data object from agent_run.result was None or empty. Raw result: {run_result}"
                              github_query_agent_logger.error(f"Agent did not return valid data object after iteration on attempt {attempt + 1}. {error_detail}")

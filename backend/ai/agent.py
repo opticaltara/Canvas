@@ -430,9 +430,12 @@ class AIAgent:
                     "data": final_result_data.data,
                     "query": final_result_data.query,
                     "error": final_result_data.error,
-                    "metadata": final_result_data.metadata
+                    "metadata": final_result_data.metadata,
+                    # Add tool info if it's a GithubQueryResult
+                    "tool_name": getattr(final_result_data, 'tool_name', None),
+                    "tool_args": getattr(final_result_data, 'tool_args', None)
                 },
-                "agent_type": single_step.step_type,
+                "agent_type": single_step.step_type.value, # Use .value here
                 "is_single_step_plan": True 
             }
             ai_logger.info(f"Completed single-step plan execution for step: {single_step.step_id}")
@@ -588,9 +591,12 @@ class AIAgent:
                     "data": final_result_data.data,
                     "query": final_result_data.query,
                     "error": final_result_data.error,
-                    "metadata": final_result_data.metadata
+                    "metadata": final_result_data.metadata,
+                    # Add tool info if it's a GithubQueryResult
+                    "tool_name": getattr(final_result_data, 'tool_name', None),
+                    "tool_args": getattr(final_result_data, 'tool_args', None)
                 },
-                "agent_type": current_step.step_type
+                "agent_type": current_step.step_type.value # Use .value here
             }
             
             # --- Plan revision logic (no change here) ---
