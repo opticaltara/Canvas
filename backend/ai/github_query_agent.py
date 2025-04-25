@@ -9,9 +9,13 @@ from typing import  Optional, AsyncGenerator, Union, Dict, Any
 from datetime import datetime, timezone
 
 from pydantic_ai import Agent, UnexpectedModelBehavior
+# Try importing ToolCallPart from messages first
+from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.mcp import MCPServerStdio
+# Try importing Nodes directly from pydantic_graph
+from pydantic_ai import CallToolsNode
 from mcp import StdioServerParameters
 from mcp.shared.exceptions import McpError 
 
@@ -71,7 +75,7 @@ class GitHubQueryAgent:
             )
             
             github_query_agent_logger.info(f"Created StdioServerParameters for connection {github_conn.id}")
-            github_query_agent_logger.debug(f"Command: {command}, Args Template: {args_template}")
+            github_query_agent_logger.info(f"Command: {command}, Args Template: {args_template}")
             
             return MCPServerStdio(command=command, args=full_args)
             
@@ -143,39 +147,66 @@ class GitHubQueryAgent:
                     yield {"status": "attempt_start", "attempt": attempt + 1, "max_attempts": max_attempts}
 
                     try:
-                        # Run the agent query within the established connection
-                        github_query_agent_logger.info(f"Calling agent.run with description (length {len(current_description)})...")
-                        yield {"status": "agent_running", "attempt": attempt + 1, "message": "Agent is processing the request..."}
+                        # Run the agent query using iteration
+                        github_query_agent_logger.info(f"Starting agent iteration with description (length {len(current_description)})...")
+                        yield {"status": "agent_iterating", "attempt": attempt + 1, "message": "Agent is processing the request step-by-step..."}
 
-                        result = await agent.run(current_description)
+                        run_result = None
+                        async with agent.iter(current_description) as agent_run:
+                             async for node in agent_run:
+                                github_query_agent_logger.info(f"Agent step: {type(node).__name__}")
+                                if isinstance(node, CallToolsNode):
+                                     tool_node = node
+                                     if hasattr(tool_node, 'model_response') and tool_node.model_response and hasattr(tool_node.model_response, 'parts'):
+                                         for part in tool_node.model_response.parts:
+                                             if isinstance(part, ToolCallPart):
+                                                 # Log the detected tool call details
+                                                 tool_name = getattr(part, 'name', 'UnknownTool')
+                                                 tool_args = getattr(part, 'args', {})
+                                                 github_query_agent_logger.info(f"Tool call detected: Name='{tool_name}', Args={tool_args}")
+                                                 yield {"status": "tool_call", "attempt": attempt + 1, "tool_name": tool_name, "tool_args": tool_args}
+                             # After iteration, get the final result
+                             run_result = agent_run.result # agent_run.result is likely AgentRunResult
+                             github_query_agent_logger.info(f"Agent iteration finished. Raw result: {run_result}")
 
-                        github_query_agent_logger.info(f"Agent run attempt {attempt + 1} completed.")
+                        github_query_agent_logger.info(f"Agent iteration attempt {attempt + 1} completed.")
                         yield {"status": "agent_run_complete", "attempt": attempt + 1}
 
                         # --- Success Case ---
-                        if result and hasattr(result, 'data') and result.data:
-                            github_query_agent_logger.info(f"Successfully parsed result data of type: {type(result.data)} on attempt {attempt + 1}")
-                            yield {"status": "parsing_success", "attempt": attempt + 1}
+                        # Access the actual data from AgentRunResult
+                        result_data_obj = None
+                        if run_result and hasattr(run_result, 'data'):
+                           result_data_obj = run_result.data
+                        elif run_result:
+                           github_query_agent_logger.warning(f"AgentRunResult structure unexpected: {run_result}. Attempting to use directly.")
+                           result_data_obj = run_result
 
-                            if isinstance(result.data, GithubQueryResult):
-                                final_result_data = result.data
-                                final_result_data.query = description
-                            else:
-                                # Wrap non-GithubQueryResult data
-                                final_result_data = GithubQueryResult(query=description, data=result.data)
-
-                            yield final_result_data # Yield final success result
-                            return # Exit after success
+                        # Check if the extracted result is the expected GithubQueryResult type and has data
+                        if result_data_obj and isinstance(result_data_obj, GithubQueryResult) and result_data_obj.data is not None:
+                             github_query_agent_logger.info(f"Successfully parsed GithubQueryResult data on attempt {attempt + 1}. Data type: {type(result_data_obj.data)}")
+                             yield {"status": "parsing_success", "attempt": attempt + 1}
+                             final_result_data = result_data_obj
+                             final_result_data.query = description # Ensure original query is set
+                             yield final_result_data # Yield final success result
+                             return # Exit after success
+                        # Check if we got some other data structure that isn't None
+                        elif result_data_obj is not None:
+                             github_query_agent_logger.info(f"Agent returned data, but not GithubQueryResult: {type(result_data_obj)}. Wrapping it. Attempt {attempt + 1}.")
+                             yield {"status": "parsing_success", "attempt": attempt + 1}
+                             # Wrap the data
+                             final_result_data = GithubQueryResult(query=description, data=result_data_obj)
+                             yield final_result_data # Yield final success result
+                             return # Exit after success
+                        # Handle case where agent run finishes but doesn't return valid data
                         else:
-                            # Handle case where agent run finishes but doesn't return valid data
-                            error_detail = f"Raw result: {result}" if result else "Result was None"
-                            github_query_agent_logger.error(f"Agent did not return valid data on attempt {attempt + 1}. {error_detail}")
-                            yield {"status": "no_valid_data", "attempt": attempt + 1, "message": "Agent run completed but returned no usable data."}
-                            last_error = "Agent failed to return valid data after run."
-                            error_context = f"\\n\\nINFO: Attempt {attempt + 1} completed but returned no valid data. Agent will retry."
-                            current_description += error_context
-                            yield {"status": "retrying", "attempt": attempt + 1, "reason": "no valid data"}
-                            continue # Go to next attempt in the inner loop
+                             error_detail = f"Final data object from agent_run.result was None or empty. Raw result: {run_result}"
+                             github_query_agent_logger.error(f"Agent did not return valid data object after iteration on attempt {attempt + 1}. {error_detail}")
+                             yield {"status": "no_valid_data", "attempt": attempt + 1, "message": "Agent iteration completed but returned no usable data object."}
+                             last_error = "Agent failed to return valid data after iteration."
+                             error_context = f"\\n\\nINFO: Attempt {attempt + 1} completed but returned no valid data. Agent will retry."
+                             current_description += error_context
+                             yield {"status": "retrying", "attempt": attempt + 1, "reason": "no valid data"}
+                             continue # Go to next attempt
 
                     except McpError as mcp_err:
                         error_str = str(mcp_err)
@@ -197,10 +228,10 @@ class GitHubQueryAgent:
                         last_error = f"Agent run failed due to unexpected model behavior: {str(e)}"
                         break # Exit inner loop to handle final error
 
-                    except Exception as e: # Catch other potential errors during agent.run
-                        github_query_agent_logger.error(f"General error during agent.run attempt {attempt + 1}: {e}", exc_info=True)
+                    except Exception as e: # Catch other potential errors during agent iteration or result handling
+                        github_query_agent_logger.error(f"General error during agent iteration/processing attempt {attempt + 1}: {e}", exc_info=True)
                         yield {"status": "general_error_run", "attempt": attempt + 1, "error": str(e)}
-                        last_error = f"Agent run failed unexpectedly: {str(e)}"
+                        last_error = f"Agent iteration/processing failed unexpectedly: {str(e)}"
                         break # Exit inner loop to handle final error
 
                 # If the loop finished without returning (i.e., max attempts reached or broke due to error)
