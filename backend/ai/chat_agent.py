@@ -331,10 +331,15 @@ class ChatAgentService:
                         timestamp=datetime.now(timezone.utc)
                     )
                 else:
-                    # For non-cell responses, create a StatusResponsePart
+                    update_info = status.get('update_info')
+                    content_message = f"Status: {status.get('status', '')}"
+                    
+                    if isinstance(update_info, dict):
+                        content_message = update_info.get('message', update_info.get('error', content_message))
+                    
                     response = ModelResponse(
                         parts=[StatusResponsePart(
-                            content=f"Status: {status.get('status', '')}",
+                            content=content_message,
                             agent_type=status.get('agent_type', 'unknown')
                         )],
                         timestamp=datetime.now(timezone.utc)
