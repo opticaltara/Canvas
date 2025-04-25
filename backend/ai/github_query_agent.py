@@ -5,7 +5,7 @@ Agent for handling GitHub interactions via a locally running MCP server.
 """
 
 import logging
-from typing import  Optional, AsyncGenerator, Union, Dict, Any
+from typing import  Optional, AsyncGenerator, Union, Dict, Any, List
 from datetime import datetime, timezone
 
 from pydantic_ai import Agent, UnexpectedModelBehavior
@@ -144,9 +144,8 @@ class GitHubQueryAgent:
                     github_query_agent_logger.info(f"GitHub Query Attempt {attempt + 1}/{max_attempts}")
                     yield {"status": "attempt_start", "attempt": attempt + 1, "max_attempts": max_attempts}
 
-                    # Store last tool call info for this attempt
-                    last_tool_name: Optional[str] = None
-                    last_tool_args: Optional[Dict[str, Any]] = None
+                    # Store sequence of tool calls for this attempt
+                    successful_tool_calls_in_attempt: List[Dict[str, Any]] = []
                     
                     try:
                         # Run the agent query using iteration
@@ -163,12 +162,12 @@ class GitHubQueryAgent:
                                      if hasattr(tool_node, 'model_response') and tool_node.model_response and hasattr(tool_node.model_response, 'parts'):
                                          for part in tool_node.model_response.parts:
                                              if isinstance(part, ToolCallPart):
-                                                 # Log and store the detected tool call details
+                                                 # Log and store the detected tool call
                                                  tool_name = getattr(part, 'name', 'UnknownTool')
                                                  tool_args = getattr(part, 'args', {})
                                                  github_query_agent_logger.info(f"Tool call detected: Name='{tool_name}', Args={tool_args}")
-                                                 last_tool_name = tool_name # Update last seen tool call
-                                                 last_tool_args = tool_args
+                                                 # Append to the sequence for this attempt
+                                                 successful_tool_calls_in_attempt.append({"tool_name": tool_name, "tool_args": tool_args})
                                                  yield {"status": "tool_call", "attempt": attempt + 1, "tool_name": tool_name, "tool_args": tool_args}
                              run_result = agent_run.result
                              github_query_agent_logger.info(f"Agent iteration finished. Raw result: {run_result}")
@@ -190,19 +189,17 @@ class GitHubQueryAgent:
                              yield {"status": "parsing_success", "attempt": attempt + 1}
                              final_result_data = result_data_obj
                              final_result_data.query = description
-                             final_result_data.tool_name = last_tool_name # Add last tool info
-                             final_result_data.tool_args = last_tool_args
+                             final_result_data.tool_calls = successful_tool_calls_in_attempt # Assign the collected sequence
                              yield final_result_data
                              return
                         elif result_data_obj is not None:
                              github_query_agent_logger.info(f"Agent returned data, but not GithubQueryResult: {type(result_data_obj)}. Wrapping it. Attempt {attempt + 1}.")
                              yield {"status": "parsing_success", "attempt": attempt + 1}
-                             # Wrap the data and add tool info
+                             # Wrap the data and add tool call sequence
                              final_result_data = GithubQueryResult(
                                  query=description, 
                                  data=result_data_obj,
-                                 tool_name=last_tool_name, # Add last tool info
-                                 tool_args=last_tool_args
+                                 tool_calls=successful_tool_calls_in_attempt # Assign the collected sequence
                              )
                              yield final_result_data
                              return

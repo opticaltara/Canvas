@@ -72,9 +72,8 @@ class GithubQueryResult(QueryResult):
         query: The executed GitHub operation description
         error: Optional error message if query failed
         metadata: Additional metadata about the GitHub query result
-        tool_name: The name of the last successful tool called by the agent
-        tool_args: The arguments passed to the last successful tool call
+        tool_calls: Sequence of successful tool calls made within the agent attempt
+                  that produced this result.
     """
     data: Any  # GitHub queries can return various structures 
-    tool_name: Optional[str] = None
-    tool_args: Optional[Dict[str, Any]] = None 
+    tool_calls: Optional[List[Dict[str, Any]]] = None 

@@ -431,9 +431,8 @@ class AIAgent:
                     "query": final_result_data.query,
                     "error": final_result_data.error,
                     "metadata": final_result_data.metadata,
-                    # Add tool info if it's a GithubQueryResult
-                    "tool_name": getattr(final_result_data, 'tool_name', None),
-                    "tool_args": getattr(final_result_data, 'tool_args', None)
+                    # Add tool call sequence if available
+                    "tool_calls": getattr(final_result_data, 'tool_calls', None)
                 },
                 "agent_type": single_step.step_type.value, # Use .value here
                 "is_single_step_plan": True 
@@ -592,9 +591,8 @@ class AIAgent:
                     "query": final_result_data.query,
                     "error": final_result_data.error,
                     "metadata": final_result_data.metadata,
-                    # Add tool info if it's a GithubQueryResult
-                    "tool_name": getattr(final_result_data, 'tool_name', None),
-                    "tool_args": getattr(final_result_data, 'tool_args', None)
+                    # Add tool call sequence if available
+                    "tool_calls": getattr(final_result_data, 'tool_calls', None)
                 },
                 "agent_type": current_step.step_type.value # Use .value here
             }
