@@ -25,6 +25,27 @@ services:
       retries: 3
     restart: unless-stopped
 
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: sherlog-canvas-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      # Ensure the frontend knows where the backend API is
+      # Make sure this matches the backend service name and port inside the docker network
+      # NEXT_PUBLIC_API_URL=http://backend:8000 
+      # Example using the host machine's IP if backend isn't dockerized or needs direct access
+      # This might require specific network configuration (`host.docker.internal` or IP)
+      # NEXT_PUBLIC_API_URL=http://host.docker.internal:9091 
+      # For now, let's assume it connects to the backend service name
+      NEXT_PUBLIC_API_URL: http://backend:8000/api
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   data:
     driver: local

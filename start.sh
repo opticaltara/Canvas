@@ -80,7 +80,8 @@ echo "Services started. Status:"
 docker-compose ps
 
 echo "Sherlog Canvas is now running!"
-echo "Backend API: http://localhost:8080"
+echo "Backend API: http://localhost:9091/api"
+echo "Frontend UI: http://localhost:3000"
 echo ""
 echo "To stop all services, run:"
 echo "docker-compose down"
