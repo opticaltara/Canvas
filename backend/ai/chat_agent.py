@@ -61,12 +61,24 @@ class CellResponsePart(TextPart):
             "agent_type": self.agent_type
         }
         if self.result:
-            if 'data' in self.result and isinstance(self.result['data'], BaseModel):
-                serializable_result = self.result.copy()
-                serializable_result['data'] = self.result['data'].model_dump()
-                dump["result"] = serializable_result
-            else:
-                dump["result"] = self.result
+            serializable_result = {}
+            for key, value in self.result.items():
+                if isinstance(value, BaseModel):
+                    # Handle nested Pydantic models (like QueryResult data)
+                    serializable_result[key] = value.model_dump()
+                elif isinstance(value, list) and value: 
+                    # Check if it's a list and potentially contains Pydantic models
+                    if all(isinstance(item, BaseModel) for item in value):
+                        # Handle lists of Pydantic models (e.g., tool_calls)
+                        serializable_result[key] = [item.model_dump() for item in value]
+                    else:
+                        # Assume list contains other JSON-serializable types
+                        serializable_result[key] = value 
+                else:
+                    # Assume other types are JSON serializable
+                    serializable_result[key] = value
+            dump["result"] = serializable_result
+            
         return dump
 
 class StatusResponsePart(TextPart):

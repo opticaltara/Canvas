@@ -63,6 +63,14 @@ class MarkdownQueryResult(QueryResult):
     data: str
 
 
+class ToolCallRecord(BaseModel):
+    """Represents a single recorded tool call with its result."""
+    tool_call_id: str
+    tool_name: str
+    tool_args: Dict[str, Any]
+    tool_result: Any # Result can be diverse
+
+
 class GithubQueryResult(QueryResult):
     """
     Specialized query result for GitHub queries
@@ -72,8 +80,8 @@ class GithubQueryResult(QueryResult):
         query: The executed GitHub operation description
         error: Optional error message if query failed
         metadata: Additional metadata about the GitHub query result
-        tool_calls: Sequence of successful tool calls made within the agent attempt
-                  that produced this result.
+        tool_calls: Sequence of successful tool calls (with results) made within the agent attempt
+                  that produced this result. Each item is a ToolCallRecord.
     """
     data: Any  # GitHub queries can return various structures 
-    tool_calls: Optional[List[Dict[str, Any]]] = None 
+    tool_calls: Optional[List[ToolCallRecord]] = None 

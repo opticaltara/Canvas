@@ -431,10 +431,9 @@ class AIAgent:
                     "query": final_result_data.query,
                     "error": final_result_data.error,
                     "metadata": final_result_data.metadata,
-                    # Add tool call sequence if available
                     "tool_calls": getattr(final_result_data, 'tool_calls', None)
                 },
-                "agent_type": single_step.step_type.value, # Use .value here
+                "agent_type": single_step.step_type.value,
                 "is_single_step_plan": True 
             }
             ai_logger.info(f"Completed single-step plan execution for step: {single_step.step_id}")
@@ -469,7 +468,6 @@ class AIAgent:
         remaining_steps = plan.steps.copy()
         
         while remaining_steps:
-            # ... (keep existing logic for finding executable_steps) ...
             executable_steps = [
                 step for step in remaining_steps
                 if all(dep in executed_steps for dep in step.dependencies)
@@ -487,7 +485,7 @@ class AIAgent:
 
             # --- Handle Async Generator for multi-step ---
             final_result_data: Optional[QueryResult] = None
-            all_yielded_items_multi = [] # Store yields for debugging
+            all_yielded_items_multi = []
 
             if current_step.category == StepCategory.PHASE:
                 async for result_part in self.generate_content(
