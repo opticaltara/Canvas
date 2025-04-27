@@ -17,4 +17,4 @@ export const LogView: React.FC<LogViewProps> = ({ logs }) => {
       ))}
     </div>
   )
-}
+} 

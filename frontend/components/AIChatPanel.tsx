@@ -4,18 +4,34 @@ import type React from "react"
 import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Send, Bot, User, Loader2, ChevronRight, AlertCircle, RefreshCw, XCircle } from "lucide-react"
+import { Send, Bot, User, Loader2, ChevronRight, AlertCircle, RefreshCw, XCircle, ChevronDown } from "lucide-react"
 import { api } from "@/api/client"
 import type { ChatMessage, CellCreationEvent } from "@/api/chat"
 import type { Model } from "@/api/models"
 import { useToast } from "@/hooks/use-toast"
 import { ModelSelector } from "@/components/ModelSelector"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 
 interface AIChatPanelProps {
   isOpen: boolean
   onToggle: () => void
   notebookId: string // Make this required
+}
+
+// Define a type for the parsed status content
+interface StatusContent {
+  type: string
+  content: string
+  agent_type: string
+}
+
+// Define a type for tracking agent status
+interface AgentStatus {
+  agentType: string
+  messages: StatusContent[]
+  isActive: boolean
+  isExpanded: boolean
 }
 
 // Change to default export
@@ -34,6 +50,8 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
   const [isRetrying, setIsRetrying] = useState(false)
   // Track the current model
   const [currentModel, setCurrentModel] = useState<Model | null>(null)
+  // State to track active agent statuses
+  const [agentStatuses, setAgentStatuses] = useState<Record<string, AgentStatus>>({})
 
   // Create a chat session when the panel opens
   useEffect(() => {
@@ -54,7 +72,7 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
     if (messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({ behavior: "smooth" })
     }
-  }, [messages])
+  }, [messages, agentStatuses])
 
   // Add this near where messages are processed
   useEffect(() => {
@@ -70,11 +88,6 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
           "Last message content preview:",
           typeof lastMessage.content === "string" ? lastMessage.content.substring(0, 100) : "Not a string",
         )
-
-        // Check for special messages
-        if (typeof lastMessage.content === "object" && lastMessage.content?.type === "cell_created") {
-          console.log("Detected cell_created message:", lastMessage.content)
-        }
       }
     }
   }, [messages])
@@ -92,6 +105,8 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
       if (session.session_id) {
         const existingMessages = await api.chat.getSessionMessages(session.session_id)
         if (existingMessages.length > 0) {
+          // Process existing messages to potentially populate agent statuses
+          processMessagesForAgents(existingMessages)
           setMessages(existingMessages)
         }
       }
@@ -239,41 +254,162 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
 
   // Handle cell creation events - just show a toast notification
   const handleCellCreation = async (event: CellCreationEvent) => {
+    console.log("AIChatPanel received cell_created event:", event)
+    // Potentially update agent status if cell creation signifies completion
+    if (event.agentType) {
+      setAgentStatuses((prev) => ({
+        ...prev,
+        [event.agentType]: {
+          ...prev[event.agentType],
+          isActive: false, // Assume cell creation completes the agent task for now
+        },
+      }))
+    }
+  }
+
+  // Helper function to safely parse message content
+  const parseMessageContent = (content: string): StatusContent | null => {
     try {
-      // Show a toast notification about the cell creation
-      toast({
-        title: "Cell Created",
-        description: `A new ${event.cellParams.cell_type} cell was created by ${event.agentType}.`,
-      })
-    } catch (error) {
-      console.error("Error handling cell creation:", error)
+      const parsed = JSON.parse(content)
+      if (parsed && typeof parsed === "object" && parsed.type === "status_response") {
+        return parsed as StatusContent
+      }
+    } catch (e) {
+      // Ignore errors, it's likely not JSON or not the format we expect
+    }
+    return null
+  }
+
+  // Process a batch of messages to update agent statuses
+  const processMessagesForAgents = (newMessages: ChatMessage[]) => {
+    let updatedStatuses = { ...agentStatuses }
+    let statusChanged = false
+
+    newMessages.forEach((msg) => {
+      if (msg.role === "model") {
+        const statusContent = parseMessageContent(msg.content)
+        if (statusContent) {
+          const agentType = statusContent.agent_type
+          if (!updatedStatuses[agentType]) {
+            updatedStatuses[agentType] = {
+              agentType: agentType,
+              messages: [],
+              isActive: true,
+              isExpanded: false,
+            }
+          }
+          updatedStatuses[agentType].messages.push(statusContent)
+          updatedStatuses[agentType].isActive = true // Mark as active on receiving status
+          statusChanged = true
+        } else if (msg.agent && updatedStatuses[msg.agent]?.isActive) {
+          // If a regular message comes from an agent that was active, mark it as inactive
+          updatedStatuses[msg.agent].isActive = false
+          statusChanged = true
+        }
+      }
+    })
+
+    if (statusChanged) {
+      setAgentStatuses(updatedStatuses)
     }
   }
 
   // Handle both message and cell creation events
   const handleMessageOrEvent = (messageOrEvent: ChatMessage | CellCreationEvent) => {
-    // Check if this is a cell creation event
+    console.log("Received message or event:", messageOrEvent)
+
     if ("type" in messageOrEvent && messageOrEvent.type === "cell_created") {
+      // Handle cell creation event
       handleCellCreation(messageOrEvent)
-      return
-    }
+      // We don't add cell_created events directly to the chat message list
+    } else if ("role" in messageOrEvent) {
+      // Handle regular chat message
+      const message = messageOrEvent as ChatMessage
+      const statusContent = parseMessageContent(message.content) // Check if it's a status update
 
-    // Otherwise, it's a regular chat message
-    const message = messageOrEvent as ChatMessage
+      // If it's a status message, only process it for agent status, don't add to main chat list
+      if (statusContent && message.role === "model") {
+        processMessagesForAgents([message])
+        // Potentially update agent status directly here if needed, but don't add to setMessages
+        return // Stop processing this message for the main chat list
+      }
 
-    // Add or update the message in the messages array
-    if (message.role === "model") {
-      setMessages((prev) => {
-        // Check if we already have a message from the model in the current conversation
-        const lastMessage = prev[prev.length - 1]
-        if (lastMessage && lastMessage.role === "model") {
-          // Update the existing message
-          return [...prev.slice(0, prev.length - 1), message]
+      // --- Add this check --- 
+      // Try parsing the content to see if it's a cell_response
+      try {
+          const potentialCellResponse = JSON.parse(message.content);
+          if (potentialCellResponse && typeof potentialCellResponse === 'object' && potentialCellResponse.type === 'cell_response') {
+              // If it IS a cell_response, don't add it to the chat messages.
+              // It's handled by canvasStore via handleCellCreation in chat.ts
+              // But we still might need to mark the agent as finished if it's a final step.
+              if (message.agent && potentialCellResponse.status_type === 'step_completed') {
+                 setAgentStatuses((prev) => {
+                    if (prev[message.agent!]?.isActive) {
+                      return {
+                        ...prev,
+                        [message.agent!]: {
+                          ...prev[message.agent!],
+                          isActive: false,
+                        },
+                      }
+                    }
+                    return prev
+                  })
+              }
+              return; // Stop processing this message for the main chat list
+          }
+      } catch (e) {
+          // Not a parsable JSON or not a cell_response, continue processing as a regular message.
+          console.log("Error parsing message content as JSON, treating as regular message:", e);
+      }
+      // --- End of added check ---
+
+      // If not a status message or cell_response, add it to the chat list
+      setMessages((prevMessages) => {
+        const newMessages = [...prevMessages]
+        const lastMessage = newMessages[newMessages.length - 1]
+
+        // Append only if the new message AND the last message are from the USER.
+        if (
+          lastMessage &&
+          lastMessage.role === "user" &&
+          message.role === "user" &&
+          typeof lastMessage.content === "string" && // Still need this basic type check for safety
+          typeof message.content === "string"
+        ) {
+          // Append user message content
+          lastMessage.content += "\n" + message.content // Add newline for clarity
+          lastMessage.timestamp = message.timestamp // Update timestamp
         } else {
-          // Add a new message
-          return [...prev, message]
+          // Otherwise, always push the new message as a separate entry
+          newMessages.push(message)
         }
+
+        // Process the new message for agent status updates (stores them)
+        processMessagesForAgents([message])
+
+        return newMessages
       })
+
+      // If the message marks an agent as inactive, ensure its state reflects that
+      if (message.role === "model") {
+        const statusContent = parseMessageContent(message.content)
+        if (!statusContent && message.agent) {
+          // This is a final message from the agent
+          setAgentStatuses((prev) => {
+            if (prev[message.agent!]?.isActive) {
+              return {
+                ...prev,
+                [message.agent!]: {
+                  ...prev[message.agent!],
+                  isActive: false,
+                },
+              }
+            }
+            return prev
+          })
+        }
+      }
     }
   }
 
@@ -287,14 +423,6 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
     setInput("")
     setError(null)
 
-    // Add user message immediately
-    const userChatMessage: ChatMessage = {
-      role: "user",
-      content: userMessage,
-      timestamp: new Date().toISOString(),
-    }
-
-    setMessages((prev) => [...prev, userChatMessage])
     setIsLoading(true)
 
     try {
@@ -358,6 +486,61 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
   const dismissError = () => {
     setError(null)
     setLastFailedMessage(null)
+  }
+
+  const toggleAgentExpansion = (agentType: string) => {
+    setAgentStatuses((prev) => ({
+      ...prev,
+      [agentType]: {
+        ...prev[agentType],
+        isExpanded: !prev[agentType].isExpanded,
+      },
+    }))
+  }
+
+  // Filter out raw status messages that are handled by the agent status UI
+  const filteredMessages = messages.filter(
+    (msg) => !(msg.role === "model" && parseMessageContent(msg.content)),
+  )
+
+  // --- Add the new helper function here ---
+  const renderModelContent = (content: string): React.ReactNode => {
+    try {
+      const parsed = JSON.parse(content)
+      if (parsed && typeof parsed === "object" && parsed.type === "cell_response") {
+        const result = parsed.result
+        if (result && result.error) {
+          // Render error from cell_response
+          return (
+            <div className="text-red-700 bg-red-50 p-2 rounded border border-red-200">
+              <p className="font-semibold text-sm mb-1">Agent Error:</p>
+              <p className="text-xs whitespace-pre-wrap">{result.error}</p>
+            </div>
+          )
+        } else if (result && result.data) {
+          // Render data from cell_response, formatted as JSON in a pre tag
+          return (
+            <div className="text-gray-800 bg-gray-50 p-2 rounded border border-gray-200 mt-1">
+               <p className="font-semibold text-sm mb-1">Agent Result:</p>
+              <pre className="text-xs whitespace-pre-wrap overflow-x-auto">
+                {JSON.stringify(result.data, null, 2)}
+              </pre>
+            </div>
+          )
+        } else {
+          // Fallback if cell_response structure is unexpected
+          return (
+            <p className="whitespace-pre-wrap text-sm italic text-gray-500">
+              Received structured response from agent.
+            </p>
+          )
+        }
+      }
+    } catch (e) {
+      // Not JSON or not the expected format, treat as plain text
+    }
+    // Default: render plain text content
+    return <p className="whitespace-pre-wrap text-sm">{content}</p>
   }
 
   return (
@@ -431,7 +614,7 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
               </Alert>
             )}
 
-            {messages.length === 0 ? (
+            {filteredMessages.length === 0 && Object.values(agentStatuses).filter((s) => s.isActive).length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full text-center">
                 <Bot className="h-12 w-12 text-purple-300 mb-3" />
                 <h4 className="text-lg font-medium text-gray-700 mb-2">How can I help you?</h4>
@@ -442,9 +625,9 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
               </div>
             ) : (
               <div className="space-y-4">
-                {messages.map((message, index) => (
+                {filteredMessages.map((message, index) => (
                   <div
-                    key={index}
+                    key={`msg-${index}-${message.timestamp}`}
                     className={`flex ${message.role === "user" ? "justify-end" : "justify-start"} message-enter`}
                   >
                     <div
@@ -471,7 +654,9 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
                               : "bg-white border border-gray-200 text-gray-800"
                           }`}
                         >
-                          <p className="whitespace-pre-wrap text-sm">{message.content}</p>
+                          {message.role === "model"
+                            ? renderModelContent(message.content)
+                            : <p className="whitespace-pre-wrap text-sm">{message.content}</p>}
                         </div>
                         {message.timestamp && (
                           <span className="text-xs text-gray-500 mt-1 px-1">{formatTimestamp(message.timestamp)}</span>
@@ -480,22 +665,84 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
                     </div>
                   </div>
                 ))}
-                {isLoading && !messages.some((m) => m.role === "model") && (
-                  <div className="flex justify-start message-enter">
-                    <div className="flex items-start space-x-2 max-w-[85%]">
-                      <div className="w-8 h-8 rounded-full flex items-center justify-center bg-purple-100">
-                        <Bot className="h-4 w-4 text-purple-600" />
-                      </div>
-                      <div className="p-3 rounded-lg bg-white border border-gray-200">
-                        <div className="flex space-x-1">
-                          <div className="w-2 h-2 rounded-full bg-purple-400 typing-dot"></div>
-                          <div className="w-2 h-2 rounded-full bg-purple-400 typing-dot"></div>
-                          <div className="w-2 h-2 rounded-full bg-purple-400 typing-dot"></div>
+                {/* Render active agent statuses */}
+                {Object.values(agentStatuses)
+                  .filter((status) => status.isActive || status.messages.length > 0) // Show if active or has messages (even if finished)
+                  .map((status) => (
+                    <div key={status.agentType} className="flex justify-start message-enter">
+                      <div className="flex items-start space-x-2 max-w-[85%]">
+                        <div className="w-8 h-8 rounded-full flex items-center justify-center bg-purple-100">
+                          <Bot className="h-4 w-4 text-purple-600" />
                         </div>
+                        <Collapsible
+                          open={status.isExpanded}
+                          onOpenChange={() => toggleAgentExpansion(status.agentType)}
+                          className="w-full"
+                        >
+                          <div className="flex flex-col w-full">
+                            <CollapsibleTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="flex justify-between items-center p-3 rounded-lg bg-white border border-gray-200 text-gray-800 w-full text-left h-auto"
+                              >
+                                <div className="flex items-center space-x-2">
+                                  {status.isActive && <Loader2 className="h-4 w-4 animate-spin" />}
+                                  <span>
+                                    {status.agentType} agent{" "}
+                                    {status.isActive ? "is working..." : "finished."}
+                                  </span>
+                                </div>
+                                {status.isExpanded ? (
+                                  <ChevronDown className="h-4 w-4" />
+                                ) : (
+                                  <ChevronRight className="h-4 w-4" />
+                                )}
+                              </Button>
+                            </CollapsibleTrigger>
+                            <CollapsibleContent className="pt-2 pl-3 pr-3 pb-1 rounded-b-lg border border-t-0 border-gray-200 bg-gray-50">
+                              <ul className="space-y-1 text-xs text-gray-600 list-disc list-inside">
+                                {(() => {
+                                  const deduplicatedMessages: StatusContent[] = []
+                                  let lastInnerContent: string | null = null
+                                  status.messages.forEach((msg) => {
+                                    const currentInnerContent = msg.content
+                                    if (currentInnerContent !== lastInnerContent) {
+                                      deduplicatedMessages.push(msg)
+                                      lastInnerContent = currentInnerContent
+                                    }
+                                  })
+                                  return deduplicatedMessages.map((msgContent, msgIndex) => (
+                                    <li key={msgIndex}>{msgContent.content}</li>
+                                  ))
+                                })()}
+                                {!status.isActive && status.messages.length > 0 && (
+                                   <li className="text-gray-400 italic">End of actions for {status.agentType}</li>
+                                )}
+                              </ul>
+                            </CollapsibleContent>
+                            {/* Timestamp for the group */}
+                             {status.messages.length > 0 && (
+                               <span className="text-xs text-gray-500 mt-1 px-1">
+                                 Last update: {formatTimestamp(messages.find(m => m.agent === status.agentType)?.timestamp || new Date().toISOString())}
+                               </span>
+                             )}
+                          </div>
+                        </Collapsible>
                       </div>
+                    </div>
+                  ))}
+
+                {/* Show loading indicator when waiting for response */}
+                {isLoading && (
+                  <div className="flex justify-center items-center p-4 message-enter">
+                    <div className="flex items-center space-x-2 text-gray-500">
+                      <Loader2 className="h-5 w-5 animate-spin text-purple-600" />
+                      <span>Thinking...</span>
                     </div>
                   </div>
                 )}
+
                 <div ref={messagesEndRef} />
               </div>
             )}

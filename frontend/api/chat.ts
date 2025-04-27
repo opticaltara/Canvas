@@ -7,6 +7,7 @@ export interface ChatMessage {
   content: string
   timestamp: string
   id?: string // Optional ID field
+  agent?: string // Added optional agent field
 }
 
 // Add a new interface for cell creation events
@@ -33,25 +34,94 @@ const handleStreamingResponse = async (
   onChunk: (message: ChatMessage | CellCreationEvent) => void,
 ): Promise<ChatMessage[]> => {
   // Helper function to handle cell creation from agent responses
-  const handleCellCreation = (message: ChatMessage) => {
+  const handleAgentResponse = (message: ChatMessage) => {
     try {
       // Parse the content as JSON
       const contentObj = JSON.parse(message.content)
 
-      console.log("Parsed content object:", contentObj)
+      console.log("Parsed agent response content:", contentObj)
 
+      // Check if this is a final response containing successful tool calls to be turned into cells
       if (
         contentObj.type === "cell_response" &&
-        contentObj.cell_params &&
-        ["plan_cell_created", "step_completed", "summary_created"].includes(contentObj.status_type)
+        contentObj.status_type === "step_completed" && // Or another indicator of final result
+        contentObj.result?.tool_calls &&
+        Array.isArray(contentObj.result.tool_calls) &&
+        contentObj.result.tool_calls.length > 0 &&
+        contentObj.agent_type === "github" // Ensure this logic is specific to GitHub agent for now
       ) {
+        console.log(
+          `Received final GitHub agent response with ${contentObj.result.tool_calls.length} tool calls. Creating individual cells.`,
+        )
+
+        const canvasStore = useCanvasStore.getState()
+        const notebookId = contentObj.cell_params?.notebook_id || canvasStore.activeNotebookId
+
+        if (!notebookId) {
+          console.error("Cannot create cells, missing notebook ID.")
+          return // Skip cell creation if no notebook ID
+        }
+        
+        // Ensure active notebook is set
+        if (canvasStore.activeNotebookId !== notebookId) {
+          console.log(`Setting active notebook ID in store to: ${notebookId}`)
+          canvasStore.setActiveNotebook(notebookId)
+        }
+
+
+        contentObj.result.tool_calls.forEach((toolCall: any, index: number) => {
+          if (!toolCall.tool_name || !toolCall.tool_args) {
+             console.warn("Skipping tool call due to missing name or args:", toolCall)
+             return;
+          }
+          
+          const cellId = `github-${toolCall.tool_call_id || Date.now() + index}` // Use tool call ID if available
+          const cellContent = `GitHub Tool: ${toolCall.tool_name}` // Simple content for the cell
+
+          const cellData = {
+            id: cellId,
+            notebook_id: notebookId,
+            type: "github" as CellType,
+            content: cellContent,
+            status: "success" as CellStatus, // Mark as success initially as it came from a successful agent run
+            metadata: {
+              // Store tool info in metadata for the cell component
+              toolName: toolCall.tool_name,
+              toolArgs: toolCall.tool_args,
+              source_agent: contentObj.agent_type,
+              // Optionally add original query or step info if needed
+              // original_query: contentObj.result?.query
+            },
+            result: toolCall.tool_result, // Store the result obtained by the agent
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          }
+
+          console.log(`Adding GitHub cell to canvas store: ${cellId} for tool ${toolCall.tool_name}`)
+          canvasStore.handleCellUpdate(cellData) // Use handleCellUpdate which acts like add/update
+        })
+
+        // Mark the original message as handled regarding cell creation
+        // To prevent any potential duplicate processing if the structure was ambiguous
+        // We might need a way to signal that the message's primary purpose (creating cells) is done.
+        message.content = JSON.stringify({ type: "status", message: `Generated ${contentObj.result.tool_calls.length} GitHub cells.` })
+
+
+      } else if (
+        contentObj.type === "cell_response" &&
+        contentObj.cell_params &&
+        ["plan_cell_created", "summary_created"].includes(contentObj.status_type) &&
+        contentObj.agent_type !== "github" // Make sure the old logic doesn't apply to github agent final messages
+      ) {
+        // --- Keep existing logic for non-GitHub agents or other message types ---
         const { notebook_id, cell_type, content, metadata, position } = contentObj.cell_params
 
-        console.log("Cell creation parameters:", {
+        console.log("Applying standard cell creation logic for:", {
           notebook_id,
           cell_type,
           content_length: content?.length || 0,
           metadata: metadata ? "present" : "absent",
+          agent: contentObj.agent_type,
         })
         const cellId = `temp-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`
 
@@ -75,24 +145,14 @@ const handleStreamingResponse = async (
         }
 
         canvasStore.handleCellUpdate(cellData)
-
         console.log(`Added new ${cell_type} cell from agent ${contentObj.agent_type} directly to canvas store`)
+         // Optionally modify the message content if needed after handling
+         message.content = JSON.stringify({ type: "status", message: `Generated ${cell_type} cell.` })
 
-        onChunk({
-          type: "cell_created",
-          cellParams: {
-            id: cellId,
-            notebook_id,
-            cell_type,
-            content,
-            metadata: metadata || {},
-          },
-          agentType: contentObj.agent_type,
-          _handled: true,
-        })
       }
     } catch (error) {
-      console.error("Error handling cell creation:", error)
+      // Log error but don't modify the original message if parsing failed
+      console.error("Error processing agent response for cell creation:", error, "Original message:", message)
     }
   }
 
@@ -171,41 +231,16 @@ const handleStreamingResponse = async (
 
             const chunk = JSON.parse(line) as ChatMessage
 
-            // Check if this message contains a cell creation request
-            if (chunk.role === "model" && chunk.content) {
-              try {
-                // Try to parse the content as JSON
-                const contentObj = JSON.parse(chunk.content)
-                if (
-                  contentObj.type === "cell_response" &&
-                  contentObj.cell_params &&
-                  ["plan_cell_created", "step_completed", "summary_created"].includes(contentObj.status_type)
-                ) {
-                  // Handle cell creation directly
-                  handleCellCreation(chunk)
-
-                  // Skip adding this message to the chat interface
-                  continue
-                }
-              } catch (e) {
-                // Not JSON or not a cell creation message, continue normal processing
-              }
+            // NEW: Process chunk for potential cell creation *before* passing to UI callback
+            if (chunk.role === 'model' && chunk.content) {
+               handleAgentResponse(chunk); // This function might modify chunk.content if it handles cell creation
             }
 
-            // Check if this is a continuation of the current message
-            if (currentMessage && currentMessage.role === chunk.role) {
-              // Append to the existing message
-              currentMessage.content += chunk.content
-              currentMessage.timestamp = chunk.timestamp // Update timestamp to the latest
+            // Pass the (potentially modified) chunk to the UI callback
+            onChunk(chunk)
+            messages.push(chunk) // Store the raw chunk
+            currentMessage = chunk // Update the 'last' message seen
 
-              // Call onChunk with the updated message
-              onChunk({ ...currentMessage })
-            } else {
-              // This is a new message
-              currentMessage = { ...chunk }
-              messages.push(currentMessage)
-              onChunk(currentMessage)
-            }
           } catch (e) {
             console.error("Error parsing JSON:", e, "Line:", line)
 
@@ -238,74 +273,21 @@ const handleStreamingResponse = async (
       }
     }
 
-    // Process any remaining data
     if (buffer.trim()) {
       try {
-        // Check for errors in the remaining buffer
-        if (buffer.includes('"error":')) {
-          const errorJson = JSON.parse(buffer)
-          if (errorJson.error) {
-            let errorMessage = "Error in response"
-
-            if (typeof errorJson.error === "string") {
-              errorMessage = errorJson.error
-            } else if (errorJson.error.message) {
-              errorMessage = errorJson.error.message
-
-              // Add error type if available
-              if (errorJson.error.type) {
-                errorMessage += ` (${errorJson.error.type})`
-              }
-            }
-
-            throw new Error(errorMessage)
-          }
-        }
-
         const chunk = JSON.parse(buffer) as ChatMessage
-
-        // Check if this message contains a cell creation request
-        if (chunk.role === "model" && chunk.content) {
-          try {
-            // Try to parse the content as JSON
-            const contentObj = JSON.parse(chunk.content)
-            if (
-              contentObj.type === "cell_response" &&
-              contentObj.cell_params &&
-              ["plan_cell_created", "step_completed", "summary_created"].includes(contentObj.status_type)
-            ) {
-              // Handle cell creation directly
-              handleCellCreation(chunk)
-
-              // Skip adding this message to the chat interface
-              return messages
-            }
-          } catch (e) {
-            // Not JSON or not a cell creation message, continue normal processing
-          }
+        // NEW: Process final chunk for potential cell creation
+        if (chunk.role === 'model' && chunk.content) {
+            handleAgentResponse(chunk);
         }
-
-        // Check if this is a continuation of the current message
-        if (currentMessage && currentMessage.role === chunk.role) {
-          // Append to the existing message
-          currentMessage.content += chunk.content
-          currentMessage.timestamp = chunk.timestamp // Update timestamp to the latest
-
-          // Call onChunk with the updated message
-          onChunk({ ...currentMessage })
-        } else {
-          // This is a new message
-          currentMessage = { ...chunk }
-          messages.push(currentMessage)
-          onChunk(currentMessage)
-        }
+        onChunk(chunk)
+        messages.push(chunk)
+        currentMessage = chunk
       } catch (e) {
-        console.error("Error parsing JSON:", e, "Buffer:", buffer)
-
-        // If this is an error we threw ourselves, rethrow it
-        if (e instanceof Error && (e.message.includes("Error in response") || e.message.includes("overloaded"))) {
-          throw e
-        }
+         console.error("Error parsing final buffer JSON:", e, "Buffer:", buffer)
+         // Decide if this error should be thrown or handled differently
+         // For now, let's re-throw but provide context
+         throw new Error(`Error parsing final chunk: ${e instanceof Error ? e.message : String(e)} - Buffer: ${buffer.substring(0, 100)}...`)
       }
     }
 

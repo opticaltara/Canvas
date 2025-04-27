@@ -7,6 +7,8 @@ Agent for handling GitHub interactions via a locally running MCP server.
 import logging
 from typing import  Optional, AsyncGenerator, Union, Dict, Any, List
 from datetime import datetime, timezone
+import json
+import os # Added import
 
 from pydantic_ai import Agent, UnexpectedModelBehavior, CallToolsNode
 from pydantic_ai.messages import (
@@ -86,18 +88,24 @@ class GitHubQueryAgent:
             github_query_agent_logger.error(f"Error getting/configuring GitHub stdio server: {e}", exc_info=True)
             return None
 
+    def _read_system_prompt(self) -> str:
+        """Reads the system prompt from the dedicated file."""
+        prompt_file_path = os.path.join(os.path.dirname(__file__), "prompts", "github_agent_system_prompt.txt")
+        try:
+            with open(prompt_file_path, 'r') as f:
+                return f.read()
+        except FileNotFoundError:
+            github_query_agent_logger.error(f"System prompt file not found at: {prompt_file_path}")
+            # Return a default minimal prompt as fallback
+            return "You are a helpful AI assistant interacting with a GitHub MCP server."
+        except Exception as e:
+            github_query_agent_logger.error(f"Error reading system prompt file {prompt_file_path}: {e}", exc_info=True)
+            return "You are a helpful AI assistant interacting with a GitHub MCP server." # Fallback
+
     def _initialize_agent(self, stdio_server: MCPServerStdio) -> Agent:
         """Initializes the Pydantic AI Agent with GitHub specific configuration."""
-        # Define system prompt for GitHub interactions
-        system_prompt = (
-            "You are a specialized agent interacting with a GitHub MCP server via stdio. "
-            "Use the available tools provided by the MCP server to answer the user's request about GitHub resources "
-            "(like repositories, issues, pull requests, users, etc.).\n"
-            "Pay attention to the current date and time provided at the beginning of the user's query "
-            "to accurately interpret time-related requests (e.g., 'recent', 'last week').\n"
-            "Be precise in your tool usage based on the request.\n\n"
-            "Structure the 'data' field of your final response (which should conform to the GithubQueryResult model) to contain ONLY the direct answer to the user's query. For example, if asked for the most recent repository, the 'data' field should contain only the details of that single repository, not the list of all repositories examined unless the query specifically asked for the full list."
-        )
+        # Read system prompt from file
+        system_prompt = self._read_system_prompt()
 
         agent = Agent(
             self.model,
@@ -129,19 +137,26 @@ class GitHubQueryAgent:
                                 if isinstance(event, FunctionToolCallEvent):
                                     tool_call_id = event.part.tool_call_id
                                     tool_name = getattr(event.part, 'tool_name', None)
-                                    tool_args = getattr(event.part, 'tool_args', {})
+                                    tool_args = getattr(event.part, 'args', {})
                                     if not tool_name:
                                         github_query_agent_logger.warning(f"Attempt {attempt_num}: ToolCallPart missing 'tool_name'. Part: {event.part!r}")
                                         tool_name = "UnknownTool"
                                     pending_tool_calls[tool_call_id] = {"tool_name": tool_name, "tool_args": tool_args}
-                                    # Yield status update from within the attempt
                                     yield {"status": "tool_call_requested", "attempt": attempt_num, "tool_call_id": tool_call_id, "tool_name": tool_name, "tool_args": tool_args}
                                 elif isinstance(event, FunctionToolResultEvent):
                                     tool_call_id = event.tool_call_id
                                     tool_result = event.result.content
                                     if tool_call_id in pending_tool_calls:
                                         call_info = pending_tool_calls.pop(tool_call_id)
-                                        record = ToolCallRecord(tool_call_id=tool_call_id, tool_name=call_info["tool_name"], tool_args=call_info["tool_args"], tool_result=tool_result)
+                                        args_data = call_info["tool_args"]
+                                        if isinstance(args_data, str):
+                                            try:
+                                                args_data = json.loads(args_data)
+                                            except json.JSONDecodeError as json_err:
+                                                github_query_agent_logger.error(f"Attempt {attempt_num}: Failed to parse tool_args JSON string: {args_data}. Error: {json_err}")
+                                                args_data = {}
+
+                                        record = ToolCallRecord(tool_call_id=tool_call_id, tool_name=call_info["tool_name"], tool_args=args_data, tool_result=tool_result)
                                         successful_tool_calls_in_attempt.append(record)
                                         github_query_agent_logger.debug(f"Attempt {attempt_num}: Stored tool record: {record}")
                                     else:
@@ -168,26 +183,18 @@ class GitHubQueryAgent:
             github_query_agent_logger.warning(f"AgentRunResult structure unexpected: {run_result}. Attempting to use directly.")
             result_data_obj = run_result
 
-        filtered_tool_calls: List[ToolCallRecord] = []
-        if successful_tool_calls_in_attempt:
-            filtered_tool_calls.append(successful_tool_calls_in_attempt[0]) # Add first
-            if len(successful_tool_calls_in_attempt) > 1:
-                last_call = successful_tool_calls_in_attempt[-1]
-                if successful_tool_calls_in_attempt[0].tool_call_id != last_call.tool_call_id:
-                     filtered_tool_calls.append(last_call)
-            
         if result_data_obj and isinstance(result_data_obj, GithubQueryResult) and result_data_obj.data is not None:
             github_query_agent_logger.info(f"Processing GithubQueryResult directly.")
             final_result_data = result_data_obj
             final_result_data.query = original_description # Ensure original query is set
-            final_result_data.tool_calls = filtered_tool_calls
+            final_result_data.tool_calls = successful_tool_calls_in_attempt
             return final_result_data
         elif result_data_obj is not None:
             github_query_agent_logger.info(f"Wrapping non-GithubQueryResult data: {type(result_data_obj)}.")
             final_result_data = GithubQueryResult(
                 query=original_description, 
                 data=result_data_obj,
-                tool_calls=filtered_tool_calls
+                tool_calls=successful_tool_calls_in_attempt
             )
             return final_result_data
         else:
@@ -292,9 +299,17 @@ class GitHubQueryAgent:
                         break # Exit inner loop to handle final error
 
                     except Exception as e: # Catch other potential errors during agent iteration or processing
-                        github_query_agent_logger.error(f"General error during agent iteration/processing attempt {attempt + 1}: {e}", exc_info=True)
-                        yield {"status": "general_error_run", "attempt": attempt + 1, "error": str(e)}
-                        last_error = f"Agent iteration/processing failed unexpectedly: {str(e)}"
+                        if isinstance(e, TypeError) and "'NoneType' object cannot be interpreted as an integer" in str(e):
+                            # Specific handling for the timestamp issue
+                            error_msg = "TypeError: OpenAI API response likely missing 'created' timestamp."
+                            github_query_agent_logger.error(f"Timestamp Error during agent run attempt {attempt + 1}: {error_msg}", exc_info=True)
+                            yield {"status": "timestamp_error", "attempt": attempt + 1, "error": error_msg}
+                            last_error = f"Agent iteration failed: {error_msg}"
+                        else:
+                            # Handle other general errors
+                            github_query_agent_logger.error(f"General error during agent iteration/processing attempt {attempt + 1}: {e}", exc_info=True)
+                            yield {"status": "general_error_run", "attempt": attempt + 1, "error": str(e)}
+                            last_error = f"Agent iteration/processing failed unexpectedly: {str(e)}"
                         break # Exit inner loop to handle final error
 
                 # If the loop finished without returning (i.e., max attempts reached or broke due to error)
