@@ -8,36 +8,37 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Play, Save, Share, Download, MoreHorizontal } from "lucide-react"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import Cell from "@/components/canvas/Cell"
 import CellCreationPills from "@/components/canvas/CellCreationPills"
 import AIChatPanel from "@/components/AIChatPanel"
 import AIChatToggle from "@/components/AIChatToggle"
 import { api } from "@/api/client"
 import { useToast } from "@/hooks/use-toast"
 import { useInvestigationEvents, type CellCreationParams } from "@/hooks/useInvestigationEvents"
-// Update the imports at the top to include useCanvasStore
 import { useCanvasStore } from "@/store/canvasStore"
+import { type Cell, type CellType } from "@/store/types"
+import CellFactory from "@/components/cells/CellFactory"
+
+// Local type extending Cell to include transient UI state
+type DisplayCell = Cell & { isNew?: boolean }
 
 export default function CanvasPage() {
   const params = useParams()
   const notebookId = params.id as string
   const { toast } = useToast()
 
-  const [notebook, setNotebook] = useState(null)
-  const [cells, setCells] = useState([])
+  const [notebook, setNotebook] = useState<any | null>(null)
+  const [cells, setCells] = useState<DisplayCell[]>([])
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
+  const [error, setError] = useState<string | null>(null)
   const [isEditing, setIsEditing] = useState(false)
   const [isEditingDesc, setIsEditingDesc] = useState(false)
   const [editedName, setEditedName] = useState("")
   const [editedDescription, setEditedDescription] = useState("")
-  const [deletingCellId, setDeletingCellId] = useState(null)
+  const [deletingCellId, setDeletingCellId] = useState<string | null>(null)
   const [isChatPanelOpen, setIsChatPanelOpen] = useState(false)
 
-  // Add a ref to track initialization
   const initialized = useRef(false)
 
-  // Set the active notebook ID in the store when the component mounts
   useEffect(() => {
     if (notebookId) {
       console.log("🔑 Setting active notebook ID in store:", notebookId)
@@ -45,26 +46,33 @@ export default function CanvasPage() {
     }
   }, [notebookId])
 
-  // Handle cell creation from investigation events
   const handleCreateCell = useCallback(
     (params: CellCreationParams) => {
       console.log("🔍 handleCreateCell called with params:", params)
-      // Check if cell already exists
       const existingCellIndex = cells.findIndex((cell) => cell.id === params.id)
 
       if (existingCellIndex >= 0) {
-        // Update existing cell
         const updatedCells = [...cells]
         updatedCells[existingCellIndex] = {
           ...updatedCells[existingCellIndex],
           ...params,
+          type: params.type as CellType,
         }
         setCells(updatedCells)
       } else {
-        // Create new cell
-        setCells((prevCells) => [...prevCells, { ...params, isNew: true }])
+        const now = new Date().toISOString()
+        const newCell: DisplayCell = {
+          ...params,
+          type: params.type as CellType,
+          notebook_id: notebookId,
+          created_at: now,
+          updated_at: now,
+          metadata: params.result?.metadata || {},
+          isNew: true,
+        }
 
-        // Remove the isNew flag after animation completes
+        setCells((prevCells) => [...prevCells, newCell])
+
         setTimeout(() => {
           setCells((prevCells) => prevCells.map((cell) => (cell.id === params.id ? { ...cell, isNew: false } : cell)))
         }, 500)
@@ -73,12 +81,30 @@ export default function CanvasPage() {
     [cells],
   )
 
-  // Handle cell updates from investigation events
   const handleUpdateCell = useCallback((cellId: string, updates: Partial<CellCreationParams>) => {
-    setCells((prevCells) => prevCells.map((cell) => (cell.id === cellId ? { ...cell, ...updates } : cell)))
+    setCells((prevCells) =>
+      prevCells.map((cell): DisplayCell => {
+        if (cell.id === cellId) {
+          const updatedCell: DisplayCell = {
+            ...cell,
+            content: updates.content !== undefined ? updates.content : cell.content,
+            status: updates.status !== undefined ? updates.status : cell.status,
+            result: updates.result !== undefined ? updates.result : cell.result,
+            error: updates.error !== undefined ? updates.error : cell.error,
+            type: updates.type !== undefined ? (updates.type as CellType) : cell.type,
+            id: cell.id,
+            notebook_id: cell.notebook_id,
+            created_at: cell.created_at,
+            updated_at: new Date().toISOString(),
+            metadata: cell.metadata,
+          }
+          return updatedCell
+        }
+        return cell
+      }),
+    )
   }, [])
 
-  // Handle errors from investigation events
   const handleInvestigationError = useCallback(
     (message: string) => {
       setError(message)
@@ -91,7 +117,6 @@ export default function CanvasPage() {
     [toast],
   )
 
-  // Initialize the investigation events hook
   const { wsStatus, isInvestigationRunning, currentPlan, currentStatus } = useInvestigationEvents({
     notebookId,
     onCreateCell: handleCreateCell,
@@ -99,7 +124,6 @@ export default function CanvasPage() {
     onError: handleInvestigationError,
   })
 
-  // Fetch notebook and cells data
   useEffect(() => {
     const fetchNotebookData = async () => {
       if (!notebookId) return
@@ -108,31 +132,24 @@ export default function CanvasPage() {
       setError(null)
 
       try {
-        // Fetch notebook details
         const notebookData = await api.notebooks.get(notebookId)
         setNotebook(notebookData)
         setEditedName(notebookData.name || notebookData.metadata?.title || "Untitled Notebook")
         setEditedDescription(notebookData.description || notebookData.metadata?.description || "")
 
-        // Check if api.cells exists before trying to use it
         if (api.cells && typeof api.cells.list === "function") {
           try {
-            // Fetch cells for this notebook
             const cellsData = await api.cells.list(notebookId)
-            // Handle the case where cellsData might be an object instead of an array
             if (Array.isArray(cellsData)) {
               setCells(cellsData)
             } else if (notebookData.cells && typeof notebookData.cells === "object") {
-              // If the notebook response includes cells as an object, convert to array
               const cellsArray = Object.values(notebookData.cells)
               setCells(cellsArray)
             } else {
-              // Default to empty array if no cells found
               setCells([])
             }
           } catch (cellError) {
             console.error("Failed to fetch cells:", cellError)
-            // If cells can't be fetched, check if they're included in the notebook response
             if (notebookData.cells && typeof notebookData.cells === "object") {
               const cellsArray = Object.values(notebookData.cells)
               setCells(cellsArray)
@@ -142,7 +159,6 @@ export default function CanvasPage() {
           }
         } else {
           console.warn("api.cells.list is not available, checking for cells in notebook response")
-          // If api.cells.list doesn't exist, check if cells are included in the notebook response
           if (notebookData.cells && typeof notebookData.cells === "object") {
             const cellsArray = Object.values(notebookData.cells)
             setCells(cellsArray)
@@ -151,14 +167,13 @@ export default function CanvasPage() {
           }
         }
 
-        // Set the active notebook in the store
         useCanvasStore.getState().setActiveNotebook(notebookId)
 
         setLoading(false)
         initialized.current = true
-      } catch (err) {
+      } catch (err: unknown) {
         console.error("Failed to fetch notebook data:", err)
-        setError(err.message || "Failed to load canvas")
+        setError(err instanceof Error ? err.message : "Failed to load canvas")
         setLoading(false)
         toast({
           variant: "destructive",
@@ -171,7 +186,6 @@ export default function CanvasPage() {
     fetchNotebookData()
   }, [notebookId, toast])
 
-  // Subscribe to the canvasStore to keep cells in sync
   useEffect(() => {
     console.log("🔄 Setting up canvasStore subscription for notebook:", notebookId)
     console.log(
@@ -179,7 +193,6 @@ export default function CanvasPage() {
       cells.map((c) => ({ id: c.id, type: c.type })),
     )
 
-    // Get initial state from store
     const storeCells = useCanvasStore.getState().cells
     const activeNotebookId = useCanvasStore.getState().activeNotebookId
     console.log(
@@ -188,7 +201,6 @@ export default function CanvasPage() {
     )
     console.log("🔄 Active notebook ID in store:", activeNotebookId)
 
-    // Apply any cells from store that aren't in our local state
     if (storeCells.length > 0) {
       const relevantCells = storeCells.filter((cell) => cell.notebook_id === notebookId)
       if (relevantCells.length > 0) {
@@ -206,34 +218,32 @@ export default function CanvasPage() {
       }
     }
 
-    // Setup subscription to canvasStore for cells
     const unsubscribe = useCanvasStore.subscribe(
-      (state) => state.cells,
-      (newCells, previousCells) => {
+      (state, prevState) => {
+        const newCells = state.cells
+        const previousCells = prevState.cells
         console.log("🔔 Canvas store cells updated - callback triggered")
         console.log("🔔 Previous cells count:", previousCells?.length || 0)
         console.log("🔔 New cells count:", newCells.length)
         console.log("🔔 Active notebook ID in store:", useCanvasStore.getState().activeNotebookId)
 
         if (newCells.length && notebookId) {
-          // Only update if we have cells in the store and they match our notebook
-          const relevantCells = newCells.filter((cell) => cell.notebook_id === notebookId)
+          const relevantCells = newCells.filter((cell: Cell) => cell.notebook_id === notebookId)
           console.log(
             "🔔 Relevant cells for this notebook:",
-            relevantCells.map((c) => ({ id: c.id, type: c.type })),
+            relevantCells.map((c: Cell) => ({ id: c.id, type: c.type })),
           )
           console.log("🔔 Notebook ID we're filtering for:", notebookId)
 
           if (relevantCells.length) {
-            // Merge new cells with existing ones, avoiding duplicates
             setCells((prevCells) => {
-              const existingIds = new Set(prevCells.map((cell) => cell.id))
+              const existingIds = new Set(prevCells.map((cell: DisplayCell) => cell.id))
               console.log("🔔 Existing cell IDs in component:", Array.from(existingIds))
 
-              const newUniqueItems = relevantCells.filter((cell) => !existingIds.has(cell.id))
+              const newUniqueItems = relevantCells.filter((cell: Cell) => !existingIds.has(cell.id))
               console.log(
                 "🔔 New unique cells to add:",
-                newUniqueItems.map((c) => ({ id: c.id, type: c.type })),
+                newUniqueItems.map((c: Cell) => ({ id: c.id, type: c.type })),
               )
 
               if (newUniqueItems.length > 0) {
@@ -258,9 +268,7 @@ export default function CanvasPage() {
     }
   }, [notebookId, cells])
 
-  // Add a direct sync effect to pull cells from the store
   useEffect(() => {
-    // Only run this after initial data load to avoid overwriting API data
     if (initialized.current && notebookId) {
       console.log("🔄 Syncing component with store cells")
       const storeCells = useCanvasStore.getState().cells
@@ -269,7 +277,6 @@ export default function CanvasPage() {
       if (relevantCells.length > 0) {
         console.log("🔄 Found cells in store to sync:", relevantCells.length)
 
-        // Merge store cells with component cells, avoiding duplicates
         setCells((prevCells) => {
           const existingIds = new Set(prevCells.map((cell) => cell.id))
           const newCells = relevantCells.filter((cell) => !existingIds.has(cell.id))
@@ -285,7 +292,6 @@ export default function CanvasPage() {
     }
   }, [useCanvasStore.getState().cells, notebookId])
 
-  // Add a debug effect to log cells changes
   useEffect(() => {
     console.log("📊 Cells state changed, current count:", cells.length)
     console.log(
@@ -294,7 +300,6 @@ export default function CanvasPage() {
     )
   }, [cells])
 
-  // Update notebook name
   const handleNameChange = async () => {
     if (!notebook || !editedName.trim()) return
 
@@ -319,7 +324,6 @@ export default function CanvasPage() {
     }
   }
 
-  // Update notebook description
   const handleDescriptionChange = async () => {
     if (!notebook) return
 
@@ -344,47 +348,35 @@ export default function CanvasPage() {
     }
   }
 
-  // Add a new cell
-  const handleAddCell = async (type, index) => {
+  const handleAddCell = async (type: CellType, index: number) => {
     if (!notebookId) return
 
     try {
-      // Set default content based on cell type
       let defaultContent = ""
       switch (type) {
         case "markdown":
           defaultContent = "# New markdown cell"
           break
-        case "sql":
-          defaultContent = "SELECT * FROM table LIMIT 10;"
-          break
-        case "python":
-          defaultContent = "# Python code\nprint('Hello, world!')"
-          break
-        case "ai":
-          defaultContent = ""
-          break
         case "log":
-          defaultContent = '{level=~"ERROR|CRITICAL"} [10m]'
+          defaultContent = '{level=~"error"} |= ``'
+          break
+        case "github":
+          defaultContent = "{}"
           break
       }
 
-      // Map "ai" type to "ai_query" for the API
-      const apiCellType = type === "ai" ? "ai_query" : type
+      const apiCellType = type
 
-      // Create the cell via API
       const newCell = await api.cells.create(notebookId, {
-        type: apiCellType, // Use the mapped cell type for the API
+        type: apiCellType,
         content: defaultContent,
         status: "idle",
       })
 
-      // Update local state with animation
       const updatedCells = [...cells]
       updatedCells.splice(index, 0, { ...newCell, isNew: true })
       setCells(updatedCells)
 
-      // Remove the isNew flag after animation completes
       setTimeout(() => {
         setCells((cells) => cells.map((cell) => (cell.id === newCell.id ? { ...cell, isNew: false } : cell)))
       }, 500)
@@ -403,20 +395,15 @@ export default function CanvasPage() {
     }
   }
 
-  // Delete a cell
-  const handleDeleteCell = async (cellId) => {
+  const handleDeleteCell = async (cellId: string) => {
     if (!notebookId) return
 
     try {
-      // Set the deleting cell ID to trigger animation
       setDeletingCellId(cellId)
 
-      // Wait for animation to complete
       setTimeout(async () => {
-        // Delete the cell via API
         await api.cells.delete(notebookId, cellId)
 
-        // Update local state
         setCells(cells.filter((cell) => cell.id !== cellId))
         setDeletingCellId(null)
 
@@ -436,16 +423,13 @@ export default function CanvasPage() {
     }
   }
 
-  // Update cell content
-  const handleCellContentChange = async (cellId, newContent) => {
+  const handleCellContentChange = async (cellId: string, newContent: string) => {
     if (!notebookId) return
 
     try {
-      // Find the cell to update
       const cellIndex = cells.findIndex((cell) => cell.id === cellId)
       if (cellIndex === -1) return
 
-      // Update local state immediately for responsiveness
       const updatedCells = [...cells]
       updatedCells[cellIndex] = {
         ...updatedCells[cellIndex],
@@ -453,7 +437,6 @@ export default function CanvasPage() {
       }
       setCells(updatedCells)
 
-      // Update the cell via API
       await api.cells.update(notebookId, cellId, {
         content: newContent,
       })
@@ -467,16 +450,13 @@ export default function CanvasPage() {
     }
   }
 
-  // Cell execution is handled by the API
-  const handleCellRun = async (cellId) => {
+  const handleCellRun = async (cellId: string) => {
     if (!notebookId) return
 
     try {
-      // Find the cell to execute
       const cellIndex = cells.findIndex((cell) => cell.id === cellId)
       if (cellIndex === -1) return
 
-      // Update local state to show running status
       const updatedCells = [...cells]
       updatedCells[cellIndex] = {
         ...updatedCells[cellIndex],
@@ -484,28 +464,26 @@ export default function CanvasPage() {
       }
       setCells(updatedCells)
 
-      // Execute the cell via API
       const result = await api.cells.execute(notebookId, cellId)
 
-      // Update local state with the result
-      updatedCells[cellIndex] = result
+      const resultCell: DisplayCell = { ...result }
+      updatedCells[cellIndex] = resultCell
       setCells(updatedCells)
 
       toast({
         title: "Success",
         description: "Cell executed successfully.",
       })
-    } catch (err) {
+    } catch (err: unknown) {
       console.error("Failed to execute cell:", err)
 
-      // Update local state to show error
       const cellIndex = cells.findIndex((cell) => cell.id === cellId)
       if (cellIndex !== -1) {
         const updatedCells = [...cells]
         updatedCells[cellIndex] = {
           ...updatedCells[cellIndex],
           status: "error",
-          error: err.message || "Execution failed",
+          error: err instanceof Error ? err.message : "Execution failed",
         }
         setCells(updatedCells)
       }
@@ -518,45 +496,42 @@ export default function CanvasPage() {
     }
   }
 
-  // Send a message to an AI cell
-  const handleSendMessage = async (cellId, message) => {
+  const handleSendMessage = async (cellId: string, message: string) => {
     if (!notebookId) return
 
     try {
-      // Find the cell
       const cellIndex = cells.findIndex((cell) => cell.id === cellId)
       if (cellIndex === -1) return
 
       const cell = cells[cellIndex]
 
-      // Update local state to add user message and show running status
       const updatedCells = [...cells]
-      const messages = cell.messages || []
-
+      const messages = (cell.metadata?.messages as any[]) || []
       updatedCells[cellIndex] = {
         ...cell,
-        messages: [...messages, { role: "user", content: message }],
         status: "running",
+        metadata: {
+          ...cell.metadata,
+          messages: [...messages, { role: "user", content: message }],
+        },
       }
       setCells(updatedCells)
 
-      // Send the message to the API
       const result = await api.cells.sendMessage(notebookId, cellId, message)
 
-      // Update local state with the result
-      updatedCells[cellIndex] = result
+      const resultCell: DisplayCell = { ...result }
+      updatedCells[cellIndex] = resultCell
       setCells(updatedCells)
-    } catch (err) {
+    } catch (err: unknown) {
       console.error("Failed to send message:", err)
 
-      // Update local state to show error
       const cellIndex = cells.findIndex((cell) => cell.id === cellId)
       if (cellIndex !== -1) {
         const updatedCells = [...cells]
         updatedCells[cellIndex] = {
           ...updatedCells[cellIndex],
           status: "error",
-          error: err.message || "Failed to send message",
+          error: err instanceof Error ? err.message : "Failed to send message",
         }
         setCells(updatedCells)
       }
@@ -569,14 +544,12 @@ export default function CanvasPage() {
     }
   }
 
-  // Run all cells sequentially through the API
   const handleRunAll = async () => {
     if (!notebookId || !cells.length) return
 
     try {
-      // Execute cells sequentially
       for (const cell of cells) {
-        if (cell.type !== "markdown" && cell.type !== "ai") {
+        if (cell.type !== "markdown") {
           await handleCellRun(cell.id)
         }
       }
@@ -595,7 +568,6 @@ export default function CanvasPage() {
     }
   }
 
-  // Toggle the chat panel
   const toggleChatPanel = () => {
     setIsChatPanelOpen(!isChatPanelOpen)
   }
@@ -614,7 +586,6 @@ export default function CanvasPage() {
       ) : notebook ? (
         <>
           <div className="mb-8">
-            {/* Notebook Title Section */}
             <div className="flex justify-between items-center border-b pb-4 mb-4">
               <div className="flex-1">
                 {isEditing ? (
@@ -671,7 +642,6 @@ export default function CanvasPage() {
               </div>
             </div>
 
-            {/* WebSocket Status and Investigation Status */}
             <div className="mt-2 flex items-center">
               <div
                 className={`w-2 h-2 rounded-full mr-2 ${
@@ -690,7 +660,6 @@ export default function CanvasPage() {
               )}
             </div>
 
-            {/* Notebook Description Section */}
             <div className="mt-2 mb-4">
               {isEditingDesc ? (
                 <div>
@@ -719,20 +688,21 @@ export default function CanvasPage() {
             {cells.map((cell, index) => (
               <div
                 key={cell.id}
-                className={`cell-container ${deletingCellId === cell.id ? "deleted" : ""} ${
-                  cell.isNew ? "cell-enter" : ""
-                }`}
+                className={`cell-container ${deletingCellId === cell.id ? "deleted" : ""} ${cell.isNew ? "cell-enter" : ""}`}
               >
-                <Cell
+                <CellFactory
                   cell={cell}
+                  onExecute={() => handleCellRun(cell.id)}
+                  onUpdate={handleCellContentChange}
                   onDelete={() => handleDeleteCell(cell.id)}
-                  onContentChange={(newContent) => handleCellContentChange(cell.id, newContent)}
-                  onRun={() => handleCellRun(cell.id)}
-                  onSendMessage={handleSendMessage}
+                  isExecuting={useCanvasStore.getState().isExecuting(cell.id)}
                 />
-                {/* Only show CellCreationPills after the last cell */}
                 {index === cells.length - 1 && (
-                  <CellCreationPills onAddCell={(type) => handleAddCell(type, index + 1)} />
+                  <CellCreationPills
+                    onAddCell={(type: string) => {
+                      handleAddCell(type as CellType, index + 1)
+                    }}
+                  />
                 )}
               </div>
             ))}
@@ -740,17 +710,19 @@ export default function CanvasPage() {
               <div className="text-center py-12 bg-gray-50 rounded-lg">
                 <h3 className="text-lg font-medium text-gray-900 mb-2">This canvas is empty</h3>
                 <p className="text-gray-500 mb-4">Add your first cell to get started</p>
-                <CellCreationPills onAddCell={(type) => handleAddCell(type, 0)} />
+                <CellCreationPills
+                  onAddCell={(type: string) => {
+                    handleAddCell(type as CellType, 0)
+                  }}
+                />
               </div>
             )}
           </div>
         </>
       ) : null}
 
-      {/* AI Chat Panel */}
       <AIChatPanel isOpen={isChatPanelOpen} onToggle={toggleChatPanel} notebookId={notebookId} />
 
-      {/* AI Chat Toggle Button */}
       <AIChatToggle isOpen={isChatPanelOpen} onToggle={toggleChatPanel} notebookId={notebookId} />
     </div>
   )

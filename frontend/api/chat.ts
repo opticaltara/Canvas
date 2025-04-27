@@ -1,5 +1,6 @@
 import { BACKEND_URL } from "@/config/api-config"
 import { useCanvasStore } from "@/store/canvasStore"
+import { CellType, CellStatus } from "../store/types"
 
 export interface ChatMessage {
   role: "user" | "model"
@@ -19,6 +20,7 @@ export interface CellCreationEvent {
     metadata?: Record<string, any>
   }
   agentType: string
+  _handled?: boolean
 }
 
 export interface ChatSession {
@@ -38,14 +40,11 @@ const handleStreamingResponse = async (
 
       console.log("Parsed content object:", contentObj)
 
-      // Check if this is a cell creation message and has cell_params
-      // Handle all status types that include cell_params
       if (
         contentObj.type === "cell_response" &&
         contentObj.cell_params &&
         ["plan_cell_created", "step_completed", "summary_created"].includes(contentObj.status_type)
       ) {
-        // Extract cell parameters from the nested structure
         const { notebook_id, cell_type, content, metadata, position } = contentObj.cell_params
 
         console.log("Cell creation parameters:", {
@@ -54,40 +53,31 @@ const handleStreamingResponse = async (
           content_length: content?.length || 0,
           metadata: metadata ? "present" : "absent",
         })
-
-        // Generate a cell ID if one wasn't provided
         const cellId = `temp-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`
 
-        // Create a cell object with the correct structure
         const cellData = {
           id: cellId,
-          notebook_id,
-          type: cell_type,
-          content,
-          status: "idle",
+          notebook_id: notebook_id as string,
+          type: cell_type as CellType,
+          content: content as string,
+          status: "idle" as CellStatus,
           metadata: metadata || {},
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
-          isNew: true, // Add animation flag
         }
 
         console.log(`Adding cell to canvas store: ${cellId} (${cell_type})`)
-
-        // Set the active notebook ID in the store before adding the cell
         const canvasStore = useCanvasStore.getState()
 
-        // Make sure the active notebook ID is set
         if (canvasStore.activeNotebookId !== notebook_id) {
           console.log(`Setting active notebook ID in store to: ${notebook_id}`)
           canvasStore.setActiveNotebook(notebook_id)
         }
 
-        // Now add the cell to the store
         canvasStore.handleCellUpdate(cellData)
 
         console.log(`Added new ${cell_type} cell from agent ${contentObj.agent_type} directly to canvas store`)
 
-        // Also notify through the onChunk callback, but mark it as handled
         onChunk({
           type: "cell_created",
           cellParams: {
@@ -98,7 +88,7 @@ const handleStreamingResponse = async (
             metadata: metadata || {},
           },
           agentType: contentObj.agent_type,
-          _handled: true, // Mark as handled so it doesn't show in chat
+          _handled: true,
         })
       }
     } catch (error) {
@@ -220,7 +210,7 @@ const handleStreamingResponse = async (
             console.error("Error parsing JSON:", e, "Line:", line)
 
             // If this is an error we threw ourselves, rethrow it
-            if (e.message && (e.message.includes("Error in response") || e.message.includes("overloaded"))) {
+            if (e instanceof Error && (e.message.includes("Error in response") || e.message.includes("overloaded"))) {
               throw e
             }
 
@@ -313,7 +303,7 @@ const handleStreamingResponse = async (
         console.error("Error parsing JSON:", e, "Buffer:", buffer)
 
         // If this is an error we threw ourselves, rethrow it
-        if (e.message && (e.message.includes("Error in response") || e.message.includes("overloaded"))) {
+        if (e instanceof Error && (e.message.includes("Error in response") || e.message.includes("overloaded"))) {
           throw e
         }
       }

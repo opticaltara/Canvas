@@ -4,8 +4,8 @@ import { z } from "zod"
 export const CellStatusSchema = z.enum(["idle", "running", "success", "error"])
 export type CellStatus = z.infer<typeof CellStatusSchema>
 
-// Update the CellTypeSchema to include github
-export const CellTypeSchema = z.enum(["markdown", "sql", "code", "grafana", "log", "github"])
+// Update the CellTypeSchema to include only supported types
+export const CellTypeSchema = z.enum(["markdown", "log", "github"])
 export type CellType = z.infer<typeof CellTypeSchema>
 
 export const CellSchema = z.object({
@@ -28,6 +28,8 @@ export const NotebookSchema = z.object({
   description: z.string().optional(),
   created_at: z.string(),
   updated_at: z.string(),
+  metadata: z.record(z.any()).optional(),
+  cells: z.record(CellSchema).optional(),
 })
 export type Notebook = z.infer<typeof NotebookSchema>
 
