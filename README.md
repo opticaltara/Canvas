@@ -157,6 +157,43 @@ python -m uvicorn backend.server:app --reload --host 0.0.0.0 --port 8000
 2. Follow the investigation flow or modify any cell
 3. Add your own cells for custom analysis
 
+## Core Concepts
+
+Sherlog Canvas operates on a few key concepts:
+
+### Cells
+
+A **Cell** is the fundamental unit of work in a Sherlog Canvas notebook. Each cell contains a specific piece of code or query, a type (e.g., `sql`, `python`, `logql`, `promql`, `markdown`), and its output. Cells can be created manually by the user or automatically by the AI agent based on an investigation query.
+
+### Dependency Graph
+
+Sherlog Canvas maintains a **Dependency Graph** to manage the relationships between cells. When a cell is modified, the system automatically identifies and re-executes any dependent cells downstream in the graph. This reactive nature ensures that the notebook always reflects the latest state of the investigation based on the current inputs and code. Dependencies are typically established when one cell references the output or variables defined in another cell (e.g., a Python cell using the results of an SQL query cell).
+
+### Tool Use (AI Agents)
+
+When you provide an investigation query (e.g., "Find the source of the 5xx errors in the payment service"), the AI agent system analyzes the request and determines which **Tools** are needed to answer it. Each tool corresponds to a specific data source or analysis capability (e.g., querying Prometheus, searching Loki logs, executing SQL against a database). The AI agent then generates the necessary cells, populating them with the appropriate queries or code to use these tools. The results are then displayed in the respective cell outputs.
+
+### Example Investigation Flow
+
+Let's walk through a simple example:
+
+1.  **User Query**: "Show me the average request latency for the 'checkout' service over the last hour."
+2.  **AI Agent Analysis**: The agent determines that this requires querying Prometheus metrics.
+3.  **Tool Selection**: The agent selects the `prometheus_query` tool.
+4.  **Cell Generation**: The agent creates a new cell of type `promql` with a query like:
+    ```promql
+    avg(rate(http_request_duration_seconds_sum{service="checkout"}[1h])) / avg(rate(http_request_duration_seconds_count{service="checkout"}[1h]))
+    ```
+5.  **Execution**: The cell is executed via the Prometheus MCP server.
+6.  **Output**: The result (the average latency) is displayed in the cell's output panel.
+7.  **User Interaction**: Now, suppose the user wants to see the P99 latency instead. They can manually edit the `promql` cell:
+    ```promql
+    histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{service="checkout"}[1h])) by (le))
+    ```
+8.  **Reactivity**: The cell automatically re-executes, showing the updated P99 latency. If another cell depended on the output of this cell (e.g., a Python cell plotting the latency), it would also automatically re-execute due to the dependency graph.
+
+This reactive, AI-assisted workflow allows users to fluidly investigate issues, leveraging automated data gathering and analysis while retaining full control to manually explore and refine the investigation.
+
 ## Configuration
 
 Configuration is managed through environment variables with the `SHERLOG_` prefix:

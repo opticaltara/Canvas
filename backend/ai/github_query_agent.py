@@ -23,7 +23,7 @@ from mcp.shared.exceptions import McpError
 
 from backend.config import get_settings
 from backend.core.query_result import GithubQueryResult, ToolCallRecord
-from backend.services.connection_manager import get_connection_manager
+from backend.services.connection_manager import get_connection_manager, get_github_stdio_params
 
 github_query_agent_logger = logging.getLogger("ai.github_query_agent")
 
@@ -49,43 +49,16 @@ class GitHubQueryAgent:
     async def _get_stdio_server(self) -> Optional[MCPServerStdio]:
         """Fetches default GitHub connection and creates the MCPServerStdio instance."""
         try:
-            connection_manager = get_connection_manager()
-            github_conn = await connection_manager.get_default_connection("github")
-            
-            if not github_conn:
-                github_query_agent_logger.error("No default GitHub connection found.")
+            stdio_params = await get_github_stdio_params()
+            if not stdio_params:
+                github_query_agent_logger.error("Failed to get StdioServerParameters for GitHub.")
                 return None
-            
-            # Extract config
-            config = github_conn.config
-            command_list = config.get("mcp_command")
-            args_template = config.get("mcp_args_template")
-            pat = config.get("github_pat") # Get the stored PAT
-            
-            if not command_list or not args_template or not pat:
-                github_query_agent_logger.error(f"Incomplete stdio configuration in GitHub connection {github_conn.id}: {config}")
-                return None
-                
-            dynamic_args = [
-                 f"-e", f"GITHUB_PERSONAL_ACCESS_TOKEN={pat}",
-                 *args_template
-            ]
-            
-            full_args = command_list[1:] + dynamic_args
-            command = command_list[0]
-            
-            _ = StdioServerParameters(
-                command=command,
-                args=full_args
-            )
-            
-            github_query_agent_logger.info(f"Created StdioServerParameters for connection {github_conn.id}")
-            github_query_agent_logger.info(f"Command: {command}, Args Template: {args_template}")
-            
-            return MCPServerStdio(command=command, args=full_args)
-            
+
+            github_query_agent_logger.info(f"Retrieved StdioServerParameters. Command: {stdio_params.command} {stdio_params.args}")
+            return MCPServerStdio(command=stdio_params.command, args=stdio_params.args)
+
         except Exception as e:
-            github_query_agent_logger.error(f"Error getting/configuring GitHub stdio server: {e}", exc_info=True)
+            github_query_agent_logger.error(f"Error creating MCPServerStdio instance from params: {e}", exc_info=True)
             return None
 
     def _read_system_prompt(self) -> str:
@@ -270,7 +243,6 @@ class GitHubQueryAgent:
                             # Handle case where processing the result failed (returned None)
                             github_query_agent_logger.error(f"_process_final_result returned None on attempt {attempt + 1}. Raw run_result: {run_result}")
                             last_error = "Failed to process successful agent result."
-                            error_detail = f"Final data object from agent_run.result was None or empty after attempt {attempt + 1}. Raw result: {run_result}"
                             # This mirrors the 'no_valid_data' case from the old logic
                             yield {"status": "no_valid_data", "attempt": attempt + 1, "message": "Agent iteration completed but result processing failed."}
                             error_context = f"\\n\\nINFO: Attempt {attempt + 1} completed but result processing failed. Agent will retry."

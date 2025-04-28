@@ -4,7 +4,7 @@ Query Result Module
 This module defines the base QueryResult class and its specialized subclasses for different types of queries.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel
 
 
@@ -85,3 +85,17 @@ class GithubQueryResult(QueryResult):
     """
     data: Any  # GitHub queries can return various structures 
     tool_calls: Optional[List[ToolCallRecord]] = None 
+
+
+class SummarizationQueryResult(QueryResult):
+    """
+    Specialized query result for text summarization.
+    
+    Attributes:
+        data: The generated summary as a Markdown string.
+        query: The original request or description leading to the summarization.
+        error: Optional error message if summarization failed.
+        metadata: Additional metadata about the summarization process (optional).
+    """
+    data: str # Markdown summary
+    # Inherits query, error, metadata from QueryResult

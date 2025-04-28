@@ -97,10 +97,6 @@ class NotebookCellTools:
         get_cell_tool = Tool(name="get_cell", function=self.get_cell)
         get_cell_tool.description = "Get a specific cell by ID"
         
-        # Create tool for executing AI queries
-        execute_ai_query_tool = Tool(name="execute_ai_query", function=self.execute_ai_query)
-        execute_ai_query_tool.description = "Execute an AI query to investigate an issue"
-        
         # Store all tools in a list
         self.tools = [
             create_cell_tool,
@@ -108,14 +104,13 @@ class NotebookCellTools:
             execute_cell_tool,
             list_cells_tool,
             get_cell_tool,
-            execute_ai_query_tool
         ]
     
     def get_tools(self) -> List[Tool]:
         """Get all available tools"""
         return self.tools
     
-    async def create_cell(self, params: CreateCellParams) -> Dict:
+    async def create_cell(self, params: CreateCellParams, **kwargs) -> Dict:
         """Create a new cell in a notebook"""
         try:
             notebook_id = UUID(params.notebook_id)
@@ -127,12 +122,19 @@ class NotebookCellTools:
             # Map cell type string to enum
             cell_type = getattr(CellType, params.cell_type.upper())
             
+            # Merge provided metadata with tool info from kwargs
+            cell_metadata = params.metadata or {}
+            if 'tool_name' in kwargs:
+                cell_metadata['tool_name'] = kwargs['tool_name']
+            if 'tool_arguments' in kwargs:
+                cell_metadata['tool_arguments'] = kwargs['tool_arguments']
+
             # Create the cell
             cell = notebook.create_cell(
                 cell_type=cell_type,
                 content=params.content,
                 position=params.position,
-                metadata=params.metadata or {}
+                metadata=cell_metadata
             )
             
             # Save the notebook
@@ -279,44 +281,6 @@ class NotebookCellTools:
             }
         except Exception as e:
             tools_logger.error(f"Error getting cell: {str(e)}")
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    async def execute_ai_query(self, params: ExecuteAIQueryParams) -> Dict:
-        """Execute an AI query to investigate an issue"""
-        try:
-            notebook_id = UUID(params.notebook_id)
-            tools_logger.info(f"Executing AI query in notebook {notebook_id}: {params.query}")
-            
-            # Get the notebook
-            notebook = self.notebook_manager.get_notebook(notebook_id)
-            
-            # Create an AI query cell
-            cell = notebook.create_cell(
-                cell_type=CellType.AI_QUERY,
-                content=params.query,
-                position=params.position
-            )
-            
-            # Set cell status to queued
-            from backend.core.cell import CellStatus
-            cell.status = CellStatus.QUEUED
-            
-            # Save the notebook
-            self.notebook_manager.save_notebook(notebook_id)
-            
-            tools_logger.info(f"Created AI query cell {cell.id} in notebook {notebook_id}")
-            
-            return {
-                "success": True,
-                "notebook_id": str(notebook_id),
-                "cell_id": str(cell.id),
-                "query": params.query
-            }
-        except Exception as e:
-            tools_logger.error(f"Error executing AI query: {str(e)}")
             return {
                 "success": False,
                 "error": str(e)

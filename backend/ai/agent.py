@@ -15,6 +15,7 @@ with tools that connect to various data sources like SQL, Prometheus, Loki, and 
 from enum import Enum
 from typing import Any, Dict, List, Optional, AsyncGenerator, Tuple, Union
 from uuid import UUID
+from datetime import datetime, timezone
 
 import logging
 from pydantic import BaseModel, Field
@@ -27,18 +28,22 @@ from pydantic_ai.messages import ModelMessage
 from backend.ai.log_query_agent import LogQueryAgent
 from backend.ai.metric_query_agent import MetricQueryAgent
 from backend.ai.github_query_agent import GitHubQueryAgent
+from backend.ai.summarization_agent import SummarizationAgent
 from backend.config import get_settings
-from backend.core.cell import AIQueryCell
-from backend.core.execution import ExecutionContext
+from backend.core.execution import ExecutionContext, ToolCallRecord, register_tool_dependencies, propagate_tool_results
 from backend.core.query_result import (
     QueryResult, 
     LogQueryResult, 
     MetricQueryResult, 
     MarkdownQueryResult, 
-    GithubQueryResult
+    GithubQueryResult,
+    SummarizationQueryResult
 )
 from backend.services.connection_manager import get_connection_manager
 from backend.ai.chat_tools import NotebookCellTools, CreateCellParams
+from backend.core.dependency import ToolOutputReference
+from backend.core.notebook import Notebook
+from backend.services.notebook_manager import get_notebook_manager
 
 import asyncio # Add this import at the top of the file
 
@@ -54,6 +59,7 @@ class StepType(str, Enum):
     LOG = "log"
     METRIC = "metric"
     GITHUB = "github"
+    SUMMARIZATION = "summarization"
 
 
 class StepCategory(str, Enum):
@@ -213,16 +219,19 @@ class AIAgent:
               For each step in your plan, define:
               
               • step_id: A unique identifier (use S1, S2, etc.)
-              • step_type: Choose the *primary* data source this phase will use ("log", "metric", or "github")
+              • step_type: Choose the *primary* data source this phase will use ("log", "metric", "github", "summarization", or "markdown" for analysis/decision steps)
               • category: Choose the *primary* category for this step ("PHASE" or "DECISION"). Always "phase" here.
               • description: Instructions for the specialized agent that will:
                 - State precisely what question this step answers
-                - Provide all context needed for the specialized agent
+                - Provide all context needed for the specialized agent (including relevant prior results)
                 - Explain how to interpret the results
                 - Reference specific artifacts from previous steps when needed
+                - **If the step_type is 'summarization', ensure the description clearly indicates what text needs summarizing (e.g., referencing results from a previous step).**
               • dependencies: Array of step IDs required before this step can execute
               • parameters: Configuration details relevant to this step type. 
                 - For "github" type, should contain 'connection_id' (string) referencing the relevant GitHub connection.
+                - **For "summarization", parameters are generally not needed unless specifying constraints (e.g., max length), but the text to summarize should come from the description or dependencies.**
+                - **REFERENCING OUTPUTS:** If a parameter needs to use the output of a previous step (listed in `dependencies`), use the following structure within the `parameters` dict: `"<parameter_name>": {"__ref__": {"step_id": "<ID_of_dependency_step>", "output_name": "result"}}`. For now, always use `"result"` as the `output_name`. For example, if step S2 needs the result of S1 as its 'input_data' parameter, its parameters might look like: `{"input_data": {"__ref__": {"step_id": "S1", "output_name": "result"}}}`.
               • is_decision_point: Set to true for markdown steps that evaluate previous results
               
             4. DECISION POINTS
@@ -318,8 +327,8 @@ class AIAgent:
         # Initialize specialized agents without passing mcp_servers
         self.log_generator = LogQueryAgent(source="loki", notebook_id=self.notebook_id) 
         self.metric_generator = MetricQueryAgent(source="prometheus", notebook_id=self.notebook_id)
-        # GitHubQueryAgent already correctly initialized
         self.github_generator = GitHubQueryAgent(notebook_id=self.notebook_id)
+        self.summarization_generator = SummarizationAgent(notebook_id=self.notebook_id)
 
         ai_logger.info(f"AIAgent initialized for notebook {notebook_id}.")
 
@@ -338,7 +347,7 @@ class AIAgent:
         Args:
             query: The user's query
             session_id: The chat session ID
-            notebook_id: The notebook ID to create cells in (optional, will use stored notebook_id if not provided)
+            notebook_id: The notebook ID to create cells in
             message_history: Previous messages in the session
             cell_tools: Tools for creating and managing cells
             
@@ -348,13 +357,29 @@ class AIAgent:
         if not cell_tools:
             raise ValueError("cell_tools is required for creating cells")
             
-        notebook_id = notebook_id or self.notebook_id
-        if not notebook_id:
+        notebook_id_str = notebook_id or self.notebook_id
+        if not notebook_id_str:
             raise ValueError("notebook_id is required for creating cells")
+        
+        # Fetch the actual Notebook object - needed for dependency graph and records
+        notebook_manager = get_notebook_manager() 
+        try:
+            notebook_uuid = UUID(notebook_id_str)
+            notebook: Notebook = notebook_manager.get_notebook(notebook_uuid) 
+        except ValueError:
+            ai_logger.error(f"Invalid notebook_id format: {notebook_id_str}")
+            raise ValueError(f"Invalid notebook_id format: {notebook_id_str}")
+        except Exception as e:
+             ai_logger.error(f"Failed to fetch notebook {notebook_id_str}: {e}", exc_info=True)
+             raise ValueError(f"Failed to fetch notebook {notebook_id_str}")
+
             
-        plan = await self.create_investigation_plan(query, notebook_id, message_history)
+        plan = await self.create_investigation_plan(query, notebook_id_str, message_history)
         yield "plan_created", {"status": "plan_created", "thinking": plan.thinking, "agent_type": "investigation_planner"}
         
+        # Store mapping from step_id to synthetic ToolCallRecord ID for propagation
+        step_id_to_record_id: Dict[str, UUID] = {}
+
         if len(plan.steps) == 1:
             ai_logger.info(f"Detected single-step plan for query: {query}")
             single_step = plan.steps[0]
@@ -398,7 +423,7 @@ class AIAgent:
                     "status": "error",
                     "step_id": single_step.step_id,
                     "message": "Failed to get final result from content generation.",
-                    "agent_type": single_step.step_type
+                    "agent_type": single_step.step_type.value # Use enum value
                 }
                 return # Stop processing this step
 
@@ -406,25 +431,85 @@ class AIAgent:
             if single_step.step_type == StepType.MARKDOWN:
                 query_content = str(final_result_data.data) 
 
+            # --- Create Cell ---
             cell_params_for_step = CreateCellParams(
-                notebook_id=notebook_id,
+                notebook_id=notebook_id_str,
                 cell_type=single_step.step_type,
                 content=query_content, 
                 metadata={
                     "session_id": session_id,
                     "step_id": single_step.step_id,
-                    "dependencies": single_step.dependencies
+                    "dependencies": single_step.dependencies # Keep original step dependencies here for info
                 }
             )
-            cell_result = await cell_tools.create_cell(
-                params=cell_params_for_step
-            )
+            # --- Add tool info to cell params if it's a GitHub cell ---
+            tool_info_kwargs = {}
+            if single_step.step_type == StepType.GITHUB and isinstance(final_result_data, GithubQueryResult) and final_result_data.tool_calls:
+                last_tool_call = final_result_data.tool_calls[-1] # Get the last successful call
+                tool_info_kwargs['tool_name'] = last_tool_call.tool_name
+                tool_info_kwargs['tool_arguments'] = last_tool_call.tool_args
             
+            cell_result = await cell_tools.create_cell(
+                params=cell_params_for_step,
+                # Pass tool info as additional kwargs if available
+                **tool_info_kwargs 
+            )
+            created_cell_id = cell_result.get("cell_id")
+            if not created_cell_id:
+                ai_logger.error(f"Failed to get cell_id after creating cell for step {single_step.step_id}")
+                # Handle error appropriately, maybe yield error status
+                yield f"step_{single_step.step_id}_error", {"status": "error", "message": "Failed to create notebook cell.", "step_id": single_step.step_id, "agent_type": single_step.step_type.value}
+                return
+
+            # --- Create Synthetic ToolCallRecord ---
+            # ASSUMPTION: Planner puts ToolOutputReference in parameters if needed
+            synthetic_record = ToolCallRecord(
+                parent_cell_id=UUID(created_cell_id),
+                pydantic_ai_tool_call_id=single_step.step_id, # Link loosely via step_id
+                tool_name=f"step_{single_step.step_type.value}",
+                parameters=single_step.parameters, # Assumes planner might add ToolOutputReferences here
+                status="pending", # Will be updated shortly
+                started_at=datetime.now(timezone.utc) # Approximate start
+            )
+            step_id_to_record_id[single_step.step_id] = synthetic_record.id
+            notebook.tool_call_records[synthetic_record.id] = synthetic_record
+            # Update cell to link to this record
+            # TODO: Need a way to update cell.tool_call_ids, potentially via notebook_manager/cell_tools
+            if created_cell_id:
+                cell_uuid = UUID(created_cell_id)
+                if cell_uuid in notebook.cells:
+                    notebook.cells[cell_uuid].tool_call_ids.append(synthetic_record.id)
+                else:
+                    ai_logger.warning(f"Could not find cell {created_cell_id} in notebook to link tool record {synthetic_record.id}")
+            
+            ai_logger.info(f"Added synthetic tool record {synthetic_record.id} for step {single_step.step_id}")
+
+            # --- Register Dependencies ---
+            register_tool_dependencies(synthetic_record, notebook, step_id_to_record_id)
+            
+            # --- Update Record with Result & Propagate ---
+            synthetic_record.status = "success" if final_result_data.error is None else "error"
+            synthetic_record.completed_at = datetime.now(timezone.utc)
+            synthetic_record.result = final_result_data.data
+            synthetic_record.error = final_result_data.error
+            # Populate named_outputs (using a default name 'result' for now)
+            if synthetic_record.status == "success":
+                synthetic_record.named_outputs["result"] = final_result_data.data
+                # Store query/metadata if needed for dependencies
+                synthetic_record.named_outputs["_query"] = final_result_data.query
+                synthetic_record.named_outputs["_metadata"] = final_result_data.metadata
+                
+            propagate_tool_results(synthetic_record, notebook, step_id_to_record_id)
+            # Persist notebook changes (including updated records/cells)
+            notebook_manager.save_notebook(notebook.id)
+
+            # --- Yield Completion ---
             yield f"step_{single_step.step_id}_completed", {
                 "status": "step_completed",
                 "step_id": single_step.step_id,
                 "step_type": single_step.step_type,
-                "cell_id": cell_result.get("cell_id", ""),
+                "cell_id": created_cell_id,
+                "tool_call_record_id": str(synthetic_record.id), # Include record ID
                 "cell_params": cell_params_for_step.model_dump(),
                 "result": { # Use the final_result_data
                     "data": final_result_data.data,
@@ -442,11 +527,12 @@ class AIAgent:
         # --- Proceed with multi-step plan execution ---
         else:
             # Create plan explanation cell (no change here)
+            # ... (existing plan cell creation code) ...
             cell_params = CreateCellParams(
-                notebook_id=notebook_id,
+                notebook_id=notebook_id_str,
                 cell_type="markdown",
-                content=f"# Investigation Plan\n\n{plan.thinking}\n\n## Steps:\n" +
-                    "\n".join(f"- {step.description}" for step in plan.steps),
+                content=f"# Investigation Plan\n\n## Steps:\n" +
+                    "\n".join(f"- `{step.step_id}`: {step.step_type.value}" for step in plan.steps),
                 metadata={
                     "session_id": session_id,
                     "step_id": "plan",
@@ -474,191 +560,220 @@ class AIAgent:
             ]
 
             if not executable_steps:
-                yield "error", {"status": "error", "message": "No executable steps but plan not complete", "agent_type": "investigation_planner"}
-                break
+                 # Check if remaining steps have unresolved dependencies
+                 unresolved_deps = False
+                 for step in remaining_steps:
+                     if not all(dep in executed_steps for dep in step.dependencies):
+                         unresolved_deps = True
+                         ai_logger.warning(f"Step {step.step_id} blocked, missing dependencies: {[dep for dep in step.dependencies if dep not in executed_steps]}")
+                 if not unresolved_deps and remaining_steps:
+                     # Should not happen if logic is correct, but indicates an issue.
+                     ai_logger.error("No executable steps but plan not complete and no unresolved dependencies found.")
+                     yield "error", {"status": "error", "message": "Plan execution stalled unexpectedly.", "agent_type": "investigation_planner"}
+                 elif not remaining_steps:
+                     # Plan is actually complete
+                     ai_logger.info("Plan execution complete.")
+                 else:
+                    # Normal case: waiting for dependencies
+                    ai_logger.info(f"Plan execution waiting for dependencies. Remaining steps: {[s.step_id for s in remaining_steps]}")
+                    # Optional: Yield a status indicating waiting state
+                 break # Exit the loop if no steps are immediately executable
                 
             current_step = executable_steps[0]
             remaining_steps.remove(current_step)
             
-            if current_step.step_type == StepType.GITHUB:
-                yield "status_update", {"message": "GitHub Agent: Starting query...", "agent_type": "github"}
+            yield f"step_{current_step.step_id}_started", {"status": "step_started", "step_id": current_step.step_id, "agent_type": current_step.step_type.value}
+            step_start_time = datetime.now(timezone.utc)
 
             # --- Handle Async Generator for multi-step ---
             final_result_data: Optional[QueryResult] = None
             all_yielded_items_multi = []
+            step_error: Optional[str] = None
 
-            if current_step.category == StepCategory.PHASE:
-                async for result_part in self.generate_content(
-                    current_step=current_step,
-                    step_type=current_step.step_type,
-                    description=current_step.description,
-                    executed_steps=executed_steps,
-                    step_results=step_results,
-                ):
-                    all_yielded_items_multi.append(result_part)
-                    if isinstance(result_part, QueryResult):
-                        final_result_data = result_part
-                        break # Assume QueryResult is the final item
-                    elif isinstance(result_part, dict) and "status" in result_part:
-                        # Forward status updates
-                        yield f"step_{current_step.step_id}_update", {
-                             "status": "step_update",
-                             "step_id": current_step.step_id,
-                             "update_info": result_part,
-                             "agent_type": result_part.get("agent", current_step.step_type.value)
-                        }
+            try:
+                if current_step.category == StepCategory.PHASE:
+                    async for result_part in self.generate_content(
+                        current_step=current_step,
+                        step_type=current_step.step_type,
+                        description=current_step.description,
+                        executed_steps=executed_steps,
+                        step_results=step_results,
+                    ):
+                        all_yielded_items_multi.append(result_part)
+                        if isinstance(result_part, QueryResult):
+                            final_result_data = result_part
+                            break # Assume QueryResult is the final item
+                        elif isinstance(result_part, dict) and "status" in result_part:
+                            # Forward status updates
+                            yield f"step_{current_step.step_id}_update", {
+                                 "status": "step_update",
+                                 "step_id": current_step.step_id,
+                                 "update_info": result_part,
+                                 "agent_type": result_part.get("agent", current_step.step_type.value)
+                            }
+                        else:
+                             ai_logger.warning(f"Unexpected item yielded from generate_content for multi-step {current_step.step_id}: {type(result_part)}")
+
+                elif current_step.category == StepCategory.DECISION:
+                     # ... (existing decision logic generating final_result_data) ...
+                     yield f"step_{current_step.step_id}_update", {
+                         "status": "step_update",
+                         "step_id": current_step.step_id,
+                         "update_info": {"status": "generating_decision_markdown"},
+                         "agent_type": "markdown_generator"
+                     }
+                     # Assuming markdown_generator.run is awaitable
+                     markdown_result = await self.markdown_generator.run(
+                         current_step.description
+                     )
+                     # Adapt based on actual return type of markdown_generator.run
+                     # If it returns a structured object like other agents:
+                     if markdown_result and hasattr(markdown_result, 'output'):
+                         markdown_string = str(markdown_result.output) # Adjust attribute access if needed
+                     else:
+                         ai_logger.warning(f"Could not extract markdown data from result for decision step {current_step.step_id}: {markdown_result}")
+                         markdown_string = f"Error generating decision markdown for step {current_step.step_id}."
+                     final_result_data = MarkdownQueryResult(data=markdown_string, query=current_step.description)
+
+            except Exception as e:
+                step_error = f"Error during execution of step {current_step.step_id}: {e}"
+                ai_logger.error(step_error, exc_info=True)
+                final_result_data = QueryResult(query=current_step.description, data=None, error=step_error)
+
+
+            # --- Process Step Result ---
+            created_cell_id = None
+            synthetic_record = None
+            if final_result_data:
+                query = final_result_data.query
+                if current_step.step_type == StepType.MARKDOWN:
+                    query = str(final_result_data.data) # Use data for markdown cell content
+
+                # --- Create Cell ---
+                cell_params_for_step = CreateCellParams(
+                    notebook_id=notebook_id_str,
+                    cell_type=current_step.step_type,
+                    content=query,
+                    metadata={
+                        "session_id": session_id,
+                        "step_id": current_step.step_id,
+                        "dependencies": current_step.dependencies # Keep original step dependencies here for info
+                    }
+                )
+                # --- Add tool info to cell params if it's a GitHub cell ---
+                tool_info_kwargs_multi = {}
+                if current_step.step_type == StepType.GITHUB and isinstance(final_result_data, GithubQueryResult) and final_result_data.tool_calls:
+                    last_tool_call = final_result_data.tool_calls[-1] # Get the last successful call
+                    tool_info_kwargs_multi['tool_name'] = last_tool_call.tool_name
+                    tool_info_kwargs_multi['tool_arguments'] = last_tool_call.tool_args
+                    
+                try:
+                    ai_logger.info(f"[Agent] Attempting to create cell for step {current_step.step_id} with params: {cell_params_for_step.model_dump()}")
+                    cell_result = await cell_tools.create_cell(
+                        params=cell_params_for_step,
+                        # Pass tool info as additional kwargs if available
+                        **tool_info_kwargs_multi 
+                    )
+                    created_cell_id = cell_result.get("cell_id")
+                    ai_logger.info(f"[Agent] Cell creation result for step {current_step.step_id}: {cell_result}")
+                    if not created_cell_id:
+                         raise ValueError("create_cell tool did not return a cell_id")
+                except Exception as cell_creation_error:
+                    ai_logger.error(f"[Agent] Failed to create cell for step {current_step.step_id}: {cell_creation_error}", exc_info=True)
+                    step_error = step_error or f"Failed to create notebook cell: {cell_creation_error}"
+                    # Update final result data if it exists
+                    if final_result_data:
+                        final_result_data.error = step_error
                     else:
-                         ai_logger.warning(f"Unexpected item yielded from generate_content for multi-step {current_step.step_id}: {type(result_part)}")
+                        final_result_data = QueryResult(query=current_step.description, data=None, error=step_error)
+                
+                if created_cell_id:
+                    # --- Create Synthetic ToolCallRecord ---
+                    # ASSUMPTION: Planner puts ToolOutputReference in parameters if needed
+                    synthetic_record = ToolCallRecord(
+                        parent_cell_id=UUID(created_cell_id),
+                        pydantic_ai_tool_call_id=current_step.step_id, # Link loosely via step_id
+                        tool_name=f"step_{current_step.step_type.value}",
+                        parameters=current_step.parameters, # Assumes planner might add ToolOutputReferences here
+                        status="pending", # Will be updated shortly
+                        started_at=step_start_time 
+                    )
+                    step_id_to_record_id[current_step.step_id] = synthetic_record.id
+                    notebook.tool_call_records[synthetic_record.id] = synthetic_record
+                    # Update cell to link to this record
+                    # TODO: Need a way to update cell.tool_call_ids, potentially via notebook_manager/cell_tools
+                    if created_cell_id:
+                        cell_uuid = UUID(created_cell_id)
+                        if cell_uuid in notebook.cells:
+                            notebook.cells[cell_uuid].tool_call_ids.append(synthetic_record.id)
+                        else:
+                            ai_logger.warning(f"Could not find cell {created_cell_id} in notebook to link tool record {synthetic_record.id}")
+                            
+                    ai_logger.info(f"[Agent] Added synthetic tool record {synthetic_record.id} for step {current_step.step_id}")
 
-            elif current_step.category == StepCategory.DECISION:
-                 # Decision steps use markdown_generator directly, might not yield updates yet
-                 # For now, assume it returns MarkdownQueryResult directly as before generate_content refactor
-                 # TODO: Potentially refactor markdown_generator usage if needed
-                 yield f"step_{current_step.step_id}_update", {
-                     "status": "step_update",
-                     "step_id": current_step.step_id,
-                     "update_info": {"status": "generating_decision_markdown"},
-                     "agent_type": "markdown_generator"
-                 }
-                 markdown = await self.markdown_generator.run(
-                     current_step.description
-                 )
-                 if markdown and markdown.data and hasattr(markdown.data, 'data'):
-                     markdown_string = markdown.data.data
-                 else:
-                     ai_logger.warning(f"Could not extract markdown data from result for decision step {current_step.step_id}: {markdown}")
-                     markdown_string = f"Error generating decision markdown for step {current_step.step_id}."
-                 # Create a MarkdownQueryResult for consistency
-                 final_result_data = MarkdownQueryResult(data=markdown_string, query=current_step.description)
+                    # --- Register Dependencies ---
+                    # Pass the step_id map for resolving references
+                    ai_logger.info(f"[Agent] Registering dependencies for record {synthetic_record.id} (step {current_step.step_id})")
+                    register_tool_dependencies(synthetic_record, notebook, step_id_to_record_id)
+                    ai_logger.info(f"[Agent] Dependencies registered for record {synthetic_record.id}")
 
-
-            if not final_result_data:
-                ai_logger.error(f"generate_content/decision logic did not yield/produce a final QueryResult for multi-step {current_step.step_id}. Yielded items: {all_yielded_items_multi}")
-                yield f"step_{current_step.step_id}_error", {
-                    "status": "error",
-                    "step_id": current_step.step_id,
-                    "message": f"Failed to get final result for step {current_step.step_id}.",
-                    "agent_type": current_step.step_type
-                }
-                # Decide if we should skip this step or halt the entire plan
-                # For now, let's skip and continue if possible, but mark as failed in executed_steps
-                executed_steps[current_step.step_id] = {
-                     "step": current_step.model_dump(),
-                     "content": None, # Indicate failure
-                     "error": f"Failed to get final result for step {current_step.step_id}."
-                }
-                step_results[current_step.step_id] = QueryResult(query=current_step.description, data=None, error=f"Failed to get final result for step {current_step.step_id}.")
-                continue # Move to the next potential step
-
-
-            query = final_result_data.query
-            if current_step.step_type == StepType.MARKDOWN:
-                query = str(final_result_data.data) # Use data for markdown cell content
-
-            # Create cell for this step (using final_result_data)
-            cell_params_for_step = CreateCellParams(
-                notebook_id=notebook_id,
-                cell_type=current_step.step_type,
-                content=query,
-                metadata={
-                    "session_id": session_id,
-                    "step_id": current_step.step_id,
-                    "dependencies": current_step.dependencies
-                }
-            )
-            cell_result = await cell_tools.create_cell(
-                params=cell_params_for_step
-            )
+            else: # Handle case where final_result_data is None even after try/except
+                step_error = step_error or f"Failed to get final result data for step {current_step.step_id}."
+                ai_logger.error(f"final_result_data is None for step {current_step.step_id} after execution attempt. Error: {step_error}")
+                final_result_data = QueryResult(query=current_step.description, data=None, error=step_error)
             
-            # Store completed step and its result (using final_result_data)
+            # --- Update Execution State and Record ---
+            step_status = "step_completed" if step_error is None else "error"
             executed_steps[current_step.step_id] = {
                 "step": current_step.model_dump(),
-                "content": final_result_data # Store the QueryResult object
+                "content": final_result_data.data,
+                "error": step_error
             }
             step_results[current_step.step_id] = final_result_data
             
-            # Stream status update with cell results (using final_result_data)
-            yield f"step_{current_step.step_id}_completed", {
-                "status": "step_completed",
+            if synthetic_record:
+                synthetic_record.status = "success" if step_error is None else "error"
+                synthetic_record.completed_at = datetime.now(timezone.utc)
+                synthetic_record.result = final_result_data.data
+                synthetic_record.error = step_error
+                # Populate named_outputs 
+                if synthetic_record.status == "success":
+                    synthetic_record.named_outputs["result"] = final_result_data.data
+                    synthetic_record.named_outputs["_query"] = final_result_data.query
+                    synthetic_record.named_outputs["_metadata"] = final_result_data.metadata
+                
+                # --- Propagate Results ---
+                # Pass the step_id map for resolving references during propagation
+                ai_logger.info(f"[Agent] Propagating results for record {synthetic_record.id} (step {current_step.step_id})")
+                propagate_tool_results(synthetic_record, notebook, step_id_to_record_id)
+                ai_logger.info(f"[Agent] Results propagated for record {synthetic_record.id}")
+
+            # Persist notebook changes (including updated records/cells)
+            ai_logger.info(f"[Agent] Saving notebook {notebook.id} after step {current_step.step_id}")
+            notebook_manager.save_notebook(notebook.id)
+            ai_logger.info(f"[Agent] Notebook {notebook.id} saved after step {current_step.step_id}")
+
+            # --- Yield Completion/Error ---
+            yield f"step_{current_step.step_id}_{'completed' if step_error is None else 'error'}", {
+                "status": step_status,
                 "step_id": current_step.step_id,
                 "step_type": current_step.step_type,
-                "cell_id": cell_result.get("cell_id", ""), # Use .get for safety
-                "cell_params": cell_params_for_step.model_dump(),
-                "result": {
-                    "data": final_result_data.data,
-                    "query": final_result_data.query,
-                    "error": final_result_data.error,
-                    "metadata": final_result_data.metadata,
-                    # Add tool call sequence if available
-                    "tool_calls": getattr(final_result_data, 'tool_calls', None)
-                },
-                "agent_type": current_step.step_type.value # Use .value here
+                "cell_id": created_cell_id or "",
+                "tool_call_record_id": str(synthetic_record.id) if synthetic_record else "",
+                "cell_params": cell_params_for_step.model_dump() if 'cell_params_for_step' in locals() else {},
+                "result": final_result_data.model_dump(), # Send full result object
+                "agent_type": current_step.step_type.value
             }
-            
-            # --- Plan revision logic (no change here) ---
-            if current_step.category == StepCategory.DECISION:
-                 # ... (keep existing plan revision logic) ...
-                 plan_revision = await self.revise_plan(
-                     original_plan=InvestigationPlanModel(
-                         steps=plan.steps,
-                         thinking=plan.thinking,
-                         hypothesis=current_hypothesis
-                     ),
-                     executed_steps=executed_steps,
-                     step_results=step_results,
-                     current_hypothesis=current_hypothesis
-                 )
-                 # ... (keep rest of plan revision logic) ...
+            ai_logger.info(f"Processed multi-step plan step: {current_step.step_id} with status: {step_status}")
 
+            # Plan Revision Logic (Optional - could be added here) 
+            # if some condition based on final_result_data.error or content:
+            #    revision_result = await self.revise_plan(...)
+            #    update remaining_steps, current_hypothesis etc.
 
-        # --- Final summary cell (no change here) ---
-        # ... (keep existing summary cell creation code) ...
-        # Create final summary cell
-        summary_content = await self.markdown_generator.run(
-            f"""
-            Create a **brief and concise** investigation summary based on these steps and results:
-            
-            Original Query: {query}
-            
-            Final Hypothesis: {current_hypothesis}
-            
-            Step Results: {step_results}
-            
-            **Focus only on the most critical points:**
-            1. Key findings (1-2 sentences)
-            2. Root cause(s) identified (if any, briefly stated)
-            3. Recommendations for resolution (if any, concise)
-            
-            Keep the entire summary very short.
-            """
-        )
+        ai_logger.info(f"Investigation plan execution finished for notebook {notebook_id_str}")
+        yield "investigation_complete", {"status": "complete", "agent_type": "investigation_planner"}
         
-        # Extract the markdown string from the result
-        summary_markdown = ""
-        if summary_content and summary_content.data and hasattr(summary_content.data, 'data'):
-            summary_markdown = summary_content.data.data
-        else:
-            ai_logger.warning(f"Could not extract summary markdown from result: {summary_content}")
-
-        summary_cell_params = CreateCellParams(
-            notebook_id=notebook_id,
-            cell_type="markdown",
-            content=f"# Investigation Summary\n\n{summary_markdown}",
-            metadata={
-                "session_id": session_id,
-                "step_id": "summary",
-                "dependencies": list(executed_steps.keys())
-            }
-        )
-        summary_cell_result = await cell_tools.create_cell(
-            params=summary_cell_params
-        )
-        yield "summary_created", {
-            "status": "summary_created", 
-            "agent_type": "markdown_generator",
-            "cell_params": summary_cell_params.model_dump(),
-            "cell_id": summary_cell_result.get("cell_id", "")
-        }
 
     async def create_investigation_plan(self, query: str, notebook_id: Optional[str] = None, message_history: List[ModelMessage] = []) -> InvestigationPlanModel:
         """Create an investigation plan for the given query"""
@@ -821,6 +936,24 @@ class AIAgent:
                     yield result_part
                     if isinstance(result_part, GithubQueryResult):
                         final_result = result_part
+            elif step_type == StepType.SUMMARIZATION:
+                # Extract the text to summarize. Assume it's passed within the description 
+                # or implicitly from a dependency referenced in the description.
+                # For now, assume `full_description` contains necessary context *and* the text.
+                # A more robust implementation might parse `description` or use `step_results`.
+                # Let's assume the planner puts the text directly in the description for now.
+                text_to_summarize = full_description # Simplified assumption
+                original_request = description # Pass the step description as the original request context
+                yield {"status": "generating_summary", "agent": "summarization_generator"}
+                async for result_part in self.summarization_generator.run_summarization(
+                    text_to_summarize=text_to_summarize,
+                    original_request=original_request
+                ):
+                    if isinstance(result_part, SummarizationQueryResult):
+                        final_result = result_part
+                        yield final_result
+                    elif isinstance(result_part, dict):
+                        yield result_part
             else:
                 ai_logger.error(f"Unsupported step type encountered in generate_content: {step_type}")
                 raise ValueError(f"Unsupported step type: {step_type}")
@@ -847,62 +980,3 @@ class AIAgent:
              ai_logger.warning(f"No final QueryResult object obtained for step type {step_type} description '{description}'. This might indicate an issue in the sub-generator.")
              # Yield a generic error result if needed by downstream logic
              yield QueryResult(query=description, data='', error=f"Failed to generate final result for {step_type}")
-
-
-async def execute_ai_query_cell(cell: AIQueryCell, context: ExecutionContext) -> Dict:
-    """
-    Execute an AI query cell
-    
-    Args:
-        cell: The AI query cell to execute
-        context: The execution context
-        
-    Returns:
-        The result of executing the cell
-    """
-    try:
-        connection_manager = get_connection_manager()
-        # NOTE: execute_ai_query_cell is likely deprecated or needs significant rework
-        # as the AIAgent now handles the investigation loop directly via self.investigate
-        # It no longer relies on creating MCPServerHTTP instances here.
-        # The GitHub agent now uses stdio and fetches its own connection.
-        # Grafana agents still rely on MCPServerHTTP passed during AIAgent init.
-        ai_logger.warning("execute_ai_query_cell is likely outdated and may not function correctly with current agent architecture.")
-        
-        # Minimal setup to allow AIAgent init (though it might not be used effectively here)
-        mcp_server_map = {} # Keep empty for now as GitHub is handled internally
-        
-        notebook_id = cell.metadata.get("notebook_id")
-        if not notebook_id:
-            raise ValueError("Cell metadata must contain notebook_id")
-        
-        # Initialize the AI agent with the map of MCPServerHTTP clients
-        # NOTE: Passing empty list for available_data_sources as this function is likely outdated.
-        agent = AIAgent(
-            notebook_id=notebook_id, 
-            available_data_sources=[], # Added empty list to satisfy constructor
-            mcp_server_map=mcp_server_map
-        )
-        
-        # Generate an investigation plan
-        plan = await agent.create_investigation_plan(
-            query=cell.content,
-            notebook_id=notebook_id
-        )
-        
-        # Store thinking output if available
-        if plan.thinking:
-            cell.thinking = plan.thinking
-        
-        # Return the plan for the ChatAgent to execute
-        return {
-            "plan": plan.model_dump(),
-            "thinking": plan.thinking
-        }
-    
-    except Exception as e:
-        print(f"Error executing AI query cell: {e}")
-        return {
-            "error": str(e),
-            "plan": None
-        }

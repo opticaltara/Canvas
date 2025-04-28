@@ -10,7 +10,15 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable, List, Optional, TypeVar, AsyncGenerator
 
-from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
+from pydantic import BaseModel, Field
+from pydantic_ai.messages import (
+    ModelMessage, 
+    ModelMessagesTypeAdapter,
+    ModelRequest, 
+    ModelResponse, 
+    TextPart, 
+    UserPromptPart
+)
 
 # Initialize logger
 chat_logger = logging.getLogger("chat.db")
@@ -138,12 +146,18 @@ class ChatDatabase:
         """Add a message to a chat session"""
         # Get current timestamp
         now = datetime.now(timezone.utc).isoformat()
-        
-        # Serialize message to JSON using ModelMessagesTypeAdapter
-        message_json = ModelMessagesTypeAdapter.dump_json([message]).decode('utf-8')
 
-        chat_logger.info(f"Message JSON: {message_json}")
-        
+        # Serialize message to JSON using ModelMessagesTypeAdapter
+        try:
+            # The adapter expects a list, so wrap the single message
+            message_json = ModelMessagesTypeAdapter.dump_json([message])
+            content_preview = str(message)[:100] # Preview content
+            chat_logger.info(f"Serializing message of type: {type(message).__name__} using TypeAdapter, content preview: {content_preview}...")
+            chat_logger.debug(f"Serialized JSON: {message_json}")
+        except Exception as e:
+            chat_logger.error(f"An unexpected error occurred during message serialization using TypeAdapter: {e}", exc_info=True)
+            raise
+
         # Insert message
         await self._asyncify(
             self._execute,
@@ -151,7 +165,7 @@ class ChatDatabase:
             session_id, message_json, now,
             commit=True
         )
-        
+
         # Update session timestamp
         await self.update_session_timestamp(session_id)
     
@@ -165,7 +179,9 @@ class ChatDatabase:
         
         # Insert each message
         for message in messages:
-            message_json = json.dumps(message.__dict__)
+            content_type = type(message['content']).__name__ if isinstance(message, dict) and 'content' in message else type(message).__name__
+            message_json = json.dumps(message)
+            chat_logger.info(f"Saving message (type: {content_type}). JSON: {message_json}")
             await self._asyncify(
                 self._execute,
                 "INSERT INTO chat_messages (session_id, message_json, created_at) VALUES (?, ?, ?);",

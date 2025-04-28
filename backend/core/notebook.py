@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field
 
 from backend.core.cell import Cell, CellStatus, CellType, create_cell
 from backend.core.dependency import DependencyGraph
+from backend.core.dependency import ToolCallID
+from backend.core.types import ToolCallRecord
 
 # Initialize logger
 notebook_logger = logging.getLogger("notebook")
@@ -34,6 +36,9 @@ class Notebook(BaseModel):
     cells: Dict[UUID, Cell] = Field(default_factory=dict)
     cell_order: List[UUID] = Field(default_factory=list)
     dependency_graph: DependencyGraph = Field(default_factory=DependencyGraph)
+    
+    # Store records of tool calls made within this notebook
+    tool_call_records: Dict[ToolCallID, ToolCallRecord] = Field(default_factory=dict)
     
     class Config:
         arbitrary_types_allowed = True

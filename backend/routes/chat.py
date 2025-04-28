@@ -15,8 +15,22 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from pydantic_ai.mcp import MCPServerHTTP
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    UserPromptPart
+)
 
-from backend.ai.chat_agent import ChatAgentService, ChatRequest, ChatMessage, to_chat_message, CellResponsePart
+from backend.ai.chat_agent import (
+    ChatAgentService,
+    ChatRequest,
+    ChatMessage,
+    to_chat_message,
+    CellResponsePart,
+    StatusResponsePart
+)
 from backend.db.chat_db import ChatDatabase
 from backend.services.notebook_manager import NotebookManager, get_notebook_manager
 from backend.services.connection_manager import ConnectionManager, get_connection_manager
@@ -210,34 +224,59 @@ async def post_message(
             if session_id not in chat_agent.sessions:
                 await chat_agent.create_session(session_id, session["notebook_id"])
             
-            # First, stream the user prompt so it can be displayed immediately
-            user_msg = ChatMessage(
+            # --- Save and Stream User Prompt ---
+            # Create ChatMessage for streaming to frontend
+            user_msg_chat = ChatMessage(
                 role="user",
                 content=prompt,
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 agent="user"
             )
-            yield json.dumps(user_msg.model_dump()).encode('utf-8') + b'\n'
-            
-            # Get message history from the database
+            yield json.dumps(user_msg_chat.model_dump()).encode('utf-8') + b'\n'
+
+            # Create ModelRequest for saving to database
+            user_msg_model = ModelRequest(
+                parts=[UserPromptPart(content=prompt, timestamp=datetime.now(timezone.utc))]
+            )
+            # Save the user message to the database
+            await chat_db.add_message(session_id, user_msg_model)
+            # --- End Save and Stream User Prompt ---
+
+            # Get message history from the database (now includes the user prompt)
             messages = await chat_db.get_messages(session_id)
-            
+
             # Use handle_message flow which includes clarification and investigation
             async for status_type, response in chat_agent.handle_message(
                 prompt=prompt,
                 session_id=session_id,
                 message_history=messages
             ):
-                # Convert the response to ChatMessage format
-                agent = status_type
-                if isinstance(response.parts[0], CellResponsePart):
-                    agent = response.parts[0].agent_type
+                # --- Determine agent and yield chat_msg ---
+                agent = status_type # Default agent to status_type
+                # Ensure response has parts before accessing
+                if response.parts:
+                    first_part = response.parts[0]
+                    # Explicitly check for known custom types first
+                    if isinstance(first_part, CellResponsePart):
+                        agent = first_part.agent_type
+                    elif isinstance(first_part, StatusResponsePart):
+                        agent = first_part.agent_type
+                    # Linter is satisfied as agent_type exists on these specific classes
+
                 chat_msg = to_chat_message(response, agent=agent)
                 yield json.dumps(chat_msg.model_dump()).encode('utf-8') + b'\n'
-                
-                # Save the message to database
-                await chat_db.add_message(session_id, response)
-            
+
+                # --- Conditionally save the agent response ---
+                should_save = False
+                # Only save based on status_type indicating a final step outcome
+                if status_type.endswith(("_completed", "_error")):
+                    should_save = True
+
+                if should_save:
+                    # Save the ModelMessage (`response`), not the ChatMessage (`chat_msg`)
+                    await chat_db.add_message(session_id, response)
+                # --- End Conditional Save ---
+
             process_time = time.time() - start_time
             chat_logger.info(
                 f"Completed chat message stream",
@@ -391,34 +430,55 @@ async def unified_chat(
                     yield error_json.encode('utf-8') + b'\n'
                     return
             
+            # --- Save and Stream User Prompt ---
             # Stream the user prompt
-            user_msg = ChatMessage(
+            user_msg_chat = ChatMessage(
                 role="user",
                 content=request.prompt,
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 agent="user"
             )
-            yield json.dumps(user_msg.model_dump()).encode('utf-8') + b'\n'
-            
-            # Get message history
+            yield json.dumps(user_msg_chat.model_dump()).encode('utf-8') + b'\n'
+
+             # Create ModelRequest for saving to database
+            user_msg_model = ModelRequest(
+                parts=[UserPromptPart(content=request.prompt, timestamp=datetime.now(timezone.utc))]
+            )
+            # Save the user message to the database
+            await chat_db.add_message(session_id, user_msg_model)
+            # --- End Save and Stream User Prompt ---
+
+            # Get message history (now includes the user prompt)
             messages = await chat_db.get_messages(session_id)
-            
+
             # Use handle_message flow which includes clarification and investigation
             async for status_type, response in chat_agent.handle_message(
                 prompt=request.prompt,
                 session_id=session_id,
                 message_history=messages
             ):
-                # Convert the response to ChatMessage format
+                # --- Determine agent and yield chat_msg ---
                 agent = status_type
-                if isinstance(response.parts[0], CellResponsePart):
-                    agent = response.parts[0].agent_type
+                if response.parts:
+                    first_part = response.parts[0]
+                    if isinstance(first_part, CellResponsePart):
+                        agent = first_part.agent_type
+                    elif isinstance(first_part, StatusResponsePart):
+                        agent = first_part.agent_type
+
                 chat_msg = to_chat_message(response, agent=agent)
                 yield json.dumps(chat_msg.model_dump()).encode('utf-8') + b'\n'
-                
-                await chat_db.add_message(session_id, response)
-                   
-            
+
+                # --- Conditionally save the agent response ---
+                should_save = False
+                # Only save based on status_type indicating a final step outcome
+                if status_type.endswith(("_completed", "_error")):
+                    should_save = True
+
+                if should_save:
+                    await chat_db.add_message(session_id, response)
+                # --- End Conditional Save ---
+
             process_time = time.time() - start_time
             chat_logger.info(
                 f"Completed unified chat",

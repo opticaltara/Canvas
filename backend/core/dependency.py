@@ -13,36 +13,60 @@ Key components:
 """
 
 from collections import defaultdict, deque
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Dict, List, Set, Tuple, Optional, TYPE_CHECKING
 from uuid import UUID
 
 from pydantic import BaseModel
 
-from backend.core.cell import Cell
+if TYPE_CHECKING:
+    from backend.core.cell import Cell
+
+# Type alias for clarity
+ToolCallID = UUID
+
+
+class ToolOutputReference(BaseModel):
+    """
+    Represents a reference to a specific output of a previous tool call.
+    
+    Used as a value for a parameter in a subsequent tool call to establish
+    an explicit dependency.
+    
+    Attributes:
+        source_tool_call_id: The unique ID of the tool call whose output is referenced.
+        output_name: The specific named output from the source tool call.
+    """
+    source_tool_call_id: ToolCallID
+    output_name: str
 
 
 class DependencyGraph(BaseModel):
     """
-    Manages the dependency relationships between cells.
+    Manages the dependency relationships between cells and tool calls.
     
-    This class tracks which cells depend on others and provides methods
-    to find execution order and propagate stale states. It maintains a
-    directed graph representation of cell dependencies.
+    This class tracks which cells depend on others and which tool calls
+    depend on other tool calls. It provides methods to find execution order
+    and propagate stale states. It maintains directed graph representations
+    of both cell and tool call dependencies.
     
     Attributes:
-        dependents: Maps cell ID to the set of cell IDs that depend on it
-        dependencies: Maps cell ID to the set of cell IDs it depends on
+        dependents: Maps cell ID to the set of cell IDs that depend on it.
+        dependencies: Maps cell ID to the set of cell IDs it depends on.
+        tool_dependents: Maps tool call ID to the set of tool call IDs that depend on it.
+        tool_dependencies: Maps tool call ID to the set of tool call IDs it depends on.
     """
-    # Maps cell ID to the set of cell IDs that depend on it
+    # Cell-level dependencies
     dependents: Dict[UUID, Set[UUID]] = defaultdict(set)
-    
-    # Maps cell ID to the set of cell IDs it depends on
     dependencies: Dict[UUID, Set[UUID]] = defaultdict(set)
     
+    # Tool-call-level dependencies
+    tool_dependents: Dict[ToolCallID, Set[ToolCallID]] = defaultdict(set)
+    tool_dependencies: Dict[ToolCallID, Set[ToolCallID]] = defaultdict(set)
+
     class Config:
         arbitrary_types_allowed = True
     
-    def add_cell(self, cell: Cell) -> None:
+    def add_cell(self, cell: "Cell") -> None:
         """
         Add a cell to the dependency graph
         
@@ -287,3 +311,79 @@ class DependencyGraph(BaseModel):
                 return True, cycle_nodes
         
         return False, []
+    
+    # --- Tool Dependency Methods ---
+    
+    def add_tool_dependency(self, dependent_id: ToolCallID, dependency_id: ToolCallID) -> None:
+        """
+        Add a tool dependency relationship: dependent_id depends on dependency_id
+        
+        Args:
+            dependent_id: ID of the tool call that depends on another
+            dependency_id: ID of the tool call that is depended upon
+        """
+        # Initialize sets if they don't exist
+        if dependent_id not in self.tool_dependencies:
+            self.tool_dependencies[dependent_id] = set()
+        if dependency_id not in self.tool_dependents:
+            self.tool_dependents[dependency_id] = set()
+        
+        # Add the relationship
+        self.tool_dependencies[dependent_id].add(dependency_id)
+        self.tool_dependents[dependency_id].add(dependent_id)
+
+    def remove_tool_dependency(self, dependent_id: ToolCallID, dependency_id: ToolCallID) -> None:
+        """
+        Remove a tool dependency relationship
+        
+        Args:
+            dependent_id: ID of the dependent tool call
+            dependency_id: ID of the dependency tool call
+        """
+        if dependent_id in self.tool_dependencies:
+            self.tool_dependencies[dependent_id].discard(dependency_id)
+        
+        if dependency_id in self.tool_dependents:
+            self.tool_dependents[dependency_id].discard(dependent_id)
+            
+    def remove_tool_call(self, tool_call_id: ToolCallID) -> None:
+        """
+        Remove a tool call and all its dependency relationships
+        
+        Args:
+            tool_call_id: ID of the tool call to remove
+        """
+        for dependent_id in list(self.tool_dependents.get(tool_call_id, set())):
+            if dependent_id in self.tool_dependencies:
+                self.tool_dependencies[dependent_id].discard(tool_call_id)
+        
+        for dependency_id in list(self.tool_dependencies.get(tool_call_id, set())):
+            if dependency_id in self.tool_dependents:
+                self.tool_dependents[dependency_id].discard(tool_call_id)
+        
+        self.tool_dependents.pop(tool_call_id, None)
+        self.tool_dependencies.pop(tool_call_id, None)
+
+    def get_tool_dependents(self, tool_call_id: ToolCallID) -> Set[ToolCallID]:
+        """
+        Get all tool calls that directly depend on the given tool call
+        
+        Args:
+            tool_call_id: The tool call ID to get dependents for
+            
+        Returns:
+            Set of tool call IDs that directly depend on the given tool call
+        """
+        return self.tool_dependents.get(tool_call_id, set())
+    
+    def get_tool_dependencies(self, tool_call_id: ToolCallID) -> Set[ToolCallID]:
+        """
+        Get all tool calls that the given tool call directly depends on
+        
+        Args:
+            tool_call_id: The tool call ID to get dependencies for
+            
+        Returns:
+            Set of tool call IDs that the given tool call directly depends on
+        """
+        return self.tool_dependencies.get(tool_call_id, set())

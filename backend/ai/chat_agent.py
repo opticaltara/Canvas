@@ -299,28 +299,29 @@ class ChatAgentService:
                 chat_agent_logger.error(f"No notebook_id found for session {session_id}")
                 raise ValueError(f"No notebook_id found for session {session_id}")
             
-            chat_agent_logger.info(f"Checking if clarification is needed for session {session_id}...")
-            clarification_result = await self.chat_agent.run(
-                f"Assess if this user request needs clarification before proceeding: '{prompt}'. "
-                f"Consider the available tools and context ({self.available_tools_info or '(loading...)'}). "
-                f"Only ask for clarification if the request is genuinely ambiguous "
-                f"or missing critical information needed to act.",
-                message_history=message_history,
-            )
+            # chat_agent_logger.info(f"Checking if clarification is needed for session {session_id}...")
+            # clarification_result = await self.chat_agent.run(
+            #     f"Assess if this user request needs clarification before proceeding: '{prompt}'. "
+            #     f"Consider the available tools and context ({self.available_tools_info or '(loading...)'}). "
+            #     f"Only ask for clarification if the request is genuinely ambiguous "
+            #     f"or missing critical information needed to act.",
+            #     message_history=message_history,
+            # )
 
-            chat_agent_logger.info(f"Clarification check completed for session {session_id}. Result: {clarification_result.data.needs_clarification}")
+            # chat_agent_logger.info(f"Clarification check completed for session {session_id}. Result: {clarification_result.data.needs_clarification}")
             
-            if clarification_result.data.needs_clarification and clarification_result.data.clarification_message:
-                chat_agent_logger.info(f"Asking for clarification in session {session_id}: {clarification_result.data.clarification_message}")
-                clarification_response = ModelResponse(
-                    parts=[StatusResponsePart(
-                        content=clarification_result.data.clarification_message,
-                        agent_type="chat_agent"
-                    )],
-                    timestamp=datetime.now(timezone.utc)
-                )
-                yield "clarification", clarification_response
-                return
+            # if clarification_result.data.needs_clarification and clarification_result.data.clarification_message:
+            #     chat_agent_logger.info(f"Asking for clarification in session {session_id}: {clarification_result.data.clarification_message}")
+            #     clarification_response = ModelResponse(
+            #         parts=[StatusResponsePart(
+            #             content=clarification_result.data.clarification_message,
+            #             agent_type="chat_agent"
+            #         )],
+            #         timestamp=datetime.now(timezone.utc)
+            #     )
+            #     yield "clarification", clarification_response
+            #     return
+
             chat_agent_logger.info(f"Starting investigation for prompt: '{prompt}' in session {session_id}")
             async for status_type, status in self.ai_agent.investigate(
                 prompt,
@@ -330,24 +331,43 @@ class ChatAgentService:
                 cell_tools=self.cell_tools
             ):
                 chat_agent_logger.info(f"Yielding status update for session {session_id}. Type: {status_type}")
+                chat_agent_logger.debug(f"Received status dictionary for {status_type}: {status}") # DEBUG LOG
                 
-                if 'cell_params' in status:
+                # Check if the status_type indicates an event that should create a cell response
+                is_cell_event = (
+                    status_type.endswith("_completed") or 
+                    status_type.endswith("_error") or 
+                    status_type == "plan_cell_created" or 
+                    status_type == "summary_created"
+                )
+                
+                if is_cell_event and 'cell_params' in status:
+                    chat_agent_logger.info(f"Creating CellResponsePart for {status_type}") # DEBUG LOG
+                    # Format as CellResponsePart if it's a cell event and has params
                     response = ModelResponse(
                         parts=[CellResponsePart(
                             cell_id=status.get('cell_id', ''),
                             cell_params=status.get('cell_params', {}),
-                            status_type=status.get('status', ''),
+                            status_type=status.get('status', status_type), # Use status['status'] if available, else status_type
                             agent_type=status.get('agent_type', 'unknown'),
                             result=status.get('result', None)
                         )],
                         timestamp=datetime.now(timezone.utc)
                     )
                 else:
+                    chat_agent_logger.info(f"Creating StatusResponsePart for {status_type} (is_cell_event={is_cell_event}, has_cell_params={'cell_params' in status})") # DEBUG LOG
+                    # Otherwise, format as StatusResponsePart
                     update_info = status.get('update_info')
-                    content_message = f"Status: {status.get('status', '')}"
+                    # Default content from status['status'] or the status_type itself
+                    content_message = f"Status: {status.get('status', status_type)}"
                     
+                    # Try getting more specific message from update_info if available
                     if isinstance(update_info, dict):
                         content_message = update_info.get('message', update_info.get('error', content_message))
+                    elif isinstance(status.get("message"), str): # Check for top-level message/error too
+                        content_message = status["message"]
+                    elif isinstance(status.get("error"), str):
+                        content_message = status["error"]
                     
                     response = ModelResponse(
                         parts=[StatusResponsePart(

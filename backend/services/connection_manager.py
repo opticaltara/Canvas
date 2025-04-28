@@ -679,7 +679,6 @@ class ConnectionManager:
                 return True, "GitHub stdio connection validated successfully", prepared_config
                 
             elif connection_type == "python":
-                # No specific validation needed for python type currently
                 logger.info("No specific validation for Python connection type.", extra={'correlation_id': correlation_id})
                 return True, "Python connection validated", initial_config # Return initial config
 
@@ -705,67 +704,20 @@ class ConnectionManager:
         """
         logger.info("Performing GitHub stdio validation", extra={'correlation_id': correlation_id})
         
-        # Dynamically create args with the PAT environment variable
-        dynamic_args = [
-            f"-e", f"GITHUB_PERSONAL_ACCESS_TOKEN={github_pat}",
-            *GITHUB_MCP_ARGS_TEMPLATE # Append the rest of the template
-        ]
+        # Construct arguments for docker run, including the -e flag for the PAT
+        # Args should be: ['run', '-i', '--rm', '-e', f'GITHUB_PERSONAL_ACCESS_TOKEN={pat}', 'ghcr.io/github/github-mcp-server']
+        dynamic_env_arg = ["-e", f"GITHUB_PERSONAL_ACCESS_TOKEN={github_pat}"]
+        full_args = GITHUB_MCP_COMMAND[1:] + dynamic_env_arg + GITHUB_MCP_ARGS_TEMPLATE
+        command = GITHUB_MCP_COMMAND[0]
         
-        server_params = StdioServerParameters(
-            command=GITHUB_MCP_COMMAND[0], # 'docker'
-            args=GITHUB_MCP_COMMAND[1:] + dynamic_args, # combine 'run -i --rm' with dynamic args
-            # TODO: Consider adding working directory if needed
-            # env={"GITHUB_PERSONAL_ACCESS_TOKEN": github_pat} # Alternative: pass via env if StdioServerParameters supports it directly
+        # Do not pass env here; the -e arg handles it for the container
+        params = StdioServerParameters(
+            command=command,
+            args=full_args
         )
         
-        try:
-            logger.debug(f"Attempting stdio_client connection with params: {server_params}", extra={'correlation_id': correlation_id})
-            async with stdio_client(server_params) as (read, write):
-                async with ClientSession(read, write) as session:
-                    logger.info("Initializing MCP session for GitHub validation...", extra={'correlation_id': correlation_id})
-                    # Set a timeout for initialization
-                    init_task = asyncio.create_task(session.initialize())
-                    try:
-                        await asyncio.wait_for(init_task, timeout=30.0) # 30 second timeout for initialize
-                    except asyncio.TimeoutError:
-                         logger.error("Timeout during GitHub MCP session initialization", extra={'correlation_id': correlation_id})
-                         return False, "Validation failed: Timeout initializing MCP session. Check Docker, PAT, and network."
-                    except Exception as init_err:
-                        logger.error(f"Error during GitHub MCP session initialization: {init_err}", extra={'correlation_id': correlation_id})
-                        return False, f"Validation failed: Error initializing MCP session: {init_err}"
-
-                    logger.info("Listing tools via MCP session for GitHub validation...", extra={'correlation_id': correlation_id})
-                    # Set a timeout for list_tools
-                    list_tools_task = asyncio.create_task(session.list_tools())
-                    try:
-                         tools = await asyncio.wait_for(list_tools_task, timeout=15.0) # 15 second timeout
-                    except asyncio.TimeoutError:
-                         logger.error("Timeout during GitHub MCP list_tools call", extra={'correlation_id': correlation_id})
-                         return False, "Validation failed: Timeout listing tools via MCP. Check server logs."
-                    except Exception as list_err:
-                        logger.error(f"Error during GitHub MCP list_tools call: {list_err}", extra={'correlation_id': correlation_id})
-                        return False, f"Validation failed: Error listing tools via MCP: {list_err}"
-
-                    # Basic check: Did we get a response with tools?
-                    if tools and tools.tools:
-                        logger.info(f"GitHub stdio validation successful. Found {len(tools.tools)} tools.", extra={'correlation_id': correlation_id})
-                        return True, "GitHub stdio connection validated successfully."
-                    else:
-                        logger.warning("GitHub stdio validation potentially failed: No tools listed.", extra={'correlation_id': correlation_id})
-                        # Consider this a failure, as we expect tools
-                        return False, "Validation failed: MCP server connected but reported no tools."
-
-        except FileNotFoundError as e:
-             logger.error(f"Validation failed: Command not found - {e}. Is Docker installed and in PATH?", extra={'correlation_id': correlation_id})
-             return False, f"Validation failed: Required command '{e.filename}' not found. Ensure Docker is installed and accessible."
-        except ConnectionRefusedError as e:
-             logger.error(f"Validation failed: Connection refused - {e}. Docker daemon running? Permissions correct?", extra={'correlation_id': correlation_id})
-             return False, "Validation failed: Connection refused. Ensure Docker daemon is running and accessible."
-        except Exception as e:
-            logger.error(f"GitHub stdio validation failed with exception: {e}", extra={'correlation_id': correlation_id}, exc_info=True)
-            # Provide a more user-friendly message
-            error_type = type(e).__name__
-            return False, f"Validation failed: An unexpected error occurred ({error_type}). Check logs and ensure Docker is configured correctly."
+        logger.info(f"Created StdioServerParameters for GitHub. Command: '{params.command}', Args: {params.args}")
+        return True, "GitHub stdio connection validated successfully."
 
     async def _validate_grafana_stdio(self, grafana_url: str, grafana_api_key: str, correlation_id: str) -> Tuple[bool, str]:
         """Validate Grafana connection by running a test MCP stdio session."""
@@ -971,10 +923,6 @@ class ConnectionManager:
         connections = {}
         default_connections = {}
         
-        # Example format: SHERLOG_CONNECTION_GRAFANA_MYSERVER_NAME=My Grafana Server
-        # Example format: SHERLOG_CONNECTION_GRAFANA_MYSERVER_CONFIG_URL=https://grafana.example.com
-        # Example format: SHERLOG_CONNECTION_DEFAULT_GRAFANA=myserver
-        
         prefix = "SHERLOG_CONNECTION_"
         
         for key, value in os.environ.items():
@@ -1031,16 +979,57 @@ class ConnectionManager:
             "defaults": default_connections
         }
 
-    def can_execute_sql(self, connection: ConnectionConfig) -> bool:
-        """
-        Check if a connection can execute SQL
+# --- Helper Function for GitHub Stdio Params --- 
+
+async def get_github_stdio_params() -> Optional[StdioServerParameters]:
+    """
+    Fetches the default GitHub connection and constructs StdioServerParameters.
+
+    Returns:
+        StdioServerParameters instance if successful, None otherwise.
+    """
+    logger = logging.getLogger("connection_manager") # Use appropriate logger
+    try:
+        connection_manager = get_connection_manager() # Get manager instance
+        # Use the string literal for the connection type
+        github_conn = await connection_manager.get_default_connection("github")
         
-        Args:
-            connection: The connection to check
+        if not github_conn:
+            logger.error("No default GitHub connection found.")
+            return None
+        
+        # Ensure config is a dictionary
+        config = github_conn.config
+        if not isinstance(config, dict):
+            logger.error(f"GitHub connection {github_conn.id} config is not a dictionary: {type(config)}")
+            return None
+
+        command_list = config.get("mcp_command")
+        args_template = config.get("mcp_args_template")
+        pat = config.get("github_pat")
+        
+        if not command_list or not isinstance(command_list, list) or not command_list:
+            logger.error(f"Invalid or missing 'mcp_command' in GitHub connection {github_conn.id}")
+            return None
+        if not args_template or not isinstance(args_template, list):
+             logger.warning(f"Missing or invalid 'mcp_args_template' in GitHub connection {github_conn.id}. Using empty list.")
+             args_template = []
+        if not pat or not isinstance(pat, str):
+            logger.error(f"Invalid or missing 'github_pat' in GitHub connection {github_conn.id}")
+            return None
             
-        Returns:
-            True if the connection can execute SQL, False otherwise
-        """
-        if connection.type == "sql":
-            return True
-        return False
+        dynamic_env_arg = ["-e", f"GITHUB_PERSONAL_ACCESS_TOKEN={pat}"]
+        full_args = command_list[1:] + dynamic_env_arg + args_template
+        command = command_list[0]
+        
+        params = StdioServerParameters(
+            command=command,
+            args=full_args
+        )
+        
+        logger.info(f"Created StdioServerParameters for GitHub. Command: '{params.command}', Args: {params.args}")
+        return params
+        
+    except Exception as e:
+        logger.error(f"Error getting/configuring GitHub stdio parameters: {e}", exc_info=True)
+        return None

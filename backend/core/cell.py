@@ -14,15 +14,17 @@ Key components:
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from datetime import datetime
 from enum import Enum
 import logging
 import time
-from typing import Any, Dict, List, Optional, Set, Union
+from typing import Any, Dict, List, Optional, Set
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator
+
+# Import ToolCallID
+from backend.core.dependency import ToolCallID
 
 # Initialize logger
 cell_logger = logging.getLogger("cell")
@@ -52,22 +54,17 @@ class CellType(str, Enum):
     Enumeration of supported cell types
     
     Attributes:
-        AI_QUERY: Cell containing a query to the AI system
-        SQL: Cell containing SQL queries
-        PYTHON: Cell containing Python code
         MARKDOWN: Cell containing markdown text
         LOG: Cell for log analysis (e.g., Loki)
         METRIC: Cell for metric queries (e.g., PromQL)
-        S3: Cell for S3 object storage queries
+        GITHUB: Cell containing a GitHub query or operation result
+        SUMMARIZATION: Cell for summarization results
     """
-    AI_QUERY = "ai_query"
-    SQL = "sql"
-    PYTHON = "python"
     MARKDOWN = "markdown"
     LOG = "log"
     METRIC = "metric"
-    S3 = "s3"
     GITHUB = "github"
+    SUMMARIZATION = "summarization"
 
 
 class CellResult(BaseModel):
@@ -100,6 +97,7 @@ class Cell(BaseModel):
         updated_at: When the cell was last updated
         dependencies: Set of cell IDs this cell depends on
         dependents: Set of cell IDs that depend on this cell
+        tool_call_ids: List of IDs for tool calls associated with this cell
         metadata: Additional cell metadata
         connection_id: ID of the connection to use (0 or 1)
     """
@@ -115,6 +113,9 @@ class Cell(BaseModel):
     # Dependency handling
     dependencies: Set[UUID] = Field(default_factory=set)
     dependents: Set[UUID] = Field(default_factory=set)
+    
+    # Tool calls associated with this cell
+    tool_call_ids: List[ToolCallID] = Field(default_factory=list)
     
     # Metadata
     metadata: Dict[str, Any] = Field(default_factory=dict)
@@ -351,130 +352,6 @@ class Cell(BaseModel):
         )
 
 
-class AIQueryCell(Cell):
-    """
-    A cell containing a query to the AI system
-    
-    This cell type is used to ask the AI to perform investigations or analyses.
-    The AI can generate a plan and create other cells in response.
-    
-    Attributes:
-        thinking: Optional text showing the AI's thinking process
-        generated_cells: List of cell IDs generated from this query
-    """
-    type: CellType = CellType.AI_QUERY
-    thinking: Optional[str] = None
-    generated_cells: List[UUID] = Field(default_factory=list)
-    
-    def set_thinking(self, thinking: str) -> None:
-        """Set the AI's thinking process text"""
-        start_time = time.time()
-        self.thinking = thinking
-        process_time = time.time() - start_time
-        cell_logger.info(
-            "AI thinking process updated",
-            extra={
-                'cell_id': str(self.id),
-                'thinking_length': len(thinking),
-                'processing_time_ms': round(process_time * 1000, 2)
-            }
-        )
-    
-    def add_generated_cell(self, cell_id: UUID) -> None:
-        """Add a cell ID to the list of generated cells"""
-        start_time = time.time()
-        self.generated_cells.append(cell_id)
-        process_time = time.time() - start_time
-        cell_logger.info(
-            "Generated cell added to AI query",
-            extra={
-                'cell_id': str(self.id),
-                'generated_cell_id': str(cell_id),
-                'total_generated_cells': len(self.generated_cells),
-                'processing_time_ms': round(process_time * 1000, 2)
-            }
-        )
-
-
-class SQLCell(Cell):
-    """
-    A cell containing an SQL query
-    
-    This cell type executes SQL against connected databases.
-    """
-    type: CellType = CellType.SQL
-    
-    def __init__(self, **data):
-        super().__init__(**data)
-        cell_logger.info(
-            "SQL cell initialized",
-            extra={
-                'cell_id': str(self.id),
-                'connection_id': self.connection_id
-            }
-        )
-    
-    class Config:
-        schema_extra = {
-            "example": {
-                "content": "SELECT * FROM users WHERE created_at > NOW() - INTERVAL '1 day';"
-            }
-        }
-
-
-class PythonCell(Cell):
-    """
-    A cell containing Python code
-    
-    This cell type executes Python code for data analysis and visualization.
-    
-    Attributes:
-        type: Always set to PYTHON
-        use_sandbox: Whether to use the sandboxed execution environment
-        dependencies: Python package dependencies for the sandboxed environment
-    """
-    type: CellType = CellType.PYTHON
-    use_sandbox: bool = True
-    package_dependencies: List[str] = Field(default_factory=list)
-    
-    def __init__(self, **data):
-        super().__init__(**data)
-        cell_logger.info(
-            "Python cell initialized",
-            extra={
-                'cell_id': str(self.id),
-                'use_sandbox': self.use_sandbox,
-                'package_dependencies_count': len(self.package_dependencies)
-            }
-        )
-    
-    def add_package_dependency(self, package: str) -> None:
-        """Add a Python package dependency"""
-        start_time = time.time()
-        self.package_dependencies.append(package)
-        process_time = time.time() - start_time
-        cell_logger.info(
-            "Package dependency added to Python cell",
-            extra={
-                'cell_id': str(self.id),
-                'package': package,
-                'total_dependencies': len(self.package_dependencies),
-                'processing_time_ms': round(process_time * 1000, 2)
-            }
-        )
-    
-    class Config:
-        schema_extra = {
-            "example": {
-                "content": "import pandas as pd\ndf = pd.DataFrame(result)\ndf.groupby('status').count()",
-                "settings": {
-                    "use_sandbox": True,
-                    "dependencies": ["pandas", "numpy"]
-                }
-            }
-        }
-
-
 class MarkdownCell(Cell):
     """
     A cell containing markdown content
@@ -506,10 +383,14 @@ class MarkdownCell(Cell):
 
 class GitHubCell(Cell):
     """
-    A cell containing a GitHub
+    A cell containing a GitHub query/action intent.
+    Stores the tool name and arguments needed for execution.
     """
     type: CellType = CellType.GITHUB
     source: str = "github"
+    # Store the specific tool and its arguments for execution
+    tool_name: Optional[str] = None
+    tool_arguments: Optional[Dict[str, Any]] = None
     
     def __init__(self, **data):
         super().__init__(**data)
@@ -603,6 +484,26 @@ class MetricCell(Cell):
             }
         )
 
+
+class SummarizationCell(Cell):
+    """
+    A cell containing text to be summarized or the result of a summarization.
+    """
+    type: CellType = CellType.SUMMARIZATION
+    source: str = "summarization"
+    # Potentially add fields later if needed, e.g., original_text_ref
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        cell_logger.info(
+            "Summarization cell initialized",
+            extra={
+                'cell_id': str(self.id),
+                'source': self.source
+            }
+        )
+
+
 def create_cell(cell_type: CellType, content: str, **kwargs) -> Cell:
     """
     Create a new cell of the specified type
@@ -620,18 +521,29 @@ def create_cell(cell_type: CellType, content: str, **kwargs) -> Cell:
     try:
         # Map cell types to their classes
         cell_classes = {
-            CellType.AI_QUERY: AIQueryCell,
-            CellType.SQL: SQLCell,
-            CellType.PYTHON: PythonCell,
             CellType.MARKDOWN: MarkdownCell,
             CellType.LOG: LogCell,
             CellType.METRIC: MetricCell,
-            CellType.GITHUB: GitHubCell
+            CellType.GITHUB: GitHubCell,
+            CellType.SUMMARIZATION: SummarizationCell
         }
         
         # Create the cell
+        if cell_type not in cell_classes:
+            raise ValueError(f"Unsupported cell type: {cell_type}")
+            
         cell_class = cell_classes[cell_type]
-        cell = cell_class(content=content, **kwargs)
+        
+        # Prepare arguments, extracting GitHub specific ones if needed
+        constructor_args = {"content": content, **kwargs}
+        if cell_type == CellType.GITHUB:
+            # Clean potential None values passed if agent didn't find tool calls
+            if constructor_args.get('tool_name') is None:
+                constructor_args.pop('tool_name', None)
+            if constructor_args.get('tool_arguments') is None:
+                constructor_args.pop('tool_arguments', None)
+                
+        cell = cell_class(**constructor_args)
         
         process_time = time.time() - start_time
         cell_logger.info(

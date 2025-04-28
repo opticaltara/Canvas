@@ -54,8 +54,8 @@ const MarkdownCell: React.FC<MarkdownCellProps> = ({ cell, onExecute, onUpdate, 
             placeholder="Enter markdown content..."
           />
         ) : (
-          <div className="prose max-w-none">
-            <ReactMarkdown>{cell.content}</ReactMarkdown>
+          <div className="prose text-sm max-w-none max-h-60 overflow-y-auto">
+            <ReactMarkdown>{cell.content.replace(/\\n/g, '\n')}</ReactMarkdown>
           </div>
         )}
       </CardContent>
