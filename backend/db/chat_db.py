@@ -159,6 +159,7 @@ class ChatDatabase:
             raise
 
         # Insert message
+        chat_logger.info(f"Inserting message for session {session_id}. Type: {type(message).__name__}, Details: {str(message)}")
         await self._asyncify(
             self._execute,
             "INSERT INTO chat_messages (session_id, message_json, created_at) VALUES (?, ?, ?);",

@@ -1054,7 +1054,7 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
   }
 
   return (
-    <div className="border rounded-md overflow-hidden mb-3 max-w-5xl mx-auto">
+    <div className="border rounded-md overflow-hidden mb-3 max-w-7xl mx-auto">
       <div className="bg-green-100 border-b border-green-200 p-2 flex justify-between items-center">
         <div className="flex items-center">
           {/* Use cell content as the title, which we set to "GitHub Tool: tool_name" */}

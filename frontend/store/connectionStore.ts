@@ -11,21 +11,13 @@ interface ConnectionState {
   loading: boolean
   error: string | null
 
-  // MCP statuses
-  mcpStatuses: Record<string, { status: string; message?: string }>
-
   // Actions
   loadConnections: () => Promise<void>
   createConnection: (connectionData: Partial<Connection>) => Promise<Connection | null>
   updateConnection: (id: string, connectionData: Partial<Connection>) => Promise<Connection | null>
   deleteConnection: (id: string) => Promise<boolean>
   setDefaultConnection: (id: string) => Promise<boolean>
-  testConnection: (connectionData: Partial<Connection>) => Promise<{ success: boolean; message?: string }>
-
-  // MCP actions
-  loadMcpStatuses: () => Promise<void>
-  startMcpServer: (id: string) => Promise<boolean>
-  stopMcpServer: (id: string) => Promise<boolean>
+  testConnection: (connectionData: Partial<Connection>) => Promise<{ valid: boolean; message: string }>
 
   // Utility
   getConnectionsByType: (type: string) => Connection[]
@@ -40,20 +32,30 @@ export const useConnectionStore = create<ConnectionState>()(
         connections: [],
         loading: false,
         error: null,
-        mcpStatuses: {},
 
         // Load all connections
         loadConnections: async () => {
           set({ loading: true, error: null })
 
           try {
-            const connections = await api.connections.list()
-            set({ connections, loading: false })
+            // Assume api.connections.list() returns Connection[] as typed
+            const connectionsFromApi = await api.connections.list()
+
+            // Ensure each connection has the is_default field (default to false)
+            const connections = connectionsFromApi.map(conn => ({
+              ...conn,
+              is_default: conn.is_default ?? false,
+            }))
+
+            // The type system should handle if the response isn't Connection[]
+            // Explicitly assert the type to match the state definition
+            set({ connections: connections as Connection[], loading: false })
           } catch (err) {
             console.error("Failed to load connections:", err)
             set({
               error: "Failed to load connections. Please try again.",
               loading: false,
+              connections: [], // Ensure connections is reset on error
             })
           }
         },
@@ -62,10 +64,14 @@ export const useConnectionStore = create<ConnectionState>()(
         createConnection: async (connectionData) => {
           try {
             const newConnection = await api.connections.create(connectionData)
-            set((state) => ({
-              connections: [...state.connections, newConnection],
-            }))
-            return newConnection
+            // Only update state if creation was successful (newConnection is not null)
+            if (newConnection) {
+              set((state) => ({
+                // Assert the type of newConnection to satisfy the state type
+                connections: [...state.connections, newConnection as Connection],
+              }))
+            }
+            return newConnection // Return the actual result (Connection or null)
           } catch (err) {
             console.error("Failed to create connection:", err)
             return null
@@ -120,74 +126,13 @@ export const useConnectionStore = create<ConnectionState>()(
         // Test a connection
         testConnection: async (connectionData) => {
           try {
+            // Return type from api.connections.test is { valid: boolean; message: string }
             return await api.connections.test(connectionData)
           } catch (err) {
             console.error("Failed to test connection:", err)
-            return { success: false, message: "Failed to test connection" }
-          }
-        },
-
-        // Load MCP statuses for all connections
-        loadMcpStatuses: async () => {
-          try {
-            const statuses = await Promise.all(
-              get().connections.map(async (conn) => {
-                try {
-                  const status = await api.connections.getMcpStatus(conn.id)
-                  return { id: conn.id, status }
-                } catch (err) {
-                  return {
-                    id: conn.id,
-                    status: { status: "error", message: "Failed to get status" },
-                  }
-                }
-              }),
-            )
-
-            const statusMap: Record<string, { status: string; message?: string }> = {}
-            statuses.forEach((item) => {
-              statusMap[item.id] = item.status
-            })
-
-            set({ mcpStatuses: statusMap })
-          } catch (err) {
-            console.error("Failed to load MCP statuses:", err)
-          }
-        },
-
-        // Start MCP server for a connection
-        startMcpServer: async (id) => {
-          try {
-            await api.connections.startMcp(id)
-            const status = await api.connections.getMcpStatus(id)
-            set((state) => ({
-              mcpStatuses: {
-                ...state.mcpStatuses,
-                [id]: status,
-              },
-            }))
-            return true
-          } catch (err) {
-            console.error("Failed to connect:", err)
-            return false
-          }
-        },
-
-        // Stop MCP server for a connection
-        stopMcpServer: async (id) => {
-          try {
-            await api.connections.stopMcp(id)
-            const status = await api.connections.getMcpStatus(id)
-            set((state) => ({
-              mcpStatuses: {
-                ...state.mcpStatuses,
-                [id]: status,
-              },
-            }))
-            return true
-          } catch (err) {
-            console.error("Failed to disconnect:", err)
-            return false
+            // Return the correct structure on error
+            const message = err instanceof Error ? err.message : "Failed to test connection"
+            return { valid: false, message }
           }
         },
 

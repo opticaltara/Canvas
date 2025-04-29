@@ -1,17 +1,8 @@
 // API client for data connections
 import axios from "axios"
 import { BACKEND_URL } from "@/config/api-config"
-
-export interface Connection {
-  id: string
-  name: string
-  type: string
-  config: Record<string, any>
-  is_default?: boolean
-  created_at?: string
-  updated_at?: string
-  mcp_status?: "running" | "stopped" | "error"
-}
+// Import the canonical Connection type
+import type { Connection } from "../store/types"
 
 export interface ConnectionType {
   id: string
@@ -38,34 +29,64 @@ export const connectionApi = {
   },
 
   async createConnection(connectionData: Partial<Connection>): Promise<Connection> {
-    // Use type-specific endpoints based on connection type
-    if (connectionData.type === "github") {
-      const response = await axios.post(`${API_BASE_URL}/connections/github`, {
-        name: connectionData.name,
-        github_personal_access_token: connectionData.config?.github_personal_access_token || "",
-      })
-      return response.data
-    } else if (connectionData.type === "grafana") {
-      const response = await axios.post(`${API_BASE_URL}/connections/grafana`, {
-        name: connectionData.name,
-        url: connectionData.config?.url || "",
-        api_key: connectionData.config?.api_key || "",
-      })
-      return response.data
-    } else if (connectionData.type === "python") {
-      const response = await axios.post(`${API_BASE_URL}/connections/python`, {
-        name: connectionData.name,
-        ...connectionData.config,
-      })
-      return response.data
-    } else {
-      // Fallback to generic endpoint
-      const response = await axios.post(`${API_BASE_URL}/connections`, {
-        name: connectionData.name,
-        type: connectionData.type,
-        config: connectionData.config,
-      })
-      return response.data
+    const { type, name, config } = connectionData
+
+    if (!name || !type) {
+      throw new Error("Connection name and type are required.")
+    }
+
+    let response
+    try {
+      if (type === "github") {
+        if (!config?.github_personal_access_token) {
+          throw new Error("GitHub Personal Access Token is required in config.")
+        }
+        response = await axios.post(`${API_BASE_URL}/connections/github`, {
+          name: name,
+          github_personal_access_token: config.github_personal_access_token,
+        })
+      } else if (type === "grafana") {
+        if (!config?.url || !config?.api_key) {
+          throw new Error("Grafana URL and API Key are required in config.")
+        }
+        response = await axios.post(`${API_BASE_URL}/connections/grafana`, {
+          name: name,
+          url: config.url,
+          api_key: config.api_key,
+        })
+      } else if (type === "python") {
+        // Assuming python connection takes config directly
+        response = await axios.post(`${API_BASE_URL}/connections/python`, {
+          name: name,
+          ...(config || {}), // Spread the config object
+        })
+      } else {
+        // Fallback to generic endpoint - This might need adjustment depending on backend
+        // Consider logging a warning if this generic endpoint is used
+        console.warn(`Using generic connection creation endpoint for type: ${type}`)
+        response = await axios.post(`${API_BASE_URL}/connections`, {
+          name: name,
+          type: type,
+          config: config || {},
+        })
+      }
+      // Ensure the response data conforms to the Connection type as much as possible
+      // Add default 'is_default' if missing
+      const connectionResult = response.data as Connection;
+      if (connectionResult.is_default === undefined) {
+          connectionResult.is_default = false;
+      }
+      return connectionResult;
+
+    } catch (error) {
+      console.error(`Failed to create ${type} connection '${name}':`, error)
+      // Re-throw or handle error appropriately
+      if (axios.isAxiosError(error) && error.response) {
+        throw new Error(error.response.data.detail || `Failed to create connection: ${error.message}`)
+      } else if (error instanceof Error) {
+          throw error; // Re-throw known errors (like validation errors)
+      }
+      throw new Error(`An unexpected error occurred while creating the connection.`)
     }
   },
 
@@ -90,6 +111,12 @@ export const connectionApi = {
   async deleteConnection(connectionId: string): Promise<boolean> {
     await axios.delete(`${API_BASE_URL}/connections/${connectionId}`)
     return true
+  },
+
+  async setDefaultConnection(connectionId: string): Promise<boolean> {
+    // Assuming a POST request to a /default endpoint
+    await axios.post(`${API_BASE_URL}/connections/${connectionId}/default`)
+    return true // Assume success if no error
   },
 
   async testConnection(connectionData: Partial<Connection>): Promise<{ valid: boolean; message: string }> {
@@ -125,26 +152,6 @@ export const connectionApi = {
       return response.data
     }
   },
-
-  async getMcpStatus(connectionId: string): Promise<{ status: "running" | "stopped" | "error"; message?: string }> {
-    const response = await axios.get(`${API_BASE_URL}/connections/${connectionId}/mcp/status`)
-    return response.data
-  },
-
-  async startMcp(connectionId: string): Promise<{ success: boolean; message?: string }> {
-    const response = await axios.post(`${API_BASE_URL}/connections/${connectionId}/mcp/start`)
-    return response.data
-  },
-
-  async stopMcp(connectionId: string): Promise<{ success: boolean; message?: string }> {
-    const response = await axios.post(`${API_BASE_URL}/connections/${connectionId}/mcp/stop`)
-    return response.data
-  },
-
-  async getAllMcpStatus(): Promise<Record<string, { status: "running" | "stopped" | "error"; message?: string }>> {
-    const response = await axios.get(`${API_BASE_URL}/connections/mcp/status`)
-    return response.data
-  },
 }
 
 // Export the connections API in the format expected by the client code
@@ -155,11 +162,8 @@ export const connections = {
   create: connectionApi.createConnection,
   update: connectionApi.updateConnection,
   delete: connectionApi.deleteConnection,
+  setDefault: connectionApi.setDefaultConnection,
   test: connectionApi.testConnection,
-  getMcpStatus: connectionApi.getMcpStatus,
-  startMcp: connectionApi.startMcp,
-  stopMcp: connectionApi.stopMcp,
-  getAllMcpStatus: connectionApi.getAllMcpStatus,
 }
 
 // Also export the API client for direct use

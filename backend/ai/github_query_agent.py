@@ -18,12 +18,11 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.mcp import MCPServerStdio
-from mcp import StdioServerParameters
 from mcp.shared.exceptions import McpError 
 
 from backend.config import get_settings
 from backend.core.query_result import GithubQueryResult, ToolCallRecord
-from backend.services.connection_manager import get_connection_manager, get_github_stdio_params
+from backend.services.connection_manager import get_github_stdio_params
 
 github_query_agent_logger = logging.getLogger("ai.github_query_agent")
 
@@ -32,6 +31,7 @@ class GitHubQueryAgent:
     def __init__(self, notebook_id: str):
         github_query_agent_logger.info(f"Initializing GitHubQueryAgent for notebook_id: {notebook_id}")
         self.settings = get_settings()
+        # Revert to using standard OpenAIModel
         self.model = OpenAIModel(
                 self.settings.ai_model,
                 provider=OpenAIProvider(
@@ -80,6 +80,7 @@ class GitHubQueryAgent:
         # Read system prompt from file
         system_prompt = self._read_system_prompt()
 
+        # Revert Agent instantiation type hint if necessary (or keep previous simple form)
         agent = Agent(
             self.model,
             output_type=GithubQueryResult,
@@ -87,6 +88,7 @@ class GitHubQueryAgent:
             system_prompt=system_prompt,
         )
         github_query_agent_logger.info(f"Agent instance created with MCPServerStdio.")
+        # Add back type: ignore if needed by linter/type checker
         return agent # type: ignore
 
     async def _run_single_attempt(self, agent: Agent, current_description: str, attempt_num: int) -> AsyncGenerator[Dict[str, Any], None]:
@@ -245,7 +247,7 @@ class GitHubQueryAgent:
                             last_error = "Failed to process successful agent result."
                             # This mirrors the 'no_valid_data' case from the old logic
                             yield {"status": "no_valid_data", "attempt": attempt + 1, "message": "Agent iteration completed but result processing failed."}
-                            error_context = f"\\n\\nINFO: Attempt {attempt + 1} completed but result processing failed. Agent will retry."
+                            error_context = f"\n\nINFO: Attempt {attempt + 1} completed but result processing failed. Agent will retry."
                             current_description += error_context
                             yield {"status": "retrying", "attempt": attempt + 1, "reason": "result processing failed"}
                             continue # Continue to next attempt
@@ -256,7 +258,7 @@ class GitHubQueryAgent:
                         yield {"status": "mcp_error", "attempt": attempt + 1, "error": error_str}
                         last_error = error_str
                         if attempt < max_attempts - 1:
-                            error_context = f"\\n\\nINFO: Attempt {attempt + 1} failed with tool error: {error_str}. This might be expected for certain operations (e.g., empty repo). Agent will retry."
+                            error_context = f"\n\nINFO: Attempt {attempt + 1} failed with tool error: {error_str}. This might be expected for certain operations (e.g., empty repo). Agent will retry."
                             current_description += error_context
                             yield {"status": "retrying", "attempt": attempt + 1, "reason": "mcp_error"}
                             continue # Go to next attempt in the inner loop
@@ -271,12 +273,21 @@ class GitHubQueryAgent:
                         break # Exit inner loop to handle final error
 
                     except Exception as e: # Catch other potential errors during agent iteration or processing
+                        # Restore the specific check for timestamp TypeError
                         if isinstance(e, TypeError) and "'NoneType' object cannot be interpreted as an integer" in str(e):
                             # Specific handling for the timestamp issue
                             error_msg = "TypeError: OpenAI API response likely missing 'created' timestamp."
                             github_query_agent_logger.error(f"Timestamp Error during agent run attempt {attempt + 1}: {error_msg}", exc_info=True)
                             yield {"status": "timestamp_error", "attempt": attempt + 1, "error": error_msg}
                             last_error = f"Agent iteration failed: {error_msg}"
+                            # Add context and retry if attempts remain
+                            if attempt < max_attempts - 1:
+                                error_context = f"\n\nINFO: Attempt {attempt + 1} failed due to a likely missing timestamp in the API response. Agent will retry."
+                                current_description += error_context
+                                yield {"status": "retrying", "attempt": attempt + 1, "reason": "timestamp_error"}
+                                continue # Go to next attempt
+                            else:
+                                break # Exit loop if final attempt failed with this error
                         else:
                             # Handle other general errors
                             github_query_agent_logger.error(f"General error during agent iteration/processing attempt {attempt + 1}: {e}", exc_info=True)

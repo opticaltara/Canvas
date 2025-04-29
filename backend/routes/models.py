@@ -28,6 +28,12 @@ AVAILABLE_MODELS = [
         "description": "Google's Gemini 2.5 Pro model"
     },
     {
+        "id": "google/gemini-2.5-flash-preview",
+        "name": "Gemini 2.5 Flash",
+        "provider": "Google",
+        "description": "Google's Gemini 2.5 Flash model (Preview)"
+    },
+    {
         "id": "openai/gpt-4o-2024-11-20",
         "name": "GPT-4o",
         "provider": "OpenAI",

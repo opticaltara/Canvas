@@ -3,18 +3,17 @@ Repository module for database operations
 """
 
 import logging
-from typing import Dict, List, Optional, Any, TypeVar, Generic, Union
+from typing import Dict, List, Optional, Any, TypeVar, Union
 from datetime import datetime, timezone
 
 from sqlalchemy import select, delete, update, and_
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from contextlib import contextmanager
 
 from backend.db.models import Connection, DefaultConnection, Notebook, Cell, CellDependency
-from backend.core.notebook import Notebook as NotebookModel, NotebookMetadata
-from backend.core.cell import Cell as CellModel, CellType, CellStatus
+from backend.core.cell import CellStatus
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -260,10 +259,11 @@ class NotebookRepository:
             logger.error("Error updating notebook timestamp: %s", str(e), extra={'correlation_id': 'N/A'})
             raise
     
-    def create_notebook(self, title: str, description: Optional[str] = None, 
+    def create_notebook(self, title: str, description: Optional[str] = None,
                         created_by: Optional[str] = None, tags: Optional[List[str]] = None) -> Notebook:
         """Create a new notebook in the database"""
-        logger.info("Creating new notebook: %s", title, extra={'correlation_id': 'N/A'})
+        logger.info("Attempting to create notebook: Title='%s', Description='%s', CreatedBy='%s', Tags=%s",
+                    title, description, created_by, tags, extra={'correlation_id': 'N/A'})
         try:
             notebook = Notebook(
                 title=title,
@@ -276,25 +276,25 @@ class NotebookRepository:
                 self.db.add(notebook)
                 self.db.flush()  # Flush to get the ID before commit
                 self.db.refresh(notebook)
-                logger.info("Notebook created with ID: %s", notebook.id, extra={'correlation_id': 'N/A'})
+                logger.info("Successfully created notebook: ID='%s', Title='%s'", notebook.id, notebook.title, extra={'correlation_id': 'N/A'})
             
             return notebook
         except SQLAlchemyError as e:
-            logger.error("Error creating notebook: %s", str(e), extra={'correlation_id': 'N/A'})
+            logger.error("Error creating notebook: %s", str(e), extra={'correlation_id': 'N/A'}, exc_info=True)
             raise
     
     def get_notebook(self, notebook_id: str) -> Optional[Notebook]:
         """Get a notebook by ID"""
         logger.info("Fetching notebook with ID: %s", notebook_id, extra={'correlation_id': 'N/A'})
         try:
-            notebook = self.db.query(Notebook).filter(Notebook.id == notebook_id).first()
+            notebook = self.db.query(Notebook).options(joinedload(Notebook.cells)).filter(Notebook.id == notebook_id).first() # Eager load cells
             if notebook:
-                logger.info("Found notebook: %s", notebook.title, extra={'correlation_id': 'N/A'})
+                logger.info("Found notebook: ID='%s', Title='%s', Cells=%d", notebook.id, notebook.title, len(notebook.cells), extra={'correlation_id': 'N/A'})
             else:
                 logger.info("No notebook found with ID: %s", notebook_id, extra={'correlation_id': 'N/A'})
             return notebook
         except SQLAlchemyError as e:
-            logger.error("Error fetching notebook %s: %s", notebook_id, str(e), extra={'correlation_id': 'N/A'})
+            logger.error("Error fetching notebook %s: %s", notebook_id, str(e), extra={'correlation_id': 'N/A'}, exc_info=True)
             raise
     
     def list_notebooks(self) -> List[Notebook]:
@@ -305,74 +305,96 @@ class NotebookRepository:
             logger.info("Retrieved %d notebooks", len(notebooks), extra={'correlation_id': 'N/A'})
             return notebooks
         except SQLAlchemyError as e:
-            logger.error("Error fetching all notebooks: %s", str(e), extra={'correlation_id': 'N/A'})
+            logger.error("Error fetching all notebooks: %s", str(e), extra={'correlation_id': 'N/A'}, exc_info=True)
             raise
     
     def update_notebook(self, notebook_id: str, **kwargs) -> Optional[Notebook]:
         """Update notebook attributes"""
-        logger.info("Updating notebook with ID: %s", notebook_id, extra={'correlation_id': 'N/A'})
+        logger.info("Attempting to update notebook: ID='%s', Updates=%s", notebook_id, kwargs, extra={'correlation_id': 'N/A'})
         try:
-            notebook = self.get_notebook(notebook_id)
+            notebook = self.get_notebook(notebook_id) # Use get_notebook which logs
             if not notebook:
-                logger.info("Cannot update notebook: ID %s not found", notebook_id, extra={'correlation_id': 'N/A'})
+                # get_notebook already logs the 'not found' case
                 return None
-            
-            # Filter kwargs to only include valid attributes
+
+            # Filter kwargs to only include valid attributes of Notebook model
             valid_attrs = {k: v for k, v in kwargs.items() if hasattr(Notebook, k)}
+            if not valid_attrs:
+                logger.warning("No valid attributes provided for update on notebook %s", notebook_id, extra={'correlation_id': 'N/A'})
+                return notebook # Return current notebook if no valid updates
+
             valid_attrs['updated_at'] = datetime.now(timezone.utc)
-            
+            logger.debug("Valid update attributes for notebook %s: %s", notebook_id, valid_attrs, extra={'correlation_id': 'N/A'})
+
             # Use SQLAlchemy update statement
             with self._transaction():
                 stmt = update(Notebook).where(Notebook.id == notebook_id).values(**valid_attrs)
-                self.db.execute(stmt)
-                logger.info("Notebook %s updated successfully", notebook_id, extra={'correlation_id': 'N/A'})
-            
-            return self.get_notebook(notebook_id)
+                result = self.db.execute(stmt)
+                if result.rowcount == 0:
+                     logger.warning("No rows updated for notebook %s, possibly concurrent modification?", notebook_id, extra={'correlation_id': 'N/A'})
+                     # Rollback handled by context manager
+                     raise SQLAlchemyError("Update affected 0 rows.")
+                logger.info("Notebook %s updated successfully with attributes: %s", notebook_id, list(valid_attrs.keys()), extra={'correlation_id': 'N/A'})
+
+            return self.get_notebook(notebook_id) # Fetch again to get refreshed data
         except SQLAlchemyError as e:
-            logger.error("Error updating notebook %s: %s", notebook_id, str(e), extra={'correlation_id': 'N/A'})
+            logger.error("Error updating notebook %s: %s", notebook_id, str(e), extra={'correlation_id': 'N/A'}, exc_info=True)
             raise
     
     def delete_notebook(self, notebook_id: str) -> bool:
         """Delete a notebook"""
-        logger.info("Deleting notebook with ID: %s", notebook_id, extra={'correlation_id': 'N/A'})
+        logger.info("Attempting to delete notebook: ID='%s'", notebook_id, extra={'correlation_id': 'N/A'})
         try:
-            notebook = self.get_notebook(notebook_id)
+            notebook = self.get_notebook(notebook_id) # Use get_notebook which logs
             if not notebook:
-                logger.info("Cannot delete notebook: ID %s not found", notebook_id, extra={'correlation_id': 'N/A'})
+                # get_notebook already logs the 'not found' case
                 return False
-            
+
             with self._transaction():
                 # Delete all cells and dependencies associated with this notebook
-                cells = self.db.query(Cell).filter(Cell.notebook_id == notebook_id).all()
-                for cell in cells:
-                    # Delete dependencies
-                    self.db.query(CellDependency).filter(
-                        (CellDependency.dependent_id == cell.id) | 
-                        (CellDependency.dependency_id == cell.id)
-                    ).delete()
-                    # Delete cell
-                    self.db.delete(cell)
-                
+                # Log cell/dependency deletion within their respective methods if needed
+                # For simplicity here, we just log the count
+                cell_ids_to_delete = [cell.id for cell in notebook.cells]
+                logger.debug("Found %d cells to delete for notebook %s: %s", len(cell_ids_to_delete), notebook_id, cell_ids_to_delete, extra={'correlation_id': 'N/A'})
+
+                if cell_ids_to_delete:
+                    # Delete dependencies first
+                    dep_delete_stmt = delete(CellDependency).where(
+                        (CellDependency.dependent_id.in_(cell_ids_to_delete)) |
+                        (CellDependency.dependency_id.in_(cell_ids_to_delete))
+                    )
+                    dep_result = self.db.execute(dep_delete_stmt)
+                    logger.info("Deleted %d dependencies associated with notebook %s", dep_result.rowcount, notebook_id, extra={'correlation_id': 'N/A'})
+
+                    # Delete cells
+                    cell_delete_stmt = delete(Cell).where(Cell.notebook_id == notebook_id)
+                    cell_result = self.db.execute(cell_delete_stmt)
+                    if cell_result.rowcount != len(cell_ids_to_delete):
+                         logger.warning("Expected to delete %d cells for notebook %s, but deleted %d.", len(cell_ids_to_delete), notebook_id, cell_result.rowcount, extra={'correlation_id': 'N/A'})
+                    else:
+                         logger.info("Deleted %d cells for notebook %s", cell_result.rowcount, notebook_id, extra={'correlation_id': 'N/A'})
+
                 # Delete notebook
-                self.db.delete(notebook)
+                self.db.delete(notebook) # Use session delete for cascading if configured, or manual delete works too
                 logger.info("Notebook %s deleted successfully", notebook_id, extra={'correlation_id': 'N/A'})
-            
+
             return True
         except SQLAlchemyError as e:
-            logger.error("Error deleting notebook %s: %s", notebook_id, str(e), extra={'correlation_id': 'N/A'})
+            logger.error("Error deleting notebook %s: %s", notebook_id, str(e), extra={'correlation_id': 'N/A'}, exc_info=True)
             raise
     
-    def create_cell(self, notebook_id: str, cell_type: str, content: str, 
+    def create_cell(self, notebook_id: str, cell_type: str, content: str,
                     position: int, connection_id: Optional[str] = None,
                     metadata: Optional[Dict] = None, settings: Optional[Dict] = None) -> Optional[Cell]:
         """Create a new cell in a notebook"""
-        logger.info("Creating new cell in notebook %s", notebook_id, extra={'correlation_id': 'N/A'})
+        logger.info("Attempting to create cell in notebook %s: Type='%s', Position=%d, ConnectionID='%s', Metadata=%s, Settings=%s",
+                    notebook_id, cell_type, position, connection_id, metadata, settings, extra={'correlation_id': 'N/A'})
         try:
+            # Check if notebook exists first (get_notebook logs this)
             notebook = self.get_notebook(notebook_id)
             if not notebook:
-                logger.info("Cannot create cell: Notebook ID %s not found", notebook_id, extra={'correlation_id': 'N/A'})
                 return None
-            
+
             cell = Cell(
                 notebook_id=notebook_id,
                 type=cell_type,
@@ -390,173 +412,188 @@ class NotebookRepository:
                 
                 # Update notebook timestamp
                 self._update_notebook_timestamp(notebook_id)
-                logger.info("Cell created with ID: %s in notebook %s", cell.id, notebook_id, extra={'correlation_id': 'N/A'})
+                logger.info("Successfully created cell: ID='%s' in notebook '%s'", cell.id, notebook_id, extra={'correlation_id': 'N/A'})
             
             return cell
         except SQLAlchemyError as e:
-            logger.error("Error creating cell in notebook %s: %s", notebook_id, str(e), extra={'correlation_id': 'N/A'})
+            logger.error("Error creating cell in notebook %s: %s", notebook_id, str(e), extra={'correlation_id': 'N/A'}, exc_info=True)
             raise
     
     def get_cell(self, cell_id: str) -> Optional[Cell]:
         """Get a cell by ID"""
         logger.info("Fetching cell with ID: %s", cell_id, extra={'correlation_id': 'N/A'})
         try:
-            cell = self.db.query(Cell).filter(Cell.id == cell_id).first()
+            # Eager load dependencies/dependents if often needed together
+            cell = self.db.query(Cell).options(
+                joinedload(Cell.dependencies),
+                joinedload(Cell.dependents)
+            ).filter(Cell.id == cell_id).first()
             if cell:
-                logger.info("Found cell with ID: %s", cell_id, extra={'correlation_id': 'N/A'})
+                logger.info("Found cell: ID='%s', Type='%s', NotebookID='%s'", cell.id, cell.type, cell.notebook_id, extra={'correlation_id': 'N/A'})
             else:
                 logger.info("No cell found with ID: %s", cell_id, extra={'correlation_id': 'N/A'})
             return cell
         except SQLAlchemyError as e:
-            logger.error("Error fetching cell %s: %s", cell_id, str(e), extra={'correlation_id': 'N/A'})
+            logger.error("Error fetching cell %s: %s", cell_id, str(e), extra={'correlation_id': 'N/A'}, exc_info=True)
             raise
     
     def update_cell(self, cell_id: str, **kwargs) -> Optional[Cell]:
         """Update cell attributes"""
-        logger.info("Updating cell with ID: %s", cell_id, extra={'correlation_id': 'N/A'})
+        logger.info("Attempting to update cell: ID='%s', Updates=%s", cell_id, kwargs, extra={'correlation_id': 'N/A'})
         try:
-            cell = self.get_cell(cell_id)
+            cell = self.get_cell(cell_id) # get_cell logs retrieval status
             if not cell:
-                logger.info("Cannot update cell: ID %s not found", cell_id, extra={'correlation_id': 'N/A'})
                 return None
-            
+
             # Extract notebook_id for timestamp update
             notebook_id = self._ensure_str_id(cell.notebook_id)
-            
-            # Filter kwargs to only include valid attributes
+
+            # Filter kwargs to only include valid attributes of the Cell model
             valid_attrs = {k: v for k, v in kwargs.items() if hasattr(Cell, k)}
+            if not valid_attrs:
+                 logger.warning("No valid attributes provided for update on cell %s", cell_id, extra={'correlation_id': 'N/A'})
+                 return cell # Return current cell if no valid updates
+
             valid_attrs['updated_at'] = datetime.now(timezone.utc)
-            
+            logger.debug("Valid update attributes for cell %s: %s", cell_id, valid_attrs, extra={'correlation_id': 'N/A'})
+
             with self._transaction():
                 # Use SQLAlchemy update statement
                 stmt = update(Cell).where(Cell.id == cell_id).values(**valid_attrs)
-                self.db.execute(stmt)
-                
+                result = self.db.execute(stmt)
+                if result.rowcount == 0:
+                     logger.warning("No rows updated for cell %s, possibly concurrent modification?", cell_id, extra={'correlation_id': 'N/A'})
+                     raise SQLAlchemyError("Update affected 0 rows.")
+
                 # Update notebook timestamp
                 self._update_notebook_timestamp(notebook_id)
-                logger.info("Cell %s updated successfully", cell_id, extra={'correlation_id': 'N/A'})
-            
-            return self.get_cell(cell_id)
+                logger.info("Cell %s updated successfully with attributes: %s", cell_id, list(valid_attrs.keys()), extra={'correlation_id': 'N/A'})
+
+            return self.get_cell(cell_id) # Fetch again to get refreshed data
         except SQLAlchemyError as e:
-            logger.error("Error updating cell %s: %s", cell_id, str(e), extra={'correlation_id': 'N/A'})
+            logger.error("Error updating cell %s: %s", cell_id, str(e), extra={'correlation_id': 'N/A'}, exc_info=True)
             raise
     
     def delete_cell(self, cell_id: str) -> bool:
         """Delete a cell"""
-        logger.info("Deleting cell with ID: %s", cell_id, extra={'correlation_id': 'N/A'})
+        logger.info("Attempting to delete cell: ID='%s'", cell_id, extra={'correlation_id': 'N/A'})
         try:
-            cell = self.get_cell(cell_id)
+            cell = self.get_cell(cell_id) # get_cell logs retrieval status
             if not cell:
-                logger.info("Cannot delete cell: ID %s not found", cell_id, extra={'correlation_id': 'N/A'})
                 return False
-            
+
             # Extract notebook_id for timestamp update
             notebook_id = self._ensure_str_id(cell.notebook_id)
-            
+
             with self._transaction():
-                # Delete any dependencies
-                self.db.query(CellDependency).filter(
-                    (CellDependency.dependent_id == cell_id) | 
+                # Delete any dependencies where this cell is involved
+                dep_delete_stmt = delete(CellDependency).where(
+                    (CellDependency.dependent_id == cell_id) |
                     (CellDependency.dependency_id == cell_id)
-                ).delete()
-                
-                # Delete the cell
-                self.db.delete(cell)
-                
+                )
+                dep_result = self.db.execute(dep_delete_stmt)
+                logger.info("Deleted %d dependencies associated with cell %s", dep_result.rowcount, cell_id, extra={'correlation_id': 'N/A'})
+
+                # Delete the cell itself
+                self.db.delete(cell) # Session delete handles the object
+                logger.info("Cell %s deleted successfully", cell_id, extra={'correlation_id': 'N/A'})
+
                 # Update notebook timestamp
                 self._update_notebook_timestamp(notebook_id)
-                logger.info("Cell %s deleted successfully", cell_id, extra={'correlation_id': 'N/A'})
-            
+
             return True
         except SQLAlchemyError as e:
-            logger.error("Error deleting cell %s: %s", cell_id, str(e), extra={'correlation_id': 'N/A'})
+            logger.error("Error deleting cell %s: %s", cell_id, str(e), extra={'correlation_id': 'N/A'}, exc_info=True)
             raise
     
     def add_dependency(self, dependent_id: str, dependency_id: str) -> bool:
         """Add a dependency between cells"""
-        logger.info("Adding dependency from cell %s to cell %s", dependent_id, dependency_id, extra={'correlation_id': 'N/A'})
+        logger.info("Attempting to add dependency: Dependent='%s' -> Dependency='%s'", dependent_id, dependency_id, extra={'correlation_id': 'N/A'})
         try:
-            dependent = self.get_cell(dependent_id)
-            dependency = self.get_cell(dependency_id)
-            
+            dependent = self.get_cell(dependent_id) # get_cell logs retrieval
+            dependency = self.get_cell(dependency_id) # get_cell logs retrieval
+
             if not dependent or not dependency:
-                logger.info("Cannot add dependency: Cells not found", extra={'correlation_id': 'N/A'})
+                logger.error("Cannot add dependency: One or both cells not found (Dependent: %s, Dependency: %s)",
+                             'Found' if dependent else 'Not Found', 'Found' if dependency else 'Not Found', extra={'correlation_id': 'N/A'})
                 return False
-            
+
             # Check if dependent and dependency are in the same notebook
-            if self._ensure_str_id(dependent.notebook_id) != self._ensure_str_id(dependency.notebook_id):
-                logger.error("Cannot add dependency: Cells belong to different notebooks", extra={'correlation_id': 'N/A'})
+            dep_notebook_id = self._ensure_str_id(dependent.notebook_id)
+            dependency_notebook_id = self._ensure_str_id(dependency.notebook_id)
+            if dep_notebook_id != dependency_notebook_id:
+                logger.error("Cannot add dependency: Cells belong to different notebooks ('%s' vs '%s')",
+                             dep_notebook_id, dependency_notebook_id, extra={'correlation_id': 'N/A'})
                 return False
-            
+
             # Extract notebook_id for timestamp update
-            notebook_id = self._ensure_str_id(dependent.notebook_id)
-            
+            notebook_id = dep_notebook_id
+
             # Check if dependency already exists
             existing = self.db.query(CellDependency).filter(
                 CellDependency.dependent_id == dependent_id,
                 CellDependency.dependency_id == dependency_id
             ).first()
-            
+
             if existing:
-                logger.info("Dependency already exists", extra={'correlation_id': 'N/A'})
+                logger.info("Dependency Dependent='%s' -> Dependency='%s' already exists.", dependent_id, dependency_id, extra={'correlation_id': 'N/A'})
                 return True
-            
+
             with self._transaction():
-                # Add dependency
+                # Add dependency relationship
                 cell_dependency = CellDependency(
                     dependent_id=dependent_id,
                     dependency_id=dependency_id
                 )
-                
                 self.db.add(cell_dependency)
-                
-                # Update cell status using update statement
-                stmt = update(Cell).where(Cell.id == dependent_id).values(status="stale")
+                logger.debug("Added CellDependency record: Dependent='%s', Dependency='%s'", dependent_id, dependency_id, extra={'correlation_id': 'N/A'})
+
+                # Update dependent cell status to stale using update statement
+                stmt = update(Cell).where(Cell.id == dependent_id).values(status=CellStatus.STALE.value)
                 self.db.execute(stmt)
-                
+                logger.debug("Marked dependent cell %s as stale", dependent_id, extra={'correlation_id': 'N/A'})
+
                 # Update notebook timestamp
                 self._update_notebook_timestamp(notebook_id)
-                logger.info("Dependency added successfully", extra={'correlation_id': 'N/A'})
-            
+                logger.info("Dependency added successfully: Dependent='%s' -> Dependency='%s'", dependent_id, dependency_id, extra={'correlation_id': 'N/A'})
+
             return True
         except SQLAlchemyError as e:
-            logger.error("Error adding dependency: %s", str(e), extra={'correlation_id': 'N/A'})
+            logger.error("Error adding dependency (%s -> %s): %s", dependent_id, dependency_id, str(e), extra={'correlation_id': 'N/A'}, exc_info=True)
             raise
     
     def remove_dependency(self, dependent_id: str, dependency_id: str) -> bool:
         """Remove a dependency between cells"""
-        logger.info("Removing dependency from cell %s to cell %s", dependent_id, dependency_id, extra={'correlation_id': 'N/A'})
+        logger.info("Attempting to remove dependency: Dependent='%s' -> Dependency='%s'", dependent_id, dependency_id, extra={'correlation_id': 'N/A'})
         try:
-            # Get cell for notebook_id
+            # Get dependent cell to find notebook ID (get_cell logs retrieval)
             dependent = self.get_cell(dependent_id)
             if not dependent:
-                logger.info("Dependent cell not found: %s", dependent_id, extra={'correlation_id': 'N/A'})
+                logger.warning("Cannot remove dependency: Dependent cell %s not found", dependent_id, extra={'correlation_id': 'N/A'})
                 return False
-                
+
             # Extract notebook_id for timestamp update
             notebook_id = self._ensure_str_id(dependent.notebook_id)
-            
+
             with self._transaction():
-                # Find dependency
-                dependency = self.db.query(CellDependency).filter(
+                # Find dependency link
+                stmt = delete(CellDependency).where(
                     CellDependency.dependent_id == dependent_id,
                     CellDependency.dependency_id == dependency_id
-                ).first()
-                
-                if not dependency:
-                    logger.info("Dependency not found", extra={'correlation_id': 'N/A'})
+                )
+                result = self.db.execute(stmt)
+
+                if result.rowcount == 0:
+                    logger.info("Dependency Dependent='%s' -> Dependency='%s' not found for removal.", dependent_id, dependency_id, extra={'correlation_id': 'N/A'})
                     return False
-                
-                # Remove dependency
-                self.db.delete(dependency)
-                
+
                 # Update notebook timestamp
                 self._update_notebook_timestamp(notebook_id)
-                logger.info("Dependency removed successfully", extra={'correlation_id': 'N/A'})
-            
+                logger.info("Dependency removed successfully: Dependent='%s' -> Dependency='%s'", dependent_id, dependency_id, extra={'correlation_id': 'N/A'})
+
             return True
         except SQLAlchemyError as e:
-            logger.error("Error removing dependency: %s", str(e), extra={'correlation_id': 'N/A'})
+            logger.error("Error removing dependency (%s -> %s): %s", dependent_id, dependency_id, str(e), extra={'correlation_id': 'N/A'}, exc_info=True)
             raise
     
     def set_cell_result(self, cell_id: str, content: Any, error: Optional[str] = None, 

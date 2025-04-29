@@ -11,6 +11,8 @@ import time
 import json
 from typing import Dict, List, Optional, Any, Tuple, AsyncGenerator
 from datetime import datetime, timezone
+from pathlib import Path
+import asyncio
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
@@ -226,30 +228,31 @@ class ChatAgentService:
                 self.available_tools_info = "Error fetching available data sources."
                 self._available_data_source_types = [] # Set to empty list on error
 
+    def _load_system_prompt_template(self) -> str:
+        """Loads the system prompt template from the dedicated file."""
+        try:
+            prompt_path = Path(__file__).parent / "prompts" / "chat_agent_system_prompt.txt"
+            with open(prompt_path, "r") as f:
+                return f.read()
+        except FileNotFoundError:
+            chat_agent_logger.error("System prompt file not found! Using default empty prompt.")
+            return ""
+        except Exception as e:
+            chat_agent_logger.error(f"Error loading system prompt: {e}")
+            return ""
+
     def _generate_system_prompt(self) -> str:
-        """Generates the system prompt, using placeholder if types not fetched yet."""
-        tools_info = self.available_tools_info or "(Data source information is loading...)" 
-        
-        return f"""
-            You are an AI assistant managing conversations and coordinating data investigations.
-            {tools_info}
-
-            Your primary responsibilities are:
-            1. Understanding user queries.
-            2. Managing the conversation flow.
-            3. Coordinating investigations using available data sources.
-            4. Presenting results clearly.
-
-            When a user asks to investigate something:
-            1. Assess if the query can be addressed with the available data sources ({tools_info}).
-            2. **CRITICAL: Proceed DIRECTLY with the investigation if the query is reasonably understandable.** Do NOT ask for clarification unless the query is fundamentally ambiguous (e.g., completely unclear intent) or lacks ESSENTIAL information that prevents *any* meaningful action (e.g., the specific platform like GitHub is absolutely required but missing, and the query doesn't imply it).
-            3. **DO NOT ask for usernames (like GitHub username) if the relevant data source (e.g., GitHub MCP) is listed as available.** Assume the connection provides the necessary user context.
-            4. For standard requests (e.g., 'recent pull requests', 'active repositories', 'my recent commits'), assume common definitions (like 'recent' means the last few weeks/month, 'active' involves recent activity) and PROCEED. Do not ask for clarification on timeframes or precise definitions unless the user explicitly requests something non-standard or highly specific.
-            5. If the query is clear and actionable according to these strict guidelines, pass it for investigation.
-            6. Present investigation results clearly. Be ready for follow-up questions.
-
-            Your goal is to be proactive and action-oriented. Avoid unnecessary conversational turns. Focus on executing the request based on the available tools and context.
-            """
+        """Generates the system prompt by formatting the loaded template."""
+        tools_info = self.available_tools_info or "(Data source information is loading...)"
+        try:
+            return self._load_system_prompt_template().format(tools_info=tools_info)
+        except KeyError as e:
+            chat_agent_logger.error(f"Error formatting system prompt - missing key: {e}")
+            # Fallback or modified prompt if formatting fails
+            return self._load_system_prompt_template() # Or return a default prompt string
+        except Exception as e:
+            chat_agent_logger.error(f"Unexpected error formatting system prompt: {e}")
+            return self._load_system_prompt_template() # Fallback
 
     async def create_session(self, session_id: str, notebook_id: str):
         """Create a new chat session and initialize necessary components."""
@@ -299,28 +302,28 @@ class ChatAgentService:
                 chat_agent_logger.error(f"No notebook_id found for session {session_id}")
                 raise ValueError(f"No notebook_id found for session {session_id}")
             
-            # chat_agent_logger.info(f"Checking if clarification is needed for session {session_id}...")
-            # clarification_result = await self.chat_agent.run(
-            #     f"Assess if this user request needs clarification before proceeding: '{prompt}'. "
-            #     f"Consider the available tools and context ({self.available_tools_info or '(loading...)'}). "
-            #     f"Only ask for clarification if the request is genuinely ambiguous "
-            #     f"or missing critical information needed to act.",
-            #     message_history=message_history,
-            # )
+            chat_agent_logger.info(f"Checking if clarification is needed for session {session_id}...")
+            clarification_result = await self.chat_agent.run(
+                f"Assess if this user request needs clarification before proceeding: '{prompt}'. "
+                f"Consider the available tools and context ({self.available_tools_info or '(loading...)'}). "
+                f"Only ask for clarification if the request is genuinely ambiguous "
+                f"or missing critical information needed to act.",
+                message_history=message_history,
+            )
 
-            # chat_agent_logger.info(f"Clarification check completed for session {session_id}. Result: {clarification_result.data.needs_clarification}")
+            chat_agent_logger.info(f"Clarification check completed for session {session_id}. Result: {clarification_result.output.needs_clarification}")
             
-            # if clarification_result.data.needs_clarification and clarification_result.data.clarification_message:
-            #     chat_agent_logger.info(f"Asking for clarification in session {session_id}: {clarification_result.data.clarification_message}")
-            #     clarification_response = ModelResponse(
-            #         parts=[StatusResponsePart(
-            #             content=clarification_result.data.clarification_message,
-            #             agent_type="chat_agent"
-            #         )],
-            #         timestamp=datetime.now(timezone.utc)
-            #     )
-            #     yield "clarification", clarification_response
-            #     return
+            if clarification_result.output.needs_clarification and clarification_result.output.clarification_message:
+                chat_agent_logger.info(f"Asking for clarification in session {session_id}: {clarification_result.output.clarification_message}")
+                clarification_response = ModelResponse(
+                    parts=[StatusResponsePart(
+                        content=clarification_result.output.clarification_message,
+                        agent_type="chat_agent"
+                    )],
+                    timestamp=datetime.now(timezone.utc)
+                )
+                yield "clarification", clarification_response
+                return
 
             chat_agent_logger.info(f"Starting investigation for prompt: '{prompt}' in session {session_id}")
             async for status_type, status in self.ai_agent.investigate(

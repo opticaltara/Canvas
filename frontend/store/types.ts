@@ -33,8 +33,8 @@ export const NotebookSchema = z.object({
 })
 export type Notebook = z.infer<typeof NotebookSchema>
 
-// Update the ConnectionTypeSchema to include python
-export const ConnectionTypeSchema = z.enum(["grafana", "kubernetes", "s3", "github", "python"])
+// Update the ConnectionTypeSchema to only include currently supported types
+export const ConnectionTypeSchema = z.enum(["grafana", "github"])
 export type ConnectionType = z.infer<typeof ConnectionTypeSchema>
 
 export const ConnectionSchema = z.object({
