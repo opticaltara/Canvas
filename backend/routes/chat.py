@@ -8,6 +8,7 @@ import json
 import logging
 import time
 from typing import Dict, List, Tuple
+from uuid import uuid4, UUID
 from uuid import uuid4
 from datetime import datetime, timezone
 
@@ -17,7 +18,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
-    UserPromptPart
+    UserPromptPart,
 )
 
 from backend.ai.chat_agent import (
@@ -62,6 +63,49 @@ async def get_chat_db(request: Request) -> ChatDatabase:
     """Get the chat database from the app state"""
     return request.app.state.chat_db
 
+MAX_CELL_HISTORY = 5
+MAX_SUMMARY_LENGTH = 150 # Max chars for code/output summaries
+
+def summarize_cell(cell_dict: Dict) -> str:
+    """Creates a concise summary string for a notebook cell dictionary."""
+    cell_id = cell_dict.get('id', 'N/A')
+    cell_type = cell_dict.get('type', 'unknown')
+    status = cell_dict.get('status', cell_dict.get('metadata', {}).get('status', 'unknown')) 
+    summary = f"[Cell ID: {cell_id}, Type: {cell_type}, Status: {status}"
+
+    content = cell_dict.get('content', '')
+    if content:
+        if len(content) > MAX_SUMMARY_LENGTH:
+            content_summary = content[:MAX_SUMMARY_LENGTH] + "..."
+        else:
+            content_summary = content
+        # Clean summary before adding to f-string
+        cleaned_content_summary = content_summary.replace("\n", " ")
+        summary += f', Content: \'{cleaned_content_summary}\''
+
+    result = cell_dict.get('result')
+    if isinstance(result, dict):
+        error = result.get('error')
+        output = result.get('output', result.get('content')) 
+        if error:
+             error_str = str(error)
+             if len(error_str) > MAX_SUMMARY_LENGTH:
+                 error_summary = error_str[:MAX_SUMMARY_LENGTH] + "..."
+             else:
+                 error_summary = error_str
+             cleaned_error = error_summary.replace("\n", " ")
+             summary += f', Error: {cleaned_error}'
+        elif output:
+            output_str = str(output)
+            if len(output_str) > MAX_SUMMARY_LENGTH:
+                 output_summary = output_str[:MAX_SUMMARY_LENGTH] + "..."
+            else:
+                 output_summary = output_str
+            cleaned_output = output_summary.replace("\n", " ")
+            summary += f', Result: {cleaned_output}'
+
+    summary += "]"
+    return summary
 
 class CreateSessionRequest(BaseModel):
     """Request to create a new chat session"""
@@ -198,8 +242,7 @@ async def get_session_messages(
 async def post_message(
     session_id: str,
     prompt: str = Form(...),
-    chat_db: ChatDatabase = Depends(get_chat_db) # Keep chat_db dependency
-    # Remove direct dependency on get_chat_agent_service
+    chat_db: ChatDatabase = Depends(get_chat_db) 
 ) -> StreamingResponse:
     """
     Send a message to the chat agent and stream the response
@@ -227,30 +270,64 @@ async def post_message(
         chat_logger.error(f"Error retrieving history for session {session_id}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to retrieve message history.")
 
-    # Ensure the agent has the associated notebook_id (it should from create_session)
-    if session_id not in chat_agent.sessions or not chat_agent.sessions.get(session_id):
-         # This might indicate an issue if the agent was retrieved but lost its internal state
-         chat_logger.error(f"Agent for session {session_id} exists but has no associated notebook_id.")
-         raise HTTPException(status_code=500, detail="Internal server error: Agent state inconsistency.")
+    # Ensure the agent has the associated notebook_id
+    notebook_id_str = chat_agent.sessions.get(session_id)
+    if not notebook_id_str:
+        chat_logger.error(f"Agent for session {session_id} exists but has no associated notebook_id.")
+        raise HTTPException(status_code=500, detail="Internal server error: Agent state inconsistency.")
+    try:
+        notebook_id = UUID(notebook_id_str) # Convert to UUID
+    except ValueError:
+         chat_logger.error(f"Invalid notebook_id format '{notebook_id_str}' associated with session {session_id}.")
+         raise HTTPException(status_code=500, detail="Internal server error: Invalid notebook ID.")
 
-
-    # Construct the user message object expected by the agent
-    user_message = ModelRequest(parts=[UserPromptPart(content=prompt)])
+    # --- Fetch and Summarize Cell History (Corrected) ---
+    cell_history_context = "No recent cell history found."
+    try:
+        notebook_manager = chat_agent.notebook_manager # Get manager from agent
+        notebook = notebook_manager.get_notebook(notebook_id) # Fetch the notebook object
+        if notebook and notebook.cell_order:
+            recent_cell_ids = notebook.cell_order[-MAX_CELL_HISTORY:]
+            # Use model_dump() which is standard in Pydantic v2
+            recent_cells_dicts = [notebook.cells[cell_id].model_dump() 
+                                  for cell_id in recent_cell_ids 
+                                  if cell_id in notebook.cells] 
+            summaries = [summarize_cell(cell_dict) for cell_dict in recent_cells_dicts]
+            if summaries:
+                 cell_history_context = "Recent Cell History:\n" + "\n".join(summaries)
+            else:
+                 cell_history_context = "Found notebook but no recent cells to summarize."
+        elif notebook:
+             cell_history_context = "Notebook found, but it has no cells."
+             
+        chat_logger.debug(f"Generated cell history context for session {session_id}:\n{cell_history_context}")
+    except KeyError: 
+         chat_logger.warning(f"Notebook {notebook_id} not found when fetching cell history.")
+         cell_history_context = "Could not retrieve notebook for cell history."
+    except Exception as e:
+        chat_logger.error(f"Error fetching or summarizing cell history for notebook {notebook_id}: {e}", exc_info=True)
+        cell_history_context = "Error retrieving recent cell history."
     
-    # Append the new user message to the history *before* passing to handle_message
-    # Note: We're passing the raw prompt string AND the history including the new message
-    current_history = history_from_db + [user_message]
+    # Prepend cell history context to the user's prompt
+    prompt_with_context = f"{cell_history_context}\n\nUser Prompt:\n{prompt}"
+    # --- End Fetch and Summarize Cell History ---
 
-    # Save the new user message to the database asynchronously
-    # We can do this in parallel with the agent processing
+    # Construct the user message object using the combined prompt
+    # Timestamp added automatically by UserPromptPart if not provided
+    user_message = ModelRequest(parts=[UserPromptPart(content=prompt_with_context)]) 
+    
+    # The agent receives history *including* the user message with prepended context
+    # We save the user_message (containing context) to DB
+    message_history_for_agent = history_from_db # History *before* the current message
+
+    # Save the user message (with context) to the database asynchronously
     async def save_user_message():
         try:
             await chat_db.add_message(session_id, user_message)
         except Exception as e:
             chat_logger.error(f"Error saving user message for session {session_id}", exc_info=True)
-            # Decide if this should be fatal or just logged
 
-    await save_user_message() # Or run in background task if preferred asyncio.create_task(save_user_message())
+    await save_user_message() 
 
     chat_logger.info(
         f"Processing message for session {session_id}",
@@ -258,7 +335,8 @@ async def post_message(
             'correlation_id': request_id,
             'session_id': session_id,
             'prompt': prompt,
-            'history_length': len(history_from_db) # Log length before adding current prompt
+            'history_length': len(history_from_db), # Log length before adding current prompt
+            'context_added': True # Indicate cell context was added
         }
     )
 
@@ -267,10 +345,11 @@ async def post_message(
         message_buffer: List[Tuple[str, ModelResponse]] = [] # Buffer for DB saving
 
         try:
+            # Pass history *before* the current user message
             async for status_type, response_part in chat_agent.handle_message(
-                prompt=prompt, # Pass the raw prompt string
+                prompt=prompt_with_context, # Pass the prompt string WITH context
                 session_id=session_id,
-                message_history=history_from_db # Pass history *before* current prompt
+                message_history=message_history_for_agent 
             ):
                 message_buffer.append((status_type, response_part))
                 
