@@ -434,8 +434,8 @@ class AIAgent:
             yield f"step_{single_step.step_id}_completed", {
                 "status": "step_completed",
                 "step_id": single_step.step_id,
-                "step_type": single_step.step_type,
-                "cell_id": created_cell_id,
+                "step_type": single_step.step_type.value, # Use enum value for consistency
+                "cell_id": created_cell_id, # Ensure this uses the UUID obtained from cell_tools.create_cell
                 "tool_call_record_id": str(synthetic_record.id), # Include record ID
                 "cell_params": cell_params_for_step.model_dump(),
                 "result": { # Use the final_result_data

@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react"
 import { useWebSocket } from "./useWebSocket"
 import { useToast } from "@/hooks/use-toast"
 import { useCanvasStore } from "@/store/canvas" // Import useCanvasStore
+import { type CellStatus } from "@/store/types"; // Import CellStatus type
 
 // Define event types based on the documentation
 export interface BaseEvent {
@@ -65,11 +66,13 @@ export type InvestigationEvent =
 // Define cell creation parameters
 export interface CellCreationParams {
   id: string
+  step_id: string
   type: string
   content: string
   status: "idle" | "running" | "success" | "error"
   result?: any
   error?: string
+  metadata?: Record<string, any>
 }
 
 interface UseInvestigationEventsProps {
@@ -103,7 +106,8 @@ export function useInvestigationEvents({
       handleEvent(message as InvestigationEvent)
     } catch (error) {
       console.error("Error handling investigation event:", error)
-      onError(`Failed to process event: ${error.message}`)
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      onError(`Failed to process event: ${errorMessage}`)
     }
   }, [messages])
 
@@ -117,7 +121,7 @@ export function useInvestigationEvents({
           handlePlanCreated(event as PlanCreatedEvent)
           break
         case "plan_cell_created":
-          handlePlanCellCreated(event as PlanCellCreatedEvent)
+          handlePlanCellCreated()
           break
         case "plan_revised":
           handlePlanRevised(event as PlanRevisedEvent)
@@ -175,6 +179,7 @@ export function useInvestigationEvents({
       // Create the cell - THIS IS THE ONLY PLACE WE CREATE CELLS
       const cellParams: CellCreationParams = {
         id: event.cell_id,
+        step_id: event.step_id,
         type: event.step_type,
         content: event.result.query || "",
         status: event.result.error ? "error" : "success",
@@ -237,7 +242,7 @@ export function useInvestigationEvents({
   )
 
   const handleCellCreation = useCallback(
-    (message) => {
+    (message: any) => {
       console.log("🔍 handleCellCreation called with message:", message)
 
       try {
@@ -277,7 +282,7 @@ export function useInvestigationEvents({
             content,
             position,
             metadata,
-            status: "idle",
+            status: "idle" as CellStatus,
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
           }
@@ -313,8 +318,10 @@ export function useInvestigationEvents({
             console.log("🔍 Calling onCreateCell callback")
             onCreateCell({
               id: tempId,
+              step_id: '',
               type: cell_type,
               content,
+              status: "idle",
               metadata,
             })
           }

@@ -48,40 +48,72 @@ export default function CanvasPage() {
 
   const handleCreateCell = useCallback(
     (params: CellCreationParams) => {
-      console.log("🔍 handleCreateCell called with params:", params)
-      const existingCellIndex = cells.findIndex((cell) => cell.id === params.id)
+      console.log(`🔍 handleCreateCell called. Step ID: ${params.step_id}, Cell ID: ${params.id}. Full params:`, params);
+
+      // Find existing cell using step_id from metadata
+      const existingCellIndex = cells.findIndex((cell) => cell.metadata?.step_id === params.step_id);
 
       if (existingCellIndex >= 0) {
-        const updatedCells = [...cells]
+        console.log(`🔄 Updating existing cell linked to step ID: ${params.step_id} with definitive Cell ID: ${params.id}`);
+        const updatedCells = [...cells];
+        const existingCell = updatedCells[existingCellIndex];
+        
+        // Update the existing cell, ensuring the ID is the correct UUID
+        const { id, step_id, metadata, ...restParams } = params;
         updatedCells[existingCellIndex] = {
-          ...updatedCells[existingCellIndex],
-          ...params,
-          type: params.type as CellType,
-        }
-        setCells(updatedCells)
+          ...existingCell,
+          ...restParams, // Spread the rest of the params
+          id: params.id, // Explicitly set the correct UUID
+          type: params.type as CellType, // Cast type
+          metadata: { // Merge metadata, ensuring step_id is preserved/updated
+            ...existingCell.metadata,
+            ...(metadata || {}), // Safely spread params.metadata
+            step_id: params.step_id,
+          },
+          updated_at: new Date().toISOString(),
+          isNew: false, // Ensure it's not marked as new if just updated
+        };
+        setCells(updatedCells);
       } else {
-        const now = new Date().toISOString()
+        console.log(`✨ Creating new cell for step ID: ${params.step_id} with definitive Cell ID: ${params.id}`);
+        const now = new Date().toISOString();
+        
+        // Create new cell, ensuring ID is the correct UUID and step_id is in metadata
+        const { id, step_id, metadata, ...restParamsWithoutMeta } = params;
         const newCell: DisplayCell = {
-          ...params,
-          type: params.type as CellType,
+          id: params.id, // Explicitly set the correct UUID
+          ...restParamsWithoutMeta, // Spread the rest of the params (excluding id, step_id, metadata)
+          type: params.type as CellType, // Cast type
           notebook_id: notebookId,
           created_at: now,
           updated_at: now,
-          metadata: params.result?.metadata || {},
+          metadata: { // Initialize metadata with step_id
+            ...(metadata || {}), // Safely spread params.metadata
+            step_id: params.step_id,
+          },
           isNew: true,
-        }
+        };
 
-        setCells((prevCells) => [...prevCells, newCell])
+        setCells((prevCells) => [...prevCells, newCell]);
 
+        // Animation timeout uses the correct UUID (params.id)
         setTimeout(() => {
-          setCells((prevCells) => prevCells.map((cell) => (cell.id === params.id ? { ...cell, isNew: false } : cell)))
-        }, 500)
+          setCells((prevCells) =>
+            prevCells.map((cell) =>
+              cell.id === params.id ? { ...cell, isNew: false } : cell
+            )
+          );
+        }, 500);
       }
     },
-    [cells],
-  )
+    [cells, notebookId] 
+  );
 
   const handleUpdateCell = useCallback((cellId: string, updates: Partial<CellCreationParams>) => {
+    // This function might need review depending on how updates are triggered.
+    // If updates also come via step_id, similar logic might be needed.
+    // For now, assume it's called with the correct cellId (UUID).
+    console.log(`🔄 handleUpdateCell called for Cell ID: ${cellId} with updates:`, updates);
     setCells((prevCells) =>
       prevCells.map((cell): DisplayCell => {
         if (cell.id === cellId) {
