@@ -327,11 +327,14 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
       const message = messageOrEvent as ChatMessage
       const statusContent = parseMessageContent(message.content) // Check if it's a status update
 
-      // If it's a status message, only process it for agent status, don't add to main chat list
+      // If it's a status message, process it for agent status.
+      // Only stop processing for the main chat list IF it's NOT from chat_agent.
       if (statusContent && message.role === "model") {
-        processMessagesForAgents([message])
-        // Potentially update agent status directly here if needed, but don't add to setMessages
-        return // Stop processing this message for the main chat list
+        processMessagesForAgents([message]) // Always process for agent status UI
+        if (statusContent.agent_type !== 'chat_agent') {
+            return // Stop processing for the main chat list ONLY for non-chat_agent status messages
+        }
+        // If it IS chat_agent, continue execution to add to setMessages below
       }
 
       // --- Add this check --- 
@@ -498,10 +501,18 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
     }))
   }
 
-  // Filter out raw status messages that are handled by the agent status UI
-  const filteredMessages = messages.filter(
-    (msg) => !(msg.role === "model" && parseMessageContent(msg.content)),
-  )
+  // Filter out raw status messages that are handled by the agent status UI,
+  // EXCEPT for status messages from chat_agent which should be displayed directly.
+  const filteredMessages = messages.filter((msg) => {
+    if (msg.role === "model") {
+      const statusContent = parseMessageContent(msg.content)
+      // Filter out status messages UNLESS they are from chat_agent
+      if (statusContent && statusContent.agent_type !== 'chat_agent') {
+        return false // Filter out non-chat_agent status messages
+      }
+    }
+    return true // Keep user messages and chat_agent status messages (and regular model messages)
+  })
 
   // --- Add the new helper function here ---
   const renderModelContent = (content: string): React.ReactNode => {
@@ -654,9 +665,31 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
                               : "bg-white border border-gray-200 text-gray-800"
                           }`}
                         >
-                          {message.role === "model"
-                            ? renderModelContent(message.content)
-                            : <p className="whitespace-pre-wrap text-sm">{message.content}</p>}
+                          {message.role === "model" ? (
+                            message.agent === "chat_agent" ? (
+                              // Handle chat_agent specifically: parse and display inner content
+                              (() => {
+                                try {
+                                  const parsedContent = JSON.parse(message.content)
+                                  if (parsedContent && parsedContent.type === "status_response" && parsedContent.content) {
+                                    // Render the actual clarification message
+                                    return <p className="whitespace-pre-wrap text-sm">{parsedContent.content}</p>
+                                  }
+                                } catch (e) {
+                                  // Fallback if parsing fails or structure is wrong
+                                  console.error("Failed to parse chat_agent message content:", e, message.content)
+                                }
+                                // Fallback: Render raw content if parsing failed or it's not the expected format
+                                return <p className="whitespace-pre-wrap text-sm italic text-gray-500">{message.content}</p>
+                              })()
+                            ) : (
+                              // For other agents, use the existing renderModelContent
+                              renderModelContent(message.content)
+                            )
+                          ) : (
+                            // User message
+                            <p className="whitespace-pre-wrap text-sm">{message.content}</p>
+                          )}
                         </div>
                         {message.timestamp && (
                           <span className="text-xs text-gray-500 mt-1 px-1">{formatTimestamp(message.timestamp)}</span>

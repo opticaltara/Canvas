@@ -60,6 +60,7 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
   // Load connections when the component mounts or dialog opens
   useEffect(() => {
     if (isOpen) {
+      console.log("DataConnectionsDialog: isOpen is true, calling loadConnections...")
       loadConnections()
     }
   }, [isOpen, loadConnections])

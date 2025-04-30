@@ -35,11 +35,18 @@ export const useConnectionStore = create<ConnectionState>()(
 
         // Load all connections
         loadConnections: async () => {
+          console.log("useConnectionStore: loadConnections called")
           set({ loading: true, error: null })
 
           try {
             // Assume api.connections.list() returns Connection[] as typed
             const connectionsFromApi = await api.connections.list()
+
+            // Ensure connectionsFromApi is actually an array before proceeding
+            if (!Array.isArray(connectionsFromApi)) {
+              console.error("API response for connections is not an array:", connectionsFromApi)
+              throw new Error("Invalid data received from server.") // Trigger the catch block
+            }
 
             // Ensure each connection has the is_default field (default to false)
             const connections = connectionsFromApi.map(conn => ({
