@@ -29,6 +29,9 @@ from backend.ai.chat_agent import (
 from backend.db.chat_db import ChatDatabase
 from backend.services.notebook_manager import NotebookManager, get_notebook_manager
 from backend.services.connection_manager import ConnectionManager, get_connection_manager
+from backend.services.redis_client import get_redis_client
+from backend.config import Settings, get_settings
+import aioredis
 
 # Initialize logger
 chat_logger = logging.getLogger("routes.chat")
@@ -45,11 +48,6 @@ chat_logger.addFilter(CorrelationIdFilter())
 
 # Create router
 router = APIRouter()
-
-# Simple in-memory store for active chat agent sessions
-# IMPORTANT: This is simple but won't scale across multiple workers/instances.
-# Consider Redis or another shared cache for production.
-active_chat_sessions: Dict[str, ChatAgentService] = {}
 
 # Updated Dependency: Get managers, not the service directly
 async def get_managers(
@@ -120,11 +118,12 @@ class CreateSessionResponse(BaseModel):
 @router.post("/sessions", response_model=CreateSessionResponse)
 async def create_session(
     request_data: CreateSessionRequest, # Renamed from 'request' to avoid conflict
-    managers: Tuple[NotebookManager, ConnectionManager] = Depends(get_managers),
-    chat_db: ChatDatabase = Depends(get_chat_db)
+    chat_db: ChatDatabase = Depends(get_chat_db),
+    redis: aioredis.Redis = Depends(get_redis_client), # Inject Redis client
+    settings: Settings = Depends(get_settings) # Inject Settings for TTL
 ) -> Dict:
     """
-    Create a new chat session
+    Create a new chat session record in DB and store essential info in Redis
     
     Returns:
         The session ID
@@ -135,29 +134,23 @@ async def create_session(
         # Generate a new session ID
         session_id = str(uuid4())
         notebook_id = request_data.notebook_id # Use request_data
-        notebook_manager, connection_manager = managers # Unpack managers
 
         # Create the session in the database
         await chat_db.create_session(session_id, notebook_id) # Use notebook_id
 
-        # Instantiate ChatAgentService for this session
-        chat_agent = ChatAgentService(
-            notebook_manager=notebook_manager,
-            connection_manager=connection_manager
-        )
-        await chat_agent.create_session(session_id, notebook_id) # Use notebook_id
-
-        # Store the agent instance
-        active_chat_sessions[session_id] = chat_agent
-        chat_logger.info(f"Stored new ChatAgentService instance for session {session_id}")
+        # Store essential info (notebook_id) in Redis with TTL
+        redis_key = f"chat_session:{session_id}:notebook_id"
+        await redis.set(redis_key, notebook_id, ex=settings.chat_session_ttl)
+        chat_logger.info(f"Stored session info in Redis for session {session_id} with TTL {settings.chat_session_ttl}s")
 
         process_time = time.time() - start_time
         chat_logger.info(
-            f"Created new chat session and agent instance", # Updated log message
+            f"Created new chat session record in DB and Redis", # Updated log message
             extra={
                 'correlation_id': str(uuid4()),
                 'session_id': session_id,
-                'notebook_id': notebook_id, # Use notebook_id
+                'notebook_id': notebook_id, 
+                'redis_key': redis_key,
                 'processing_time_ms': round(process_time * 1000, 2)
             }
         )
@@ -176,6 +169,7 @@ async def create_session(
             },
             exc_info=True
         )
+        # Consider closing Redis connection if managed manually
         raise HTTPException(status_code=500, detail=f"Failed to create chat session: {str(e)}")
 
 
@@ -242,46 +236,95 @@ async def get_session_messages(
 async def post_message(
     session_id: str,
     prompt: str = Form(...),
-    chat_db: ChatDatabase = Depends(get_chat_db) 
+    chat_db: ChatDatabase = Depends(get_chat_db),
+    managers: Tuple[NotebookManager, ConnectionManager] = Depends(get_managers), # Inject managers
+    redis: aioredis.Redis = Depends(get_redis_client), # Inject Redis client
+    settings: Settings = Depends(get_settings) # Inject Settings for TTL
 ) -> StreamingResponse:
     """
-    Send a message to the chat agent and stream the response
-    
-    Args:
-        session_id: The chat session ID
-        prompt: The user's message
-        
-    Returns:
-        Streaming response with newline-delimited JSON messages
+    Send a message to the chat agent and stream the response.
+    Uses Redis for session state lookup.
     """
     start_time = time.time()
     request_id = str(uuid4())
+    notebook_id_str = None
+    notebook_id = None
+    
+    # --- Retrieve session state (notebook_id) ---
+    redis_key = f"chat_session:{session_id}:notebook_id"
+    try:
+        notebook_id_str = await redis.get(redis_key)
+        
+        if notebook_id_str:
+            chat_logger.info(f"Cache hit for session {session_id} notebook_id in Redis.")
+            # Refresh TTL on cache hit
+            await redis.expire(redis_key, settings.chat_session_ttl)
+        else:
+            chat_logger.info(f"Cache miss for session {session_id} notebook_id in Redis. Checking DB.")
+            # Cache miss, try DB
+            session_data = await chat_db.get_session(session_id)
+            if not session_data:
+                chat_logger.warning(f"Session {session_id} not found in database either.")
+                raise HTTPException(status_code=404, detail=f"Chat session {session_id} not found.")
+            
+            # Extract notebook_id from DB data (adjust based on your DB model)
+            if isinstance(session_data, dict):
+                notebook_id_str = session_data.get('notebook_id')
+            else: # Assume object
+                notebook_id_str = getattr(session_data, 'notebook_id', None)
 
-    # Get the specific ChatAgentService instance for this session
-    chat_agent = active_chat_sessions.get(session_id)
-    if not chat_agent:
-        chat_logger.error(f"ChatAgentService not found for session {session_id}. Session might not exist or wasn't initialized correctly.")
-        raise HTTPException(status_code=404, detail=f"Chat session {session_id} not found or agent not initialized.")
+            if not notebook_id_str:
+                 chat_logger.error(f"Session {session_id} found in DB, but notebook_id is missing.")
+                 raise HTTPException(status_code=500, detail="Internal server error: Session data incomplete.")
+                 
+            # Store back in Redis
+            await redis.set(redis_key, notebook_id_str, ex=settings.chat_session_ttl)
+            chat_logger.info(f"Populated Redis cache for session {session_id} from DB.")
 
-    # Get message history from DB
+        # Convert notebook_id_str to UUID
+        notebook_id = UUID(notebook_id_str)
+
+    except ValueError: # Catch UUID conversion error
+         chat_logger.error(f"Invalid notebook_id format '{notebook_id_str}' found for session {session_id} (Redis/DB).")
+         raise HTTPException(status_code=500, detail="Internal server error: Invalid notebook ID in session data.")
+    except aioredis.RedisError as e:
+        chat_logger.error(f"Redis error retrieving session {session_id}: {e}", exc_info=True)
+        # Potentially fall back to DB only, or return error
+        raise HTTPException(status_code=503, detail="Could not connect to session cache.")
+    except HTTPException: # Re-raise specific HTTP exceptions
+        raise
+    except Exception as e:
+        chat_logger.error(f"Error retrieving session details for {session_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to retrieve session details.")
+    # --- End Retrieve session state ---
+
+
+    # Get message history from DB (remains the same)
     try:
         history_from_db = await chat_db.get_messages(session_id)
     except Exception as e:
         chat_logger.error(f"Error retrieving history for session {session_id}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to retrieve message history.")
 
-    # Ensure the agent has the associated notebook_id
-    notebook_id_str = chat_agent.sessions.get(session_id)
-    if not notebook_id_str:
-        chat_logger.error(f"Agent for session {session_id} exists but has no associated notebook_id.")
-        raise HTTPException(status_code=500, detail="Internal server error: Agent state inconsistency.")
+    # --- Instantiate ChatAgentService on-demand ---
+    notebook_manager, connection_manager = managers # Unpack managers
+    chat_agent = ChatAgentService(
+        notebook_manager=notebook_manager,
+        connection_manager=connection_manager
+    )
+    # Initialize the agent for this specific session context using the retrieved notebook_id_str
     try:
-        notebook_id = UUID(notebook_id_str) # Convert to UUID
-    except ValueError:
-         chat_logger.error(f"Invalid notebook_id format '{notebook_id_str}' associated with session {session_id}.")
-         raise HTTPException(status_code=500, detail="Internal server error: Invalid notebook ID.")
+        await chat_agent.create_session(session_id, notebook_id_str) 
+        chat_logger.info(f"Instantiated and initialized ChatAgentService for session {session_id} on demand using notebook_id {notebook_id_str}.")
+    except Exception as agent_init_error:
+        chat_logger.error(f"Failed to initialize ChatAgentService for session {session_id}: {agent_init_error}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to initialize chat agent.")
+    # --- End Instantiate ChatAgentService ---
 
-    # --- Fetch and Summarize Cell History (Corrected) ---
+    # Agent initialization now handles associating notebook_id internally, remove redundant checks here
+
+    # --- Fetch and Summarize Cell History ---
+    # Use the UUID notebook_id retrieved earlier
     cell_history_context = "No recent cell history found."
     try:
         notebook_manager = chat_agent.notebook_manager # Get manager from agent
@@ -415,10 +458,11 @@ async def post_message(
 @router.delete("/sessions/{session_id}", status_code=204)
 async def delete_session(
     session_id: str,
-    chat_db: ChatDatabase = Depends(get_chat_db)
+    chat_db: ChatDatabase = Depends(get_chat_db),
+    redis: aioredis.Redis = Depends(get_redis_client) # Inject Redis client
 ) -> None:
     """
-    Delete a chat session and all its messages
+    Delete a chat session from DB and Redis
     
     Args:
         session_id: The chat session ID to delete
@@ -426,23 +470,40 @@ async def delete_session(
     start_time = time.time()
     
     try:
-        # Verify the session exists
+        # 1. Delete from Redis (best effort, ignore if key doesn't exist)
+        redis_key = f"chat_session:{session_id}:notebook_id"
+        try:
+            deleted_count = await redis.delete(redis_key)
+            if deleted_count > 0:
+                 chat_logger.info(f"Deleted session info from Redis for session {session_id}")
+            else:
+                 chat_logger.info(f"Session info for {session_id} not found in Redis (already expired or deleted).")
+        except aioredis.RedisError as e:
+             chat_logger.error(f"Redis error deleting key {redis_key} for session {session_id}: {e}", exc_info=True)
+             # Decide if this should halt the process or just be logged
+
+        # 2. Verify the session exists in DB before cleaning messages
         session = await chat_db.get_session(session_id)
         if not session:
-            raise HTTPException(status_code=404, detail=f"Chat session {session_id} not found")
-        
-        # Clear all messages
+            # If not in DB, and wasn't in Redis (or Redis failed), it's effectively gone.
+            # Still return 204 as the goal is deletion.
+            chat_logger.warning(f"Chat session {session_id} not found in DB during delete operation.")
+            # Optionally raise 404 if strict existence is required:
+            # raise HTTPException(status_code=404, detail=f"Chat session {session_id} not found")
+            return # Exit early if not found in DB
+
+        # 3. Clear messages from DB
         await chat_db.clear_session_messages(session_id)
         
-        # Delete from in-memory store
-        deleted_agent = active_chat_sessions.pop(session_id, None)
+        # 4. Delete session record from DB (assuming you have a method for this)
+        # Example: await chat_db.delete_session(session_id)
+        # If `clear_session_messages` implies deletion, this might not be needed.
+        # Add DB session deletion logic here if necessary.
+        chat_logger.info(f"Cleared messages for session {session_id} from DB.")
 
-        if not deleted_agent is None:
-             chat_logger.info(f"Deleted active ChatAgentService instance for session {session_id}")
-            
         process_time = time.time() - start_time
         chat_logger.info(
-            f"Deleted chat session",
+            f"Deleted chat session state from Redis and DB", # Updated log
             extra={
                 'correlation_id': str(uuid4()),
                 'session_id': session_id,
@@ -456,7 +517,7 @@ async def delete_session(
     except Exception as e:
         process_time = time.time() - start_time
         chat_logger.error(
-            f"Error deleting chat session",
+            f"Error deleting chat session {session_id}", # Updated log
             extra={
                 'correlation_id': str(uuid4()),
                 'session_id': session_id,

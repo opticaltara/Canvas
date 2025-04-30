@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     db_password: str = "sherlog"
     db_type: str = "sqlite"  # Options: sqlite, postgresql
     db_file: str = "./data/sherlog.db"
+    # Redis settings
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_db: int = 0
+    redis_password: str | None = None # Optional password
+    chat_session_ttl: int = 3600 # Default TTL for chat sessions in Redis (1 hour)
     # AWS settings (for S3 storage)
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""

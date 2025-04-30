@@ -15,6 +15,8 @@ services:
     environment:
       - SHERLOG_OPENROUTER_API_KEY=${SHERLOG_OPENROUTER_API_KEY:-}
       - SHERLOG_AI_MODEL=${SHERLOG_AI_MODEL:-anthropic/claude-3.7-sonnet}
+      - SHERLOG_REDIS_HOST=redis
+      - SHERLOG_REDIS_PORT=6379
     ports:
       - "9091:8000"
       - "9092:8100"
@@ -23,6 +25,23 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    container_name: sherlog-canvas-redis
+    ports:
+      - "6379:6379" # Expose port if needed outside the docker network
+    volumes:
+      - redis_data:/data # Optional volume for persistence
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
   frontend:
@@ -48,4 +67,6 @@ services:
 
 volumes:
   data:
+    driver: local
+  redis_data: # Define the named volume for Redis persistence
     driver: local

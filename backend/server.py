@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-# import logfire
+import aioredis
 
 from backend.config import get_settings
 from backend.core.execution import CellExecutor, ExecutionQueue
@@ -67,6 +67,28 @@ async def lifespan(app: FastAPI):
         app_logger.error(f"Failed to initialize chat database: {str(e)}", exc_info=True)
         raise
     
+    # Initialize Redis client
+    app_logger.info("Initializing Redis connection")
+    try:
+        redis_client = await aioredis.from_url(
+            f"redis://{settings.redis_host}:{settings.redis_port}/{settings.redis_db}",
+            password=settings.redis_password,
+            encoding="utf-8",
+            decode_responses=True
+        )
+        await redis_client.ping() # Verify connection
+        app.state.redis = redis_client
+        app_logger.info("Redis connection pool created and attached to app state.")
+    except aioredis.RedisError as e:
+        app_logger.error(f"Failed to initialize Redis connection: {str(e)}", exc_info=True)
+        # Depending on requirements, you might want to raise here to prevent startup
+        app.state.redis = None # Ensure state is None if failed
+        # raise # Uncomment to prevent startup if Redis is critical
+    except Exception as e: # Catch other potential errors
+        app_logger.error(f"An unexpected error occurred during Redis initialization: {str(e)}", exc_info=True)
+        app.state.redis = None
+        # raise # Uncomment to prevent startup
+    
     # Create task for cell execution
     app_logger.info("Starting cell execution worker")
     try:
@@ -107,6 +129,15 @@ async def lifespan(app: FastAPI):
             app_logger.info("Chat database connection closed")
         except Exception as e:
             app_logger.error(f"Error closing chat database connection: {str(e)}", exc_info=True)
+    
+    # Close Redis connection
+    if hasattr(app.state, "redis") and app.state.redis:
+        app_logger.info("Closing Redis connection pool")
+        try:
+            await app.state.redis.close()
+            app_logger.info("Redis connection pool closed")
+        except Exception as e:
+            app_logger.error(f"Error closing Redis connection pool: {str(e)}", exc_info=True)
     
     app_logger.info("Application shutdown completed")
 

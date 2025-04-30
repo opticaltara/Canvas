@@ -27,3 +27,9 @@ ujson>=5.8.0
 orjson>=3.9.10
 python-multipart>=0.0.20
 aiofiles>=24.1.0
+
+# Added for Redis client
+aioredis
+
+# Added for Redis client + performance
+redis[hiredis]
