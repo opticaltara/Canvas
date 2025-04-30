@@ -8,9 +8,9 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
-import aioredis
+import redis.asyncio as redis
 
 from backend.config import get_settings
 from backend.core.execution import CellExecutor, ExecutionQueue
@@ -41,6 +41,15 @@ async def lifespan(app: FastAPI):
     """
     app_logger.info("Application startup initiated")
     
+    # Initialize shared state
+    app.state.chat_agents = {} # Cache for active ChatAgentService instances
+    app.state.redis = None # Initialize redis state
+    app.state.chat_db = None # Initialize chat_db state
+    app.state.notebook_manager = NotebookManager() # Initialize notebook manager
+    app.state.connection_manager = ConnectionManager() # Initialize connection manager
+    app.state.execution_queue = ExecutionQueue() # Initialize execution queue
+    app_logger.info("Initialized shared application state attributes.")
+    
     # Create data directory if it doesn't exist
     data_dir = Path("data")
     data_dir.mkdir(exist_ok=True)
@@ -70,7 +79,7 @@ async def lifespan(app: FastAPI):
     # Initialize Redis client
     app_logger.info("Initializing Redis connection")
     try:
-        redis_client = await aioredis.from_url(
+        redis_client = await redis.from_url(
             f"redis://{settings.redis_host}:{settings.redis_port}/{settings.redis_db}",
             password=settings.redis_password,
             encoding="utf-8",
@@ -79,7 +88,7 @@ async def lifespan(app: FastAPI):
         await redis_client.ping() # Verify connection
         app.state.redis = redis_client
         app_logger.info("Redis connection pool created and attached to app state.")
-    except aioredis.RedisError as e:
+    except redis.RedisError as e:
         app_logger.error(f"Failed to initialize Redis connection: {str(e)}", exc_info=True)
         # Depending on requirements, you might want to raise here to prevent startup
         app.state.redis = None # Ensure state is None if failed
@@ -89,11 +98,15 @@ async def lifespan(app: FastAPI):
         app.state.redis = None
         # raise # Uncomment to prevent startup
     
+    # Pass managers to the executor if needed (or configure executor differently)
+    # Example: app.state.execution_queue.set_managers(app.state.notebook_manager, app.state.connection_manager)
+    
     # Create task for cell execution
     app_logger.info("Starting cell execution worker")
     try:
+        # Pass the queue from app.state to the task
         app.state.execution_task = asyncio.create_task(
-            execution_queue.start(),
+            app.state.execution_queue.start(),
             name="cell_execution_worker"
         )
         app_logger.info("Cell execution worker started")
@@ -139,6 +152,11 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             app_logger.error(f"Error closing Redis connection pool: {str(e)}", exc_info=True)
     
+    # Clear agent cache on shutdown (optional, helps release resources)
+    if hasattr(app.state, "chat_agents"):
+         app_logger.info(f"Clearing chat agent cache ({len(app.state.chat_agents)} instances).")
+         app.state.chat_agents.clear()
+    
     app_logger.info("Application shutdown completed")
 
 # Initialize FastAPI app
@@ -150,9 +168,9 @@ app = FastAPI(
 )
 # logfire.instrument_fastapi(app)
 
-# Create notebook and connection managers
-notebook_manager = NotebookManager()
-connection_manager = ConnectionManager()
+# Remove global manager instances - now managed in app.state via lifespan
+# notebook_manager = NotebookManager()
+# connection_manager = ConnectionManager()
 
 # Add CORS middleware
 app.add_middleware(
@@ -163,9 +181,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize managers
-app.state.notebook_manager = notebook_manager
-app.state.connection_manager = connection_manager
+# Remove direct state assignment - handled by lifespan
+# app.state.notebook_manager = notebook_manager
+# app.state.connection_manager = connection_manager
 
 # Register routers
 app.include_router(notebooks_router, prefix="/api/notebooks", tags=["notebooks"])
@@ -324,9 +342,10 @@ class WebSocketManager:
 # Initialize WebSocket manager
 websocket_manager = WebSocketManager()
 
-# Initialize cell executor
-cell_executor = CellExecutor(notebook_manager)
-
+# Remove global cell executor - needs access to managers from app.state if used
+# cell_executor = CellExecutor(notebook_manager)
+# Instead, CellExecutor might need to be instantiated where needed or accept managers
+# from request state or dependency injection.
 
 @app.get("/api/health")
 def health_check():

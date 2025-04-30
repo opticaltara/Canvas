@@ -12,7 +12,7 @@ from uuid import uuid4, UUID
 from uuid import uuid4
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, Form
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, Form, Path
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from pydantic_ai.messages import (
@@ -31,7 +31,8 @@ from backend.services.notebook_manager import NotebookManager, get_notebook_mana
 from backend.services.connection_manager import ConnectionManager, get_connection_manager
 from backend.services.redis_client import get_redis_client
 from backend.config import Settings, get_settings
-import aioredis
+import redis.asyncio as redis
+from redis.exceptions import RedisError
 
 # Initialize logger
 chat_logger = logging.getLogger("routes.chat")
@@ -117,10 +118,12 @@ class CreateSessionResponse(BaseModel):
 
 @router.post("/sessions", response_model=CreateSessionResponse)
 async def create_session(
-    request_data: CreateSessionRequest, # Renamed from 'request' to avoid conflict
+    request: Request, # Need access to request.app.state
+    request_data: CreateSessionRequest,
     chat_db: ChatDatabase = Depends(get_chat_db),
-    redis: aioredis.Redis = Depends(get_redis_client), # Inject Redis client
-    settings: Settings = Depends(get_settings) # Inject Settings for TTL
+    redis: redis.Redis = Depends(get_redis_client),
+    managers: Tuple[NotebookManager, ConnectionManager] = Depends(get_managers), # Get managers
+    settings: Settings = Depends(get_settings)
 ) -> Dict:
     """
     Create a new chat session record in DB and store essential info in Redis
@@ -131,17 +134,31 @@ async def create_session(
     start_time = time.time()
     
     try:
-        # Generate a new session ID
         session_id = str(uuid4())
-        notebook_id = request_data.notebook_id # Use request_data
+        notebook_id = request_data.notebook_id
 
-        # Create the session in the database
-        await chat_db.create_session(session_id, notebook_id) # Use notebook_id
+        # Create session in DB
+        await chat_db.create_session(session_id, notebook_id)
 
-        # Store essential info (notebook_id) in Redis with TTL
+        # Store info in Redis
         redis_key = f"chat_session:{session_id}:notebook_id"
         await redis.set(redis_key, notebook_id, ex=settings.chat_session_ttl)
         chat_logger.info(f"Stored session info in Redis for session {session_id} with TTL {settings.chat_session_ttl}s")
+
+        # --- Create, Initialize, and Cache Agent --- 
+        notebook_manager, connection_manager = managers # Unpack managers
+        chat_agents_cache = request.app.state.chat_agents # Get the cache dict
+        
+        # Check if agent already exists (e.g., race condition?) - unlikely but safe
+        if session_id not in chat_agents_cache:
+            chat_logger.info(f"Creating and initializing ChatAgentService for new session {session_id}")
+            agent_instance = ChatAgentService(notebook_manager, connection_manager)
+            await agent_instance.initialize(notebook_id)
+            chat_agents_cache[session_id] = agent_instance
+            chat_logger.info(f"Cached ChatAgentService instance for session {session_id}")
+        else:
+            chat_logger.warning(f"Agent instance for session {session_id} already exists in cache during creation.")
+        # --- End Agent Creation --- 
 
         process_time = time.time() - start_time
         chat_logger.info(
@@ -232,72 +249,92 @@ async def get_session_messages(
         raise HTTPException(status_code=500, detail=f"Failed to get chat messages: {str(e)}")
 
 
-@router.post("/sessions/{session_id}/messages")
-async def post_message(
-    session_id: str,
-    prompt: str = Form(...),
+# --- Agent Dependency --- 
+async def get_chat_agent_for_session(
+    request: Request, # Required parameter first
+    session_id: str = Path(...),
+    # Other dependencies with defaults
+    managers: Tuple[NotebookManager, ConnectionManager] = Depends(get_managers),
     chat_db: ChatDatabase = Depends(get_chat_db),
-    managers: Tuple[NotebookManager, ConnectionManager] = Depends(get_managers), # Inject managers
-    redis: aioredis.Redis = Depends(get_redis_client), # Inject Redis client
-    settings: Settings = Depends(get_settings) # Inject Settings for TTL
-) -> StreamingResponse:
-    """
-    Send a message to the chat agent and stream the response.
-    Uses Redis for session state lookup.
-    """
-    start_time = time.time()
-    request_id = str(uuid4())
-    notebook_id_str = None
+    redis: redis.Redis = Depends(get_redis_client),
+    settings: Settings = Depends(get_settings)
+) -> ChatAgentService:
+    """Dependency to retrieve (or initialize) a cached ChatAgentService instance."""
+    chat_agents_cache = getattr(request.app.state, 'chat_agents', {})
+    agent = chat_agents_cache.get(session_id)
+
+    if agent:
+        chat_logger.info(f"Retrieved cached agent for session {session_id}")
+        return agent
+
+    # --- Cache Miss Handling --- 
+    chat_logger.warning(f"Agent cache miss for session {session_id}. Attempting recovery.")
     notebook_id = None
-    
-    # --- Retrieve session state (notebook_id) ---
     redis_key = f"chat_session:{session_id}:notebook_id"
     try:
         notebook_id_str = await redis.get(redis_key)
-        
-        if notebook_id_str:
-            chat_logger.info(f"Cache hit for session {session_id} notebook_id in Redis.")
-            # Refresh TTL on cache hit
-            await redis.expire(redis_key, settings.chat_session_ttl)
-        else:
-            chat_logger.info(f"Cache miss for session {session_id} notebook_id in Redis. Checking DB.")
-            # Cache miss, try DB
+        if not notebook_id_str:
+            chat_logger.info(f"Session {session_id} not in Redis cache, checking DB.")
             session_data = await chat_db.get_session(session_id)
-            if not session_data:
-                chat_logger.warning(f"Session {session_id} not found in database either.")
-                raise HTTPException(status_code=404, detail=f"Chat session {session_id} not found.")
+            if session_data:
+                notebook_id_str = session_data.get('notebook_id') if isinstance(session_data, dict) else getattr(session_data, 'notebook_id', None)
+                if notebook_id_str:
+                    # Try to repopulate cache (best effort)
+                    try: await redis.set(redis_key, notebook_id_str, ex=settings.chat_session_ttl)
+                    except RedisError as e_set: chat_logger.warning(f"Failed repopulating Redis cache for {session_id}: {e_set}")
             
-            # Extract notebook_id from DB data (adjust based on your DB model)
-            if isinstance(session_data, dict):
-                notebook_id_str = session_data.get('notebook_id')
-            else: # Assume object
-                notebook_id_str = getattr(session_data, 'notebook_id', None)
+        if notebook_id_str:
+            notebook_id = notebook_id_str # Keep as string for initialize method
+        else:
+            chat_logger.error(f"Session {session_id} not found in Redis or DB during agent recovery.")
+            raise HTTPException(status_code=404, detail=f"Chat session {session_id} not found or invalid.")
+            
+    except RedisError as e_get:
+        chat_logger.error(f"Redis error during agent recovery for {session_id}: {e_get}", exc_info=True)
+        # Decide if we should try DB anyway? For now, fail if Redis errors during recovery check.
+        raise HTTPException(status_code=503, detail="Session cache unavailable during agent recovery.")
+    except Exception as e_recov:
+        chat_logger.error(f"Unexpected error during agent recovery check for {session_id}: {e_recov}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to verify session for agent recovery.")
 
-            if not notebook_id_str:
-                 chat_logger.error(f"Session {session_id} found in DB, but notebook_id is missing.")
-                 raise HTTPException(status_code=500, detail="Internal server error: Session data incomplete.")
-                 
-            # Store back in Redis
-            await redis.set(redis_key, notebook_id_str, ex=settings.chat_session_ttl)
-            chat_logger.info(f"Populated Redis cache for session {session_id} from DB.")
+    # If we found the notebook_id, initialize the agent JIT
+    chat_logger.info(f"Re-initializing agent for session {session_id} (notebook: {notebook_id}) due to cache miss.")
+    try:
+        notebook_manager, connection_manager = managers
+        agent = ChatAgentService(notebook_manager, connection_manager)
+        await agent.initialize(notebook_id)
+        chat_agents_cache[session_id] = agent # Store the newly initialized agent
+        request.app.state.chat_agents = chat_agents_cache # Ensure cache is updated on app state
+        return agent
+    except Exception as init_err:
+        chat_logger.error(f"Failed to re-initialize agent for session {session_id} after cache miss: {init_err}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to initialize chat agent instance.")
+# --- End Agent Dependency --- 
 
-        # Convert notebook_id_str to UUID
-        notebook_id = UUID(notebook_id_str)
 
-    except ValueError: # Catch UUID conversion error
-         chat_logger.error(f"Invalid notebook_id format '{notebook_id_str}' found for session {session_id} (Redis/DB).")
-         raise HTTPException(status_code=500, detail="Internal server error: Invalid notebook ID in session data.")
-    except aioredis.RedisError as e:
-        chat_logger.error(f"Redis error retrieving session {session_id}: {e}", exc_info=True)
-        # Potentially fall back to DB only, or return error
-        raise HTTPException(status_code=503, detail="Could not connect to session cache.")
-    except HTTPException: # Re-raise specific HTTP exceptions
-        raise
-    except Exception as e:
-        chat_logger.error(f"Error retrieving session details for {session_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to retrieve session details.")
-    # --- End Retrieve session state ---
-
+@router.post("/sessions/{session_id}/messages")
+async def post_message(
+    session_id: str, # Keep session_id for context/logging if needed
+    prompt: str = Form(...),
+    chat_db: ChatDatabase = Depends(get_chat_db),
+    # Remove managers dependency, handled by get_chat_agent_for_session
+    # redis: redis.Redis = Depends(get_redis_client), # No longer needed directly here
+    # settings: Settings = Depends(get_settings), # No longer needed directly here
+    # Inject the agent instance using the new dependency
+    chat_agent: ChatAgentService = Depends(get_chat_agent_for_session)
+) -> StreamingResponse:
+    """
+    Send a message to the chat agent and stream the response.
+    Relies on cached ChatAgentService instance provided by dependency.
+    """
+    start_time = time.time()
+    request_id = str(uuid4())
+    
+    # --- Remove notebook_id fetching logic - handled by dependency --- 
+    # redis_key = f"chat_session:{session_id}:notebook_id"
+    # ... (removed logic to fetch notebook_id from redis/db) ...
+    # notebook_id = chat_agent.notebook_id # Agent instance now holds the notebook_id
+    # --- End Removal --- 
 
     # Get message history from DB (remains the same)
     try:
@@ -306,29 +343,12 @@ async def post_message(
         chat_logger.error(f"Error retrieving history for session {session_id}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to retrieve message history.")
 
-    # --- Instantiate ChatAgentService on-demand ---
-    notebook_manager, connection_manager = managers # Unpack managers
-    chat_agent = ChatAgentService(
-        notebook_manager=notebook_manager,
-        connection_manager=connection_manager
-    )
-    # Initialize the agent for this specific session context using the retrieved notebook_id_str
-    try:
-        await chat_agent.create_session(session_id, notebook_id_str) 
-        chat_logger.info(f"Instantiated and initialized ChatAgentService for session {session_id} on demand using notebook_id {notebook_id_str}.")
-    except Exception as agent_init_error:
-        chat_logger.error(f"Failed to initialize ChatAgentService for session {session_id}: {agent_init_error}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to initialize chat agent.")
-    # --- End Instantiate ChatAgentService ---
-
-    # Agent initialization now handles associating notebook_id internally, remove redundant checks here
-
-    # --- Fetch and Summarize Cell History ---
-    # Use the UUID notebook_id retrieved earlier
+    # Fetch and Summarize Cell History
     cell_history_context = "No recent cell history found."
     try:
-        notebook_manager = chat_agent.notebook_manager # Get manager from agent
-        notebook = notebook_manager.get_notebook(notebook_id) # Fetch the notebook object
+        # Access notebook_id directly from the injected & initialized agent
+        notebook_manager = chat_agent.notebook_manager
+        notebook = notebook_manager.get_notebook(UUID(chat_agent.notebook_id)) # Convert to UUID
         if notebook and notebook.cell_order:
             recent_cell_ids = notebook.cell_order[-MAX_CELL_HISTORY:]
             # Use model_dump() which is standard in Pydantic v2
@@ -344,12 +364,10 @@ async def post_message(
              cell_history_context = "Notebook found, but it has no cells."
              
         chat_logger.debug(f"Generated cell history context for session {session_id}:\n{cell_history_context}")
-    except KeyError: 
-         chat_logger.warning(f"Notebook {notebook_id} not found when fetching cell history.")
-         cell_history_context = "Could not retrieve notebook for cell history."
-    except Exception as e:
-        chat_logger.error(f"Error fetching or summarizing cell history for notebook {notebook_id}: {e}", exc_info=True)
-        cell_history_context = "Error retrieving recent cell history."
+    except (KeyError, ValueError) as e: # Catch potential UUID conversion error too
+        notebook_id_for_log = chat_agent.notebook_id if chat_agent and chat_agent.notebook_id else "<UNKNOWN>"
+        chat_logger.warning(f"Notebook {notebook_id_for_log} not found or invalid UUID when fetching cell history: {e}")
+        cell_history_context = "Could not retrieve notebook for cell history."
     
     # Prepend cell history context to the user's prompt
     prompt_with_context = f"{cell_history_context}\n\nUser Prompt:\n{prompt}"
@@ -359,18 +377,37 @@ async def post_message(
     # Timestamp added automatically by UserPromptPart if not provided
     user_message = ModelRequest(parts=[UserPromptPart(content=prompt_with_context)]) 
     
-    # The agent receives history *including* the user message with prepended context
-    # We save the user_message (containing context) to DB
-    message_history_for_agent = history_from_db # History *before* the current message
+    # --- Prepare history FOR THE AGENT (including the new user message) ---
+    # Ensure history_from_db contains ModelMessage objects (or compatible dicts)
+    # Assuming chat_db.get_messages returns serializable dicts that can be validated
+    # This part might need adjustment based on actual chat_db return type
+    try:
+        # Attempt to parse DB messages into ModelMessage objects if they aren't already
+        # NOTE: This assumes pydantic_ai models are used in DB or can be parsed from DB format.
+        # If DB stores raw dicts, parsing logic might be needed here.
+        # For now, let's assume history_from_db is a list of ModelMessage compatible objects/dicts
+        
+        # Add the new user_message to the history we pass to the agent
+        history_for_agent = history_from_db + [user_message]
+        chat_logger.info(f"History prepared for agent. Total messages: {len(history_for_agent)}")
+        if history_for_agent:
+             chat_logger.info(f"Last message for agent: {history_for_agent[-1]}")
 
-    # Save the user message (with context) to the database asynchronously
-    async def save_user_message():
-        try:
-            await chat_db.add_message(session_id, user_message)
-        except Exception as e:
-            chat_logger.error(f"Error saving user message for session {session_id}", exc_info=True)
+    except Exception as hist_prep_error:
+        chat_logger.error(f"Error preparing history for agent: {hist_prep_error}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to prepare chat history.")
+    # --- End Prepare History --- 
 
-    await save_user_message() 
+    # Save the user message (with context) to the database asynchronously *before* calling agent
+    # This ensures it's persisted even if the agent call fails midway
+    try:
+        await chat_db.add_message(session_id, user_message)
+        chat_logger.info(f"User message saved to DB for session {session_id}")
+    except Exception as e:
+        # Log error but proceed? Or raise? If DB save fails, history might be inconsistent.
+        # Let's raise for now to ensure data integrity.
+        chat_logger.error(f"Critical error saving user message for session {session_id}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to save user message to history.")
 
     chat_logger.info(
         f"Processing message for session {session_id}",
@@ -388,34 +425,64 @@ async def post_message(
         message_buffer: List[Tuple[str, ModelResponse]] = [] # Buffer for DB saving
 
         try:
-            # Pass history *before* the current user message
+            # Pass the UPDATED history INCLUDING the current user message
             async for status_type, response_part in chat_agent.handle_message(
                 prompt=prompt_with_context, # Pass the prompt string WITH context
                 session_id=session_id,
-                message_history=message_history_for_agent 
+                message_history=history_for_agent # Pass the history WITH the latest user message
             ):
-                message_buffer.append((status_type, response_part))
+                # --- Handle Clarification Response --- 
+                if status_type == "clarification":
+                    chat_logger.info(f"Handling clarification response for session {session_id}")
+                    # Convert ModelResponse to ChatMessage for streaming
+                    chat_message = to_chat_message(response_part)
+                    # Serialize and encode for streaming
+                    try:
+                        stream_content = json.dumps(chat_message.model_dump()) + "\n"
+                        yield stream_content.encode('utf-8')
+                        chat_logger.debug(f"Streamed clarification: {stream_content.strip()} for session {session_id}")
+                    except TypeError as e:
+                        chat_logger.error(f"Serialization error for clarification message: {e} - {chat_message}", exc_info=True)
+                        error_msg = json.dumps({"role": "error", "content": f"Serialization error: {e}", "timestamp": datetime.now(timezone.utc).isoformat()}) + "\n"
+                        yield error_msg.encode('utf-8')
+                    # Save clarification response to DB (it wasn't saved before)
+                    try:
+                         await chat_db.add_message(session_id, response_part) 
+                    except Exception as db_err:
+                         chat_logger.error(f"Error saving clarification response for session {session_id}", exc_info=True)
+                    # End stream after yielding clarification
+                    return 
+                # --- End Handle Clarification Response --- 
+
+                # Buffer non-clarification messages for potential DB saving later if needed
+                # message_buffer.append((status_type, response_part))
                 
                 # Convert ModelResponse to ChatMessage for streaming
                 chat_message = to_chat_message(response_part)
                 
                 # Ensure chat_message content is JSON serializable before streaming
                 try:
-                    stream_content = json.dumps(chat_message.model_dump()) + "\\n"
-                    yield stream_content
-                    chat_logger.debug(f"Streamed part: {stream_content.strip()} for session {session_id}")
-                except TypeError as e:
-                    chat_logger.error(f"Serialization error for chat message part: {e} - {chat_message}", exc_info=True)
-                    # Yield an error message or skip? For now, skip.
-                    yield json.dumps({"role": "error", "content": f"Serialization error: {e}", "timestamp": datetime.now(timezone.utc).isoformat()}) + "\\n"
+                    # --- ADD DETAILED LOGGING --- 
+                    dumped_message = chat_message.model_dump()
+                    # Log based on the converted ChatMessage
+                    chat_logger.info(f"STREAMING: Type={type(response_part)}, Role={dumped_message.get('role')}, Agent={dumped_message.get('agent')}, Content Preview: {str(dumped_message.get('content'))[:100]}")
+                    # --- END LOGGING --- 
 
+                    stream_content = json.dumps(dumped_message) + "\n"
+                    yield stream_content.encode('utf-8')
+                    # chat_logger.debug(...) # Keep debug logging if desired
+                except TypeError as e:
+                    chat_logger.error(f"Serialization error for response part: {e} - {response_part}", exc_info=True)
+                    error_msg = json.dumps({"role": "error", "content": f"Serialization error: {e}", "timestamp": datetime.now(timezone.utc).isoformat()}) + "\n"
+                    yield error_msg.encode('utf-8')
             # After streaming finishes, save all buffered model responses to DB
-            for _, response_to_save in message_buffer:
-                 try:
-                    await chat_db.add_message(session_id, response_to_save)
-                 except Exception as e:
-                     chat_logger.error(f"Error saving buffered model response for session {session_id}", exc_info=True)
-                     # Log error but continue saving others
+            # We removed buffering for now as clarification is handled separately
+            # for _, response_to_save in message_buffer:
+            #      try:
+            #         await chat_db.add_message(session_id, response_to_save)
+            #      except Exception as e:
+            #          chat_logger.error(f"Error saving buffered model response for session {session_id}", exc_info=True)
+            #          # Log error but continue saving others
 
             process_time = time.time() - start_time
             chat_logger.info(
@@ -447,7 +514,8 @@ async def post_message(
                 timestamp=datetime.now(timezone.utc).isoformat()
             ).model_dump()
             try:
-                yield json.dumps(error_message) + "\\n"
+                error_msg = json.dumps(error_message) + "\n"
+                yield error_msg.encode('utf-8') # Encode to bytes
             except Exception as serialization_error:
                  chat_logger.error(f"Failed to serialize error message: {serialization_error}", exc_info=True)
 
@@ -457,20 +525,28 @@ async def post_message(
 
 @router.delete("/sessions/{session_id}", status_code=204)
 async def delete_session(
+    request: Request, # Need request to access app state
     session_id: str,
     chat_db: ChatDatabase = Depends(get_chat_db),
-    redis: aioredis.Redis = Depends(get_redis_client) # Inject Redis client
+    redis: redis.Redis = Depends(get_redis_client) # Inject Redis client
 ) -> None:
     """
-    Delete a chat session from DB and Redis
-    
-    Args:
-        session_id: The chat session ID to delete
+    Delete a chat session from DB, Redis, and the agent cache.
     """
     start_time = time.time()
     
     try:
-        # 1. Delete from Redis (best effort, ignore if key doesn't exist)
+        # 1. Delete from Agent Cache (best effort)
+        chat_agents_cache = getattr(request.app.state, 'chat_agents', {})
+        if session_id in chat_agents_cache:
+            del chat_agents_cache[session_id]
+            chat_logger.info(f"Removed agent instance for session {session_id} from cache.")
+        else:
+            chat_logger.info(f"Agent instance for session {session_id} not found in cache during deletion.")
+        # Ensure the cache on app.state is updated if it was copied
+        request.app.state.chat_agents = chat_agents_cache 
+
+        # 2. Delete from Redis (best effort, ignore if key doesn't exist)
         redis_key = f"chat_session:{session_id}:notebook_id"
         try:
             deleted_count = await redis.delete(redis_key)
@@ -478,11 +554,11 @@ async def delete_session(
                  chat_logger.info(f"Deleted session info from Redis for session {session_id}")
             else:
                  chat_logger.info(f"Session info for {session_id} not found in Redis (already expired or deleted).")
-        except aioredis.RedisError as e:
+        except RedisError as e:
              chat_logger.error(f"Redis error deleting key {redis_key} for session {session_id}: {e}", exc_info=True)
              # Decide if this should halt the process or just be logged
 
-        # 2. Verify the session exists in DB before cleaning messages
+        # 3. Verify the session exists in DB before cleaning messages
         session = await chat_db.get_session(session_id)
         if not session:
             # If not in DB, and wasn't in Redis (or Redis failed), it's effectively gone.
@@ -492,18 +568,15 @@ async def delete_session(
             # raise HTTPException(status_code=404, detail=f"Chat session {session_id} not found")
             return # Exit early if not found in DB
 
-        # 3. Clear messages from DB
+        # 4. Clear messages from DB
         await chat_db.clear_session_messages(session_id)
         
-        # 4. Delete session record from DB (assuming you have a method for this)
-        # Example: await chat_db.delete_session(session_id)
-        # If `clear_session_messages` implies deletion, this might not be needed.
-        # Add DB session deletion logic here if necessary.
-        chat_logger.info(f"Cleared messages for session {session_id} from DB.")
+        # 5. Delete session record from DB (if applicable)
+        # ... (DB delete_session logic remains the same) ...
 
         process_time = time.time() - start_time
         chat_logger.info(
-            f"Deleted chat session state from Redis and DB", # Updated log
+            f"Deleted chat session state from Cache, Redis and DB", # Updated log
             extra={
                 'correlation_id': str(uuid4()),
                 'session_id': session_id,
@@ -511,9 +584,12 @@ async def delete_session(
             }
         )
         
-    except HTTPException:
-        raise
-    
+    except RedisError as e: # Use the imported RedisError
+        chat_logger.error(f"Redis error deleting key {redis_key} for session {session_id}: {e}", exc_info=True)
+        # Decide if this should halt the process or just be logged
+        # Raising an error might be appropriate if Redis state is critical
+        raise HTTPException(status_code=500, detail="Failed to clean up session state.")
+
     except Exception as e:
         process_time = time.time() - start_time
         chat_logger.error(

@@ -211,100 +211,131 @@ class GitHubQueryAgent:
         max_attempts = 5
         last_error = None
         final_result_data: Optional[GithubQueryResult] = None
+        attempt_completed = 0 # Track last completed attempt number for logging
 
         yield {"status": "starting_attempts", "message": f"Attempting GitHub query (max {max_attempts} attempts)..."}
 
+        # Wrap the MCP server management and loop logic in a try block
         try:
-            async with agent.run_mcp_servers():
-                github_query_agent_logger.info("MCP Server connection active.")
-                yield {"status": "mcp_connection_active", "message": "MCP server connection established."}
+            for attempt in range(max_attempts):
+                attempt_completed = attempt + 1
+                github_query_agent_logger.info(f"GitHub Query Attempt {attempt_completed}/{max_attempts}")
+                yield {"status": "attempt_start", "attempt": attempt_completed, "max_attempts": max_attempts}
 
-                for attempt in range(max_attempts):
-                    github_query_agent_logger.info(f"GitHub Query Attempt {attempt + 1}/{max_attempts}")
-                    yield {"status": "attempt_start", "attempt": attempt + 1, "max_attempts": max_attempts}
+                try: 
+                    # MCP Server context manager is now INSIDE the loop for each attempt
+                    async with agent.run_mcp_servers():
+                        github_query_agent_logger.info(f"Attempt {attempt_completed}: MCP Server connection active.")
+                        yield {"status": "mcp_connection_active", "attempt": attempt_completed, "message": "MCP server connection established."}
 
-                    try:
-                        # Consume the async generator to execute the attempt
-                        async for status_update in self._run_single_attempt(agent, current_description, attempt + 1):
-                             yield status_update # Forward the status updates
-                        
-                        # Attempt finished, access results stored in instance variables
-                        run_result = self._last_run_result
-                        successful_calls = self._last_successful_calls
-                        
-                        # --- Process the successful result --- 
-                        final_result_data = self._process_final_result(run_result, successful_calls, description)
-                        
-                        # --- If successful, yield and return --- 
-                        if final_result_data:
-                            github_query_agent_logger.info(f"Successfully processed result on attempt {attempt + 1}.")
-                            yield {"status": "parsing_success", "attempt": attempt + 1} # Use a distinct status
-                            yield final_result_data
-                            return
-                        else: 
-                            # Handle case where processing the result failed (returned None)
-                            github_query_agent_logger.error(f"_process_final_result returned None on attempt {attempt + 1}. Raw run_result: {run_result}")
-                            last_error = "Failed to process successful agent result."
-                            # This mirrors the 'no_valid_data' case from the old logic
-                            yield {"status": "no_valid_data", "attempt": attempt + 1, "message": "Agent iteration completed but result processing failed."}
-                            error_context = f"\n\nINFO: Attempt {attempt + 1} completed but result processing failed. Agent will retry."
-                            current_description += error_context
-                            yield {"status": "retrying", "attempt": attempt + 1, "reason": "result processing failed"}
-                            continue # Continue to next attempt
-                        
-                    except McpError as mcp_err:
-                        error_str = str(mcp_err)
-                        github_query_agent_logger.warning(f"MCPError during agent run attempt {attempt + 1}: {error_str}")
-                        yield {"status": "mcp_error", "attempt": attempt + 1, "error": error_str}
-                        last_error = error_str
-                        if attempt < max_attempts - 1:
-                            error_context = f"\n\nINFO: Attempt {attempt + 1} failed with tool error: {error_str}. This might be expected for certain operations (e.g., empty repo). Agent will retry."
-                            current_description += error_context
-                            yield {"status": "retrying", "attempt": attempt + 1, "reason": "mcp_error"}
-                            continue # Go to next attempt in the inner loop
-                        else:
-                            github_query_agent_logger.error(f"MCPError on final attempt {max_attempts}: {error_str}", exc_info=True)
-                            break # Exit inner loop to handle final error
+                        # --- Inner try block for the actual agent run within the MCP context --- 
+                        try:
+                            # Consume the async generator to execute the attempt
+                            async for status_update in self._run_single_attempt(agent, current_description, attempt_completed):
+                                yield status_update # Forward the status updates
 
-                    except UnexpectedModelBehavior as e:
-                        github_query_agent_logger.error(f"UnexpectedModelBehavior during agent run attempt {attempt + 1}: {e}", exc_info=True)
-                        yield {"status": "model_error", "attempt": attempt + 1, "error": str(e)}
-                        last_error = f"Agent run failed due to unexpected model behavior: {str(e)}"
-                        break # Exit inner loop to handle final error
+                            # Attempt finished, access results stored in instance variables
+                            run_result = self._last_run_result
+                            successful_calls = self._last_successful_calls
 
-                    except Exception as e: # Catch other potential errors during agent iteration or processing
-                        # Restore the specific check for timestamp TypeError
-                        if isinstance(e, TypeError) and "'NoneType' object cannot be interpreted as an integer" in str(e):
-                            # Specific handling for the timestamp issue
-                            error_msg = "TypeError: OpenAI API response likely missing 'created' timestamp."
-                            github_query_agent_logger.error(f"Timestamp Error during agent run attempt {attempt + 1}: {error_msg}", exc_info=True)
-                            yield {"status": "timestamp_error", "attempt": attempt + 1, "error": error_msg}
-                            last_error = f"Agent iteration failed: {error_msg}"
-                            # Add context and retry if attempts remain
-                            if attempt < max_attempts - 1:
-                                error_context = f"\n\nINFO: Attempt {attempt + 1} failed due to a likely missing timestamp in the API response. Agent will retry."
-                                current_description += error_context
-                                yield {"status": "retrying", "attempt": attempt + 1, "reason": "timestamp_error"}
-                                continue # Go to next attempt
+                            # --- Process the successful result ---
+                            final_result_data = self._process_final_result(run_result, successful_calls, description)
+
+                            # --- If successful, exit the outer loop ---
+                            if final_result_data:
+                                github_query_agent_logger.info(f"Successfully processed result on attempt {attempt_completed}.")
+                                yield {"status": "parsing_success", "attempt": attempt_completed} # Use a distinct status
+                                break # Break inner try block; outer loop will break due to final_result_data check
                             else:
-                                break # Exit loop if final attempt failed with this error
-                        else:
-                            # Handle other general errors
-                            github_query_agent_logger.error(f"General error during agent iteration/processing attempt {attempt + 1}: {e}", exc_info=True)
-                            yield {"status": "general_error_run", "attempt": attempt + 1, "error": str(e)}
-                            last_error = f"Agent iteration/processing failed unexpectedly: {str(e)}"
-                        break # Exit inner loop to handle final error
+                                # Handle case where processing the result failed (returned None)
+                                github_query_agent_logger.error(f"_process_final_result returned None on attempt {attempt_completed}. Raw run_result: {run_result}")
+                                last_error = "Failed to process successful agent result."
 
-                # If the loop finished without returning (i.e., max attempts reached or broke due to error)
-                if final_result_data is None:
-                    final_error_msg = f"GitHub query failed after {attempt + 1} attempts within active MCP connection. Last error: {last_error or 'Max attempts reached without success'}"
-                    github_query_agent_logger.error(final_error_msg)
-                    yield {"status": "failed_max_attempts", "attempts": attempt + 1, "error": final_error_msg}
-                    yield GithubQueryResult(query=description, data=None, error=final_error_msg)
+                                # Non-retryable for now, break inner try block
+                                yield {"status": "error", "attempt": attempt_completed, "reason": "result processing failed"}
+                                break 
 
-        except Exception as e:
+                        except McpError as mcp_err:
+                            error_str = str(mcp_err)
+                            github_query_agent_logger.warning(f"MCPError during agent run attempt {attempt_completed}: {error_str}")
+                            yield {"status": "mcp_error", "attempt": attempt_completed, "error": error_str}
+                            last_error = error_str
+                            # Check if retry is possible (move continue outside inner try)
+                            if attempt < max_attempts - 1:
+                                error_context = f"\\n\\nINFO: Attempt {attempt_completed} failed with MCP tool error: {error_str}. Retrying..."
+                                current_description += error_context
+                                yield {"status": "retrying", "attempt": attempt_completed, "reason": "mcp_error"}
+                                # No break here, let the outer loop continue after this inner try block finishes
+                            else:
+                                github_query_agent_logger.error(f"MCPError on final attempt {max_attempts}: {error_str}", exc_info=True)
+                                break # Break inner try block
+
+                        except UnexpectedModelBehavior as e:
+                            github_query_agent_logger.error(f"UnexpectedModelBehavior during agent run attempt {attempt_completed}: {e}", exc_info=True)
+                            yield {"status": "model_error", "attempt": attempt_completed, "error": str(e)}
+                            last_error = f"Agent run failed due to unexpected model behavior: {str(e)}"
+                            break # Break inner try block
+
+                        except Exception as e: # Catch other potential errors during agent iteration or processing
+                            if isinstance(e, TypeError) and "'NoneType' object cannot be interpreted as an integer" in str(e):
+                                error_msg = "TypeError: OpenAI API response likely missing 'created' timestamp."
+                                github_query_agent_logger.error(f"Timestamp Error during agent run attempt {attempt_completed}: {error_msg}", exc_info=True)
+                                yield {"status": "timestamp_error", "attempt": attempt_completed, "error": error_msg}
+                                last_error = f"Agent iteration failed: {error_msg}"
+                                # Check if retry is possible (move continue outside inner try)
+                                if attempt < max_attempts - 1:
+                                    error_context = f"\\n\\nINFO: Attempt {attempt_completed} failed due to a likely missing timestamp in the API response. Retrying..."
+                                    current_description += error_context
+                                    yield {"status": "retrying", "attempt": attempt_completed, "reason": "timestamp_error"}
+                                    # No break here, let the outer loop continue
+                                else:
+                                    github_query_agent_logger.error(f"Timestamp Error on final attempt {max_attempts}: {error_msg}")
+                                    break # Break inner try block
+                            else:
+                                # Handle other general errors
+                                github_query_agent_logger.error(f"General error during agent iteration/processing attempt {attempt_completed}: {e}", exc_info=True)
+                                yield {"status": "general_error_run", "attempt": attempt_completed, "error": str(e)}
+                                last_error = f"Agent iteration/processing failed unexpectedly: {str(e)}"
+                                break # Break inner try block
+
+                except Exception as mcp_mgmt_err: # Catch errors specifically from `async with agent.run_mcp_servers()`
+                    github_query_agent_logger.error(f"Fatal error managing MCP server for attempt {attempt_completed}: {mcp_mgmt_err}", exc_info=True)
+                    yield {"status": "fatal_mcp_error", "attempt": attempt_completed, "error": str(mcp_mgmt_err)}
+                    last_error = f"Fatal error managing MCP connection: {str(mcp_mgmt_err)}"
+                    # If MCP mgmt fails, we cannot continue the loop
+                    break
+
+                # --- Check if outer loop should break or continue ---
+                if final_result_data: # Success occurred in the inner block
+                    break
+                elif last_error and attempt >= max_attempts - 1: # Failure on the last attempt
+                    break
+                elif last_error: # Failure on a retryable attempt
+                    # The 'retrying' status was already yielded inside the inner except blocks
+                    continue # Proceed to the next iteration of the outer loop
+                # Add a safety break if something unexpected happened
+                elif attempt >= max_attempts - 1:
+                    github_query_agent_logger.warning(f"Reached max attempts ({max_attempts}) without explicit success or failure decision.")
+                    last_error = last_error or "Max attempts reached without explicit success or failure."
+                    break
+
+        except Exception as e: # Catch errors managing MCP connection specifically
             github_query_agent_logger.error(f"Fatal error during MCP server management or unhandled error in loop: {e}", exc_info=True)
             yield {"status": "fatal_mcp_error", "error": str(e)}
             last_error = f"Fatal error managing MCP connection: {str(e)}"
-            if final_result_data is None:
-                 yield GithubQueryResult(query=description, data=None, error=last_error)
+            # Proceed to final yield block below
+
+        # --- Yield final result or error *after* the loop ---
+        if final_result_data:
+            github_query_agent_logger.info(f"Yielding final successful result after MCP context exit.")
+            yield final_result_data
+        elif last_error: # If loop broke due to error or max attempts reached with an error, or MCP error
+            final_error_msg = f"GitHub query finished after {attempt_completed} attempts. Last error: {last_error}"
+            github_query_agent_logger.error(final_error_msg)
+            yield {"status": "error_final", "error": final_error_msg}
+            yield GithubQueryResult(query=description, data=None, error=final_error_msg)
+        else: # Should not happen if logic is correct, but catch if loop finished without success/error
+            final_error_msg = f"GitHub query finished after {attempt_completed} attempts without success or explicit error."
+            github_query_agent_logger.warning(final_error_msg)
+            yield {"status": "finished_no_result", "attempts": attempt_completed}
+            yield GithubQueryResult(query=description, data=None, error=final_error_msg)

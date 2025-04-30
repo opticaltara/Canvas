@@ -166,32 +166,47 @@ class ChatAgentService:
     """
     Chat agent service that handles interactive conversations
     and coordinates with the AI agent for investigations.
+    Instances are cached per session_id.
     """
     def __init__(
-        self, 
+        self,
         notebook_manager: NotebookManager,
         connection_manager: Optional[ConnectionManager] = None # Allow None initially
     ):
         self.settings = get_settings()
-        chat_agent_logger.info(f"Initializing ChatAgentService...")
+        chat_agent_logger.info(f"Instantiating ChatAgentService (initialization pending)...")
         self.notebook_manager = notebook_manager
-        self.sessions: Dict[str, str] = {}
-        
-        # Initialize cell tools
-        self.cell_tools = NotebookCellTools(notebook_manager)
+        # Store connection manager instance, get default if not provided
+        self._connection_manager = connection_manager or get_connection_manager()
 
-        chat_agent_logger.info(f"AI model: {self.settings.ai_model}")
-        chat_agent_logger.info(f"OpenRouter API key: {self.settings.openrouter_api_key}")
-        self.available_tools_info: Optional[str] = None # Initialize as None
-        self._available_data_source_types: Optional[List[str]] = None # Store the actual list of types
-        self._connection_manager = connection_manager or get_connection_manager() # Store connection manager instance
-        system_prompt = self._generate_system_prompt()
-        
-        chat_agent_logger.info(f"System prompt - preparing for chat agent.")
-        
-        # Create the chat agent
+        # Initialize state variables to None, will be set in initialize()
+        self.notebook_id: Optional[str] = None
+        self.available_tools_info: Optional[str] = None
+        self._available_data_source_types: Optional[List[str]] = None
+        self.chat_agent: Optional[Agent[None, ClarificationResult]] = None
+        self.ai_agent: Optional[AIAgent] = None
+        self.cell_tools: Optional[NotebookCellTools] = None
+
+    async def initialize(self, notebook_id: str):
+        """Asynchronously initializes the agent instance after creation."""
+        if self.notebook_id is not None:
+             chat_agent_logger.warning(f"Agent for notebook {self.notebook_id} already initialized. Ignoring re-initialization attempt.")
+             return
+
+        chat_agent_logger.info(f"Initializing ChatAgentService for notebook: {notebook_id}")
+        self.notebook_id = notebook_id
+
+        # Fetch tool/connection info
+        await self._fetch_and_set_available_tools_info()
+
+        # Setup Cell Tools
+        self.cell_tools = NotebookCellTools(notebook_manager=self.notebook_manager)
+
+        # Setup Clarification Agent (chat_agent)
+        system_prompt = self._generate_system_prompt() # Uses fetched tool info
+        chat_agent_logger.info(f"System prompt generated for chat agent (notebook: {self.notebook_id}).")
         self.chat_agent = Agent(
-            model = OpenAIModel(
+            model=OpenAIModel(
                 self.settings.ai_model,
                 provider=OpenAIProvider(
                     base_url='https://openrouter.ai/api/v1',
@@ -201,8 +216,15 @@ class ChatAgentService:
             system_prompt=system_prompt,
             result_type=ClarificationResult
         )
-        
-        chat_agent_logger.info("Chat agent service initialized (will fetch connection types async).")
+
+        # Setup Investigation Agent (ai_agent)
+        chat_agent_logger.info(f"Initializing AIAgent for notebook {self.notebook_id} with sources: {self._available_data_source_types}")
+        self.ai_agent = AIAgent(
+            notebook_id=self.notebook_id,
+            available_data_sources=self._available_data_source_types or [] # Pass the fetched list
+        )
+
+        chat_agent_logger.info(f"ChatAgentService for notebook {self.notebook_id} initialized successfully.")
 
     async def _fetch_and_set_available_tools_info(self):
         """Fetches connection types and sets the available_tools_info string."""
@@ -254,24 +276,10 @@ class ChatAgentService:
             chat_agent_logger.error(f"Unexpected error formatting system prompt: {e}")
             return self._load_system_prompt_template() # Fallback
 
-    async def create_session(self, session_id: str, notebook_id: str):
-        """Create a new chat session and initialize necessary components."""
-        chat_agent_logger.info(f"Creating new chat session: {session_id} for notebook: {notebook_id}")
-        self.sessions[session_id] = notebook_id 
-        await self._fetch_and_set_available_tools_info()
-        chat_agent_logger.info(f"Initializing AIAgent for session {session_id} with sources: {self._available_data_source_types}")
-        self.ai_agent = AIAgent(
-            notebook_id=notebook_id,
-            available_data_sources=self._available_data_source_types or [] # Pass the fetched list
-        )
-        self.cell_tools = NotebookCellTools(notebook_manager=self.notebook_manager)
-        
-        chat_agent_logger.info(f"Chat session {session_id} created successfully.")
-
     async def handle_message(
-        self, 
-        prompt: str, 
-        session_id: str,
+        self,
+        prompt: str,
+        session_id: str, # Still needed for logging/context maybe, but notebook_id is internal
         message_history: List[ModelMessage] = [],
     ) -> AsyncGenerator[Tuple[str, ModelResponse], None]:
         """
@@ -279,13 +287,18 @@ class ChatAgentService:
         
         Args:
             prompt: The user's message
-            session_id: The chat session ID
+            session_id: The chat session ID (primarily for logging)
             message_history: Previous messages in the session
             
         Yields:
             Tuples of (status_type, response) as updates occur
         """
-        chat_agent_logger.info(f"Handling message in session {session_id}")
+        # Ensure agent is initialized before handling messages
+        if not self.notebook_id or not self.chat_agent or not self.ai_agent or not self.cell_tools:
+             chat_agent_logger.error(f"Agent for session {session_id} accessed handle_message before initialization.")
+             raise RuntimeError("ChatAgentService not initialized. Call initialize() first.")
+
+        chat_agent_logger.info(f"Handling message in session {session_id} (Notebook: {self.notebook_id})")
         chat_agent_logger.info(f"Received prompt: '{prompt}'")
         chat_agent_logger.info(f"Received message_history length: {len(message_history)} for session {session_id}")
         if message_history:
@@ -293,15 +306,7 @@ class ChatAgentService:
         start_time = time.time()
         
         try:
-            # Ensure available tools info is fetched before proceeding
-            await self._fetch_and_set_available_tools_info()
 
-            notebook_id = self.sessions.get(session_id)
-            chat_agent_logger.info(f"Retrieved notebook_id: {notebook_id} for session {session_id}")
-            if not notebook_id:
-                chat_agent_logger.error(f"No notebook_id found for session {session_id}")
-                raise ValueError(f"No notebook_id found for session {session_id}")
-            
             # Check if the last message was a clarification request from this agent
             should_skip_clarification = False
             if message_history:
@@ -332,18 +337,27 @@ class ChatAgentService:
                 if message_history: # Log the last message if history is not empty
                     chat_agent_logger.info(f"Last message in history for clarification: {str(message_history[-1])}")
                     
-                clarification_result = await self.chat_agent.run(
-                    clarification_assessment_prompt, # Use the refined prompt
-                    message_history=message_history, # History already includes messages up to the last user one
-                )
+                try:
+                    # Call the correctly typed agent
+                    clarification_run_result = await self.chat_agent.run(
+                        clarification_assessment_prompt,
+                        message_history=message_history,
+                    )
+                    # Access the actual output model from the result
+                    clarification_output: ClarificationResult = clarification_run_result.output
+                except Exception as clar_err:
+                    chat_agent_logger.error(f"Error during clarification check API call: {clar_err}", exc_info=True)
+                    # Handle error appropriately, maybe yield an error status
+                    yield "error", ModelResponse(parts=[StatusResponsePart(content=f"Error checking clarification: {clar_err}", agent_type="chat_agent")], timestamp=datetime.now(timezone.utc))
+                    return
 
-                chat_agent_logger.info(f"Clarification check completed for session {session_id}. Result: {clarification_result.output.needs_clarification}")
+                chat_agent_logger.info(f"Clarification check completed. Result: {clarification_output.needs_clarification}")
                 
-                if clarification_result.output.needs_clarification and clarification_result.output.clarification_message:
-                    chat_agent_logger.info(f"Asking for clarification in session {session_id}: {clarification_result.output.clarification_message}")
+                if clarification_output.needs_clarification and clarification_output.clarification_message:
+                    chat_agent_logger.info(f"Asking for clarification: {clarification_output.clarification_message}")
                     clarification_response = ModelResponse(
                         parts=[StatusResponsePart(
-                            content=clarification_result.output.clarification_message,
+                            content=clarification_output.clarification_message,
                             agent_type="chat_agent"
                         )],
                         timestamp=datetime.now(timezone.utc)
@@ -356,7 +370,7 @@ class ChatAgentService:
             async for status_type, status in self.ai_agent.investigate(
                 prompt,
                 session_id,
-                notebook_id=notebook_id,
+                notebook_id=self.notebook_id,
                 message_history=message_history,
                 cell_tools=self.cell_tools
             ):

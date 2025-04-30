@@ -29,7 +29,6 @@ python-multipart>=0.0.20
 aiofiles>=24.1.0
 
 # Added for Redis client
-aioredis
 
 # Added for Redis client + performance
 redis[hiredis]

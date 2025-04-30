@@ -422,18 +422,30 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
 
     if (!input.trim() || isLoading || !sessionId) return
 
-    const userMessage = input.trim()
+    const userMessageContent = input.trim() // Store content
     setInput("")
     setError(null)
+    setLastFailedMessage(null) // Clear previous failure on new send
+
+    // --- Optimistic UI Update ---
+    const timestamp = new Date().toISOString()
+    const userMessage: ChatMessage = {
+      role: "user",
+      content: userMessageContent,
+      timestamp: timestamp,
+    }
+    // Add user message immediately to the state
+    setMessages((prevMessages) => [...prevMessages, userMessage])
+    // --- End Optimistic Update ---
 
     setIsLoading(true)
 
     try {
       // Send message to API and handle streaming response
-      await api.chat.sendMessage(sessionId, userMessage, handleMessageOrEvent)
+      await api.chat.sendMessage(sessionId, userMessageContent, handleMessageOrEvent)
 
       // If this is the first message, it might trigger an investigation
-      if (messages.length === 0) {
+      if (messages.length <= 1) { 
         toast({
           title: "Investigation Started",
           description: "Your query may trigger an automated investigation. Watch for new cells being created.",
@@ -443,7 +455,7 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
       console.error("Error sending message:", error)
 
       // Store the failed message for potential retry
-      setLastFailedMessage(userMessage)
+      setLastFailedMessage(userMessageContent) // Use captured content
 
       // Set a more user-friendly error message
       const errorMessage = parseErrorMessage(error)
@@ -451,9 +463,10 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
 
       // Display the error message as a system message in the chat
       const errorChatMessage: ChatMessage = {
-        role: "model",
+        role: "model", // Or maybe 'system' or 'error' role if defined
         content: `Error: ${errorMessage}. Please try again or rephrase your question.`,
         timestamp: new Date().toISOString(),
+        agent: 'system' // Assign an agent like 'system'
       }
       setMessages((prev) => [...prev, errorChatMessage])
 
@@ -517,41 +530,42 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
   // --- Add the new helper function here ---
   const renderModelContent = (content: string): React.ReactNode => {
     try {
-      const parsed = JSON.parse(content)
-      if (parsed && typeof parsed === "object" && parsed.type === "cell_response") {
-        const result = parsed.result
-        if (result && result.error) {
-          // Render error from cell_response
-          return (
-            <div className="text-red-700 bg-red-50 p-2 rounded border border-red-200">
-              <p className="font-semibold text-sm mb-1">Agent Error:</p>
-              <p className="text-xs whitespace-pre-wrap">{result.error}</p>
-            </div>
-          )
-        } else if (result && result.data) {
-          // Render data from cell_response, formatted as JSON in a pre tag
-          return (
-            <div className="text-gray-800 bg-gray-50 p-2 rounded border border-gray-200 mt-1">
-               <p className="font-semibold text-sm mb-1">Agent Result:</p>
-              <pre className="text-xs whitespace-pre-wrap overflow-x-auto">
-                {JSON.stringify(result.data, null, 2)}
-              </pre>
-            </div>
-          )
+      const parsedContent = JSON.parse(content)
+
+      // Handle specific known types first
+      if (parsedContent && parsedContent.type === "status_response") {
+        // Prefer 'content' field within the status_response structure
+        return parsedContent.content || "[Status Update]" 
+      } 
+      // Add explicit handling for other known types if needed
+      // else if (parsedContent && parsedContent.type === 'cell_response') { ... }
+      
+      // --- Generic Handling for Unknown Structured Types ---
+      // If it parsed as an object, try common fields before showing raw JSON
+      else if (typeof parsedContent === 'object' && parsedContent !== null) {
+        if (typeof parsedContent.message === 'string') {
+           console.warn("Rendering .message from unknown structure:", parsedContent);
+           return parsedContent.message; 
+        } else if (typeof parsedContent.content === 'string') {
+           // Might be less common if type wasn't status_response, but check anyway
+           console.warn("Rendering .content from unknown structure:", parsedContent);
+           return parsedContent.content; 
         } else {
-          // Fallback if cell_response structure is unexpected
-          return (
-            <p className="whitespace-pre-wrap text-sm italic text-gray-500">
-              Received structured response from agent.
-            </p>
-          )
+          // Fallback for unknown objects: pretty-print JSON
+           console.warn("Parsed unknown object structure, showing JSON:", parsedContent);
+           return <pre className="text-xs bg-gray-100 dark:bg-gray-800 p-2 rounded overflow-x-auto">{JSON.stringify(parsedContent, null, 2)}</pre>;
         }
+      } 
+      // If it parsed but wasn't an object (e.g., just a string/number inside JSON), render raw content
+      else {
+          console.warn("Parsed non-object JSON, showing raw content:", content);
+          return content; // Render original string if parsed content isn't helpful object
       }
+
     } catch (e) {
-      // Not JSON or not the expected format, treat as plain text
+      // Parsing failed, assume it's plain text
+      return content
     }
-    // Default: render plain text content
-    return <p className="whitespace-pre-wrap text-sm">{content}</p>
   }
 
   return (

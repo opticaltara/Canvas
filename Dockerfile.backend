@@ -83,4 +83,4 @@ ENV PYTHONPATH=/app \
 EXPOSE 8000
 
 # Run the application with custom logging args
-CMD ["python", "-m", "uvicorn", "backend.server:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "debug", "--no-access-log", "--workers", "4"]
+CMD ["python", "-m", "uvicorn", "backend.server:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "debug", "--no-access-log", "--workers", "6"]
