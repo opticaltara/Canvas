@@ -30,11 +30,11 @@ logger.info("Database URL: %s", DATABASE_URL, extra={'correlation_id': 'N/A'})
 if DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
     SYNC_DATABASE_URL = DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
-    logger.debug("Converted to async PostgreSQL URL", extra={'correlation_id': 'N/A'})
+    logger.info("Converted to async PostgreSQL URL", extra={'correlation_id': 'N/A'})
 elif DATABASE_URL.startswith("sqlite:///"):
     DATABASE_URL = DATABASE_URL.replace("sqlite:///", "sqlite+aiosqlite:///")
     SYNC_DATABASE_URL = DATABASE_URL.replace("sqlite+aiosqlite:///", "sqlite:///")
-    logger.debug("Converted to async SQLite URL", extra={'correlation_id': 'N/A'})
+    logger.info("Converted to async SQLite URL", extra={'correlation_id': 'N/A'})
 else:
     SYNC_DATABASE_URL = DATABASE_URL
 
@@ -60,25 +60,25 @@ async def init_db():
 async def get_db_session() -> AsyncIterator[AsyncSession]:
     """Get a database session as an async context manager"""
     session = async_session_factory()
-    logger.debug("Database session created", extra={'correlation_id': 'N/A'})
+    logger.info("Database session created", extra={'correlation_id': 'N/A'})
     try:
         yield session
         await session.commit()
-        logger.debug("Session committed successfully", extra={'correlation_id': 'N/A'})
+        logger.info("Session committed successfully", extra={'correlation_id': 'N/A'})
     except Exception as e:
         await session.rollback()
         logger.error("Session rollback due to error: %s", str(e), extra={'correlation_id': 'N/A'})
         raise
     finally:
         await session.close()
-        logger.debug("Session closed", extra={'correlation_id': 'N/A'})
+        logger.info("Session closed", extra={'correlation_id': 'N/A'})
 
 def get_db() -> Iterator[Session]:
     """Get a synchronous database session"""
     db = SessionLocal()
-    logger.debug("Synchronous database session created", extra={'correlation_id': 'N/A'})
+    logger.info("Synchronous database session created", extra={'correlation_id': 'N/A'})
     try:
         yield db
     finally:
         db.close()
-        logger.debug("Synchronous session closed", extra={'correlation_id': 'N/A'}) 
+        logger.info("Synchronous session closed", extra={'correlation_id': 'N/A'}) 

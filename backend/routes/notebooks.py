@@ -64,7 +64,7 @@ async def list_notebooks(
     """
     route_logger.info("Listing all notebooks")
     notebooks = notebook_manager.list_notebooks()
-    route_logger.debug(f"Found {len(notebooks)} notebooks")
+    route_logger.info(f"Found {len(notebooks)} notebooks")
     return [
         {
             "id": str(notebook.id),
@@ -98,7 +98,7 @@ async def create_notebook(
         description=notebook_data.description,
         metadata=notebook_data.metadata
     )
-    route_logger.debug(f"Created notebook with ID: {notebook.id}")
+    route_logger.info(f"Created notebook with ID: {notebook.id}")
     return notebook.serialize()
 
 
@@ -119,7 +119,7 @@ async def get_notebook(
     route_logger.info(f"Fetching notebook with ID: {notebook_id}")
     try:
         notebook = notebook_manager.get_notebook(notebook_id)
-        route_logger.debug(f"Successfully retrieved notebook: {notebook_id}")
+        route_logger.info(f"Successfully retrieved notebook: {notebook_id}")
         return notebook.serialize()
     except KeyError:
         route_logger.error(f"Notebook not found: {notebook_id}")
@@ -148,15 +148,15 @@ async def update_notebook(
         
         # Update fields if provided
         if notebook_data.name is not None:
-            route_logger.debug(f"Updating notebook name to: {notebook_data.name}")
+            route_logger.info(f"Updating notebook name to: {notebook_data.name}")
             notebook.metadata.title = notebook_data.name
         
         if notebook_data.description is not None:
-            route_logger.debug("Updating notebook description")
+            route_logger.info("Updating notebook description")
             notebook.metadata.description = notebook_data.description
         
         if notebook_data.metadata is not None:
-            route_logger.debug("Updating notebook metadata")
+            route_logger.info("Updating notebook metadata")
             for key, value in notebook_data.metadata.items():
                 if hasattr(notebook.metadata, key):
                     setattr(notebook.metadata, key, value)
@@ -218,9 +218,9 @@ async def create_cell(
         
         # Save the notebook
         notebook_manager.save_notebook(notebook_id)
-        route_logger.debug(f"Created cell {cell.id} in notebook {notebook_id}")
+        route_logger.info(f"Created cell {cell.id} in notebook {notebook_id}")
         
-        return cell.dict()
+        return cell.model_dump()
     except KeyError:
         route_logger.error(f"Notebook not found: {notebook_id}")
         raise HTTPException(status_code=404, detail=f"Notebook {notebook_id} not found")
@@ -243,8 +243,8 @@ async def list_cells(
     route_logger.info(f"Listing cells for notebook: {notebook_id}")
     try:
         notebook = notebook_manager.get_notebook(notebook_id)
-        cells = [notebook.cells[cell_id].dict() for cell_id in notebook.cell_order]
-        route_logger.debug(f"Found {len(cells)} cells in notebook {notebook_id}")
+        cells = [notebook.cells[cell_id].model_dump() for cell_id in notebook.cell_order]
+        route_logger.info(f"Found {len(cells)} cells in notebook {notebook_id}")
         return cells
     except KeyError:
         route_logger.error(f"Notebook not found: {notebook_id}")
@@ -271,8 +271,8 @@ async def get_cell(
     try:
         notebook = notebook_manager.get_notebook(notebook_id)
         cell = notebook.get_cell(cell_id)
-        route_logger.debug(f"Successfully retrieved cell {cell_id}")
-        return cell.dict()
+        route_logger.info(f"Successfully retrieved cell {cell_id}")
+        return cell.model_dump()
     except KeyError:
         route_logger.error(f"Notebook not found: {notebook_id}")
         raise HTTPException(status_code=404, detail=f"Notebook {notebook_id} not found")
@@ -312,17 +312,17 @@ async def update_cell(
         
         # Update content if provided
         if cell_data.content is not None:
-            route_logger.debug(f"Updating content for cell {cell_id}")
+            route_logger.info(f"Updating content for cell {cell_id}")
             notebook.update_cell_content(cell_id, cell_data.content)
         
         # Update metadata if provided
         if cell_data.metadata is not None:
-            route_logger.debug(f"Updating metadata for cell {cell_id}")
+            route_logger.info(f"Updating metadata for cell {cell_id}")
             notebook.update_cell_metadata(cell_id, cell_data.metadata)
             
         # Update settings if provided
         if cell_data.settings is not None:
-            route_logger.debug(f"Updating settings for cell {cell_id}")
+            route_logger.info(f"Updating settings for cell {cell_id}")
             cell = notebook.get_cell(cell_id)
             cell.settings = cell_data.settings
         
@@ -330,7 +330,7 @@ async def update_cell(
         notebook_manager.save_notebook(notebook_id)
         route_logger.info(f"Successfully updated cell {cell_id}")
         
-        return notebook.get_cell(cell_id).dict()
+        return notebook.get_cell(cell_id).model_dump()
     except KeyError:
         route_logger.error(f"Notebook not found: {notebook_id}")
         raise HTTPException(status_code=404, detail=f"Notebook {notebook_id} not found")
@@ -479,7 +479,7 @@ async def execute_cell(
         
         # Update cell status to queued
         cell.status = CellStatus.QUEUED
-        route_logger.debug(f"Updated cell {cell_id} status to QUEUED")
+        route_logger.info(f"Updated cell {cell_id} status to QUEUED")
         
         # Save the notebook
         notebook_manager.save_notebook(notebook_id)

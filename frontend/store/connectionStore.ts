@@ -2,10 +2,15 @@ import { create } from "zustand"
 import { devtools, persist } from "zustand/middleware"
 import type { Connection } from "./types"
 import { api } from "../api/client"
+import type { MCPToolInfo } from "./types"
 
 interface ConnectionState {
   // Connection data
   connections: Connection[]
+
+  // Tool definitions per connection type
+  toolDefinitions: Record<string, MCPToolInfo[] | undefined>
+  toolLoadingStatus: Record<string, 'idle' | 'loading' | 'success' | 'error'>
 
   // Loading states
   loading: boolean
@@ -18,6 +23,7 @@ interface ConnectionState {
   deleteConnection: (id: string) => Promise<boolean>
   setDefaultConnection: (id: string) => Promise<boolean>
   testConnection: (connectionData: Partial<Connection>) => Promise<{ valid: boolean; message: string }>
+  fetchToolsForConnection: (connectionType: string) => Promise<void>
 
   // Utility
   getConnectionsByType: (type: string) => Connection[]
@@ -32,6 +38,8 @@ export const useConnectionStore = create<ConnectionState>()(
         connections: [],
         loading: false,
         error: null,
+        toolDefinitions: {},
+        toolLoadingStatus: {},
 
         // Load all connections
         loadConnections: async () => {
@@ -57,6 +65,16 @@ export const useConnectionStore = create<ConnectionState>()(
             // The type system should handle if the response isn't Connection[]
             // Explicitly assert the type to match the state definition
             set({ connections: connections as Connection[], loading: false })
+
+            // After loading connections, fetch tools for each unique type
+            const connectionTypes = [...new Set(connections.map(conn => conn.type))];
+            connectionTypes.forEach(type => {
+              // Don't re-fetch if already loading or loaded
+              if (!get().toolLoadingStatus[type] || get().toolLoadingStatus[type] === 'idle' || get().toolLoadingStatus[type] === 'error') {
+                 get().fetchToolsForConnection(type);
+              }
+            });
+
           } catch (err) {
             console.error("Failed to load connections:", err)
             set({
@@ -140,6 +158,37 @@ export const useConnectionStore = create<ConnectionState>()(
             // Return the correct structure on error
             const message = err instanceof Error ? err.message : "Failed to test connection"
             return { valid: false, message }
+          }
+        },
+
+        // Fetch tools for a specific connection type
+        fetchToolsForConnection: async (connectionType) => {
+          console.log(`useConnectionStore: fetchToolsForConnection called for ${connectionType}`);
+          const currentStatus = get().toolLoadingStatus[connectionType];
+          // Avoid redundant fetches
+          if (currentStatus === 'loading' || currentStatus === 'success') {
+            console.log(`Skipping fetch for ${connectionType}, status: ${currentStatus}`);
+            return;
+          }
+
+          set(state => ({
+            toolLoadingStatus: { ...state.toolLoadingStatus, [connectionType]: 'loading' },
+          }));
+
+          try {
+            const tools = await api.connections.getTools(connectionType);
+            set(state => ({
+              toolDefinitions: { ...state.toolDefinitions, [connectionType]: tools },
+              toolLoadingStatus: { ...state.toolLoadingStatus, [connectionType]: 'success' },
+            }));
+            console.log(`Successfully fetched ${tools.length} tools for ${connectionType}`);
+          } catch (err) {
+            console.error(`Failed to fetch tools for ${connectionType}:`, err);
+            set(state => ({
+              toolLoadingStatus: { ...state.toolLoadingStatus, [connectionType]: 'error' },
+              // Optionally clear definitions on error, or keep stale data
+              // toolDefinitions: { ...state.toolDefinitions, [connectionType]: undefined }, 
+            }));
           }
         },
 

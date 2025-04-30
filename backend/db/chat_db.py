@@ -153,7 +153,7 @@ class ChatDatabase:
             message_json = ModelMessagesTypeAdapter.dump_json([message])
             content_preview = str(message)[:100] # Preview content
             chat_logger.info(f"Serializing message of type: {type(message).__name__} using TypeAdapter, content preview: {content_preview}...")
-            chat_logger.debug(f"Serialized JSON: {message_json}")
+            chat_logger.info(f"Serialized JSON: {message_json}")
         except Exception as e:
             chat_logger.error(f"An unexpected error occurred during message serialization using TypeAdapter: {e}", exc_info=True)
             raise

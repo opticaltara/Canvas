@@ -289,7 +289,7 @@ class ChatAgentService:
         chat_agent_logger.info(f"Received prompt: '{prompt}'")
         chat_agent_logger.info(f"Received message_history length: {len(message_history)} for session {session_id}")
         if message_history:
-            chat_agent_logger.debug(f"Last message in history: {str(message_history[-1])}") 
+            chat_agent_logger.info(f"Last message in history: {str(message_history[-1])}") 
         start_time = time.time()
         
         try:
@@ -302,29 +302,56 @@ class ChatAgentService:
                 chat_agent_logger.error(f"No notebook_id found for session {session_id}")
                 raise ValueError(f"No notebook_id found for session {session_id}")
             
-            chat_agent_logger.info(f"Checking if clarification is needed for session {session_id}...")
-            clarification_result = await self.chat_agent.run(
-                f"Assess if this user request needs clarification before proceeding: '{prompt}'. "
-                f"Consider the available tools and context ({self.available_tools_info or '(loading...)'}). "
-                f"Only ask for clarification if the request is genuinely ambiguous "
-                f"or missing critical information needed to act.",
-                message_history=message_history,
-            )
-
-            chat_agent_logger.info(f"Clarification check completed for session {session_id}. Result: {clarification_result.output.needs_clarification}")
+            # Check if the last message was a clarification request from this agent
+            should_skip_clarification = False
+            if message_history:
+                # Check the message *before* the current user prompt in the history
+                if len(message_history) > 1:
+                   last_model_message = message_history[-2] # Corrected index
+                   if (isinstance(last_model_message, ModelResponse) and 
+                       last_model_message.parts and 
+                       isinstance(last_model_message.parts[0], StatusResponsePart) and
+                       last_model_message.parts[0].agent_type == 'chat_agent'):
+                       chat_agent_logger.info(f"Last model message was a clarification request, skipping new check for session {session_id}.")
+                       should_skip_clarification = True
             
-            if clarification_result.output.needs_clarification and clarification_result.output.clarification_message:
-                chat_agent_logger.info(f"Asking for clarification in session {session_id}: {clarification_result.output.clarification_message}")
-                clarification_response = ModelResponse(
-                    parts=[StatusResponsePart(
-                        content=clarification_result.output.clarification_message,
-                        agent_type="chat_agent"
-                    )],
-                    timestamp=datetime.now(timezone.utc)
+            if not should_skip_clarification:
+                chat_agent_logger.info(f"Checking if clarification is needed for session {session_id}...")
+                # Construct the prompt for clarification assessment based on the full context
+                clarification_assessment_prompt = (
+                    f"Review the *entire conversation history* ending with the latest user message. "
+                    f"Previously, I may have asked for clarification. The user's latest message might provide some or all of that information. "
+                    f"Available data sources: {self.available_tools_info or '(loading...)'}. "
+                    f"Assess if, *after considering the user's latest response*, there is *still* critical information missing to proceed with their *original* request. "
+                    f"If the latest user message sufficiently answers the previous clarification or provides enough information to take the *next step*, then DO NOT ask for clarification again (needs_clarification: false). "
+                    f"Only ask for clarification (needs_clarification: true) if the request *remains* genuinely ambiguous or is *still* missing essential details *despite* the user's last message."
                 )
-                yield "clarification", clarification_response
-                return
+                
+                # Log the history being passed to the clarification check
+                chat_agent_logger.info(f"Message history for clarification check (session {session_id}): {len(message_history)} messages.")
+                if message_history: # Log the last message if history is not empty
+                    chat_agent_logger.info(f"Last message in history for clarification: {str(message_history[-1])}")
+                    
+                clarification_result = await self.chat_agent.run(
+                    clarification_assessment_prompt, # Use the refined prompt
+                    message_history=message_history, # History already includes messages up to the last user one
+                )
 
+                chat_agent_logger.info(f"Clarification check completed for session {session_id}. Result: {clarification_result.output.needs_clarification}")
+                
+                if clarification_result.output.needs_clarification and clarification_result.output.clarification_message:
+                    chat_agent_logger.info(f"Asking for clarification in session {session_id}: {clarification_result.output.clarification_message}")
+                    clarification_response = ModelResponse(
+                        parts=[StatusResponsePart(
+                            content=clarification_result.output.clarification_message,
+                            agent_type="chat_agent"
+                        )],
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                    yield "clarification", clarification_response
+                    return
+
+            # If clarification wasn't needed or was skipped, proceed to investigation
             chat_agent_logger.info(f"Starting investigation for prompt: '{prompt}' in session {session_id}")
             async for status_type, status in self.ai_agent.investigate(
                 prompt,
@@ -334,7 +361,7 @@ class ChatAgentService:
                 cell_tools=self.cell_tools
             ):
                 chat_agent_logger.info(f"Yielding status update for session {session_id}. Type: {status_type}")
-                chat_agent_logger.debug(f"Received status dictionary for {status_type}: {status}") # DEBUG LOG
+                chat_agent_logger.info(f"Received status dictionary for {status_type}: {status}")
                 
                 # Check if the status_type indicates an event that should create a cell response
                 is_cell_event = (
@@ -345,7 +372,7 @@ class ChatAgentService:
                 )
                 
                 if is_cell_event and 'cell_params' in status:
-                    chat_agent_logger.info(f"Creating CellResponsePart for {status_type}") # DEBUG LOG
+                    chat_agent_logger.info(f"Creating CellResponsePart for {status_type}")
                     # Format as CellResponsePart if it's a cell event and has params
                     response = ModelResponse(
                         parts=[CellResponsePart(
@@ -358,7 +385,7 @@ class ChatAgentService:
                         timestamp=datetime.now(timezone.utc)
                     )
                 else:
-                    chat_agent_logger.info(f"Creating StatusResponsePart for {status_type} (is_cell_event={is_cell_event}, has_cell_params={'cell_params' in status})") # DEBUG LOG
+                    chat_agent_logger.info(f"Creating StatusResponsePart for {status_type} (is_cell_event={is_cell_event}, has_cell_params={'cell_params' in status})")
                     # Otherwise, format as StatusResponsePart
                     update_info = status.get('update_info')
                     # Default content from status['status'] or the status_type itself

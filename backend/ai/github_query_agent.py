@@ -105,7 +105,7 @@ class GitHubQueryAgent:
             pending_tool_calls: Dict[str, Dict[str, Any]] = {}
             async for node in agent_run:
                 if isinstance(node, CallToolsNode):
-                    github_query_agent_logger.debug(f"Attempt {attempt_num}: Processing CallToolsNode, streaming events...")
+                    github_query_agent_logger.info(f"Attempt {attempt_num}: Processing CallToolsNode, streaming events...")
                     try:
                         async with node.stream(agent_run.ctx) as handle_stream:
                             async for event in handle_stream:
@@ -133,7 +133,7 @@ class GitHubQueryAgent:
 
                                         record = ToolCallRecord(tool_call_id=tool_call_id, tool_name=call_info["tool_name"], tool_args=args_data, tool_result=tool_result)
                                         successful_tool_calls_in_attempt.append(record)
-                                        github_query_agent_logger.debug(f"Attempt {attempt_num}: Stored tool record: {record}")
+                                        github_query_agent_logger.info(f"Attempt {attempt_num}: Stored tool record: {record}")
                                     else:
                                         github_query_agent_logger.warning(f"Attempt {attempt_num}: Received result for unknown/processed ID: {tool_call_id}")
                     except Exception as stream_err:

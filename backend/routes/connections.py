@@ -18,6 +18,7 @@ from backend.services.connection_manager import (
     GithubConnectionConfig
 )
 import logging
+from backend.core.types import MCPToolInfo
 
 # Initialize logger
 connection_logger = logging.getLogger("routes.connections")
@@ -788,3 +789,57 @@ async def get_connection_schema(
     except Exception as e: # Catch other potential errors
         connection_logger.error(f"Error getting schema for {connection_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to retrieve connection schema")
+
+@router.get("/{connection_type}/tools")
+async def get_tools_for_connection_type(
+    connection_type: str,
+    connection_manager: ConnectionManager = Depends(get_connection_manager)
+) -> List[MCPToolInfo]:
+    """
+    Get a list of available tools (name, description, inputSchema) for a specific connection type.
+    
+    Args:
+        connection_type: The type of connection (e.g., "github", "grafana")
+        
+    Returns:
+        List of tool definitions for the connection type
+    """
+    start_time = time.time()
+    try:
+        tools = await connection_manager.get_tools_for_connection_type(connection_type)
+        process_time = time.time() - start_time
+        connection_logger.info(
+            f"Retrieved tools for connection type: {connection_type}",
+            extra={
+                'connection_type': connection_type,
+                'tool_count': len(tools),
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
+        return tools
+    except ValueError as e:
+        process_time = time.time() - start_time
+        connection_logger.error(
+            f"Error fetching tools for connection type: {connection_type}",
+            extra={
+                'connection_type': connection_type,
+                'error': str(e),
+                'error_type': type(e).__name__,
+                'processing_time_ms': round(process_time * 1000, 2)
+            },
+            exc_info=True
+        )
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        process_time = time.time() - start_time
+        connection_logger.error(
+            f"Error fetching tools for connection type: {connection_type}",
+            extra={
+                'connection_type': connection_type,
+                'error': str(e),
+                'error_type': type(e).__name__,
+                'processing_time_ms': round(process_time * 1000, 2)
+            },
+            exc_info=True
+        )
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve tools for {connection_type}")

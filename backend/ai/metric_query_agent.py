@@ -63,7 +63,7 @@ class MetricQueryAgent:
             args = command_list[1:] + args_list
             
             metric_query_agent_logger.info(f"Creating MCPServerStdio for connection {connection.id}", extra={'correlation_id': correlation_id})
-            metric_query_agent_logger.debug(f"Command: {command}, Args: {args}, Env keys: {list(env_dict.keys())}", extra={'correlation_id': correlation_id})
+            metric_query_agent_logger.info(f"Command: {command}, Args: {args}, Env keys: {list(env_dict.keys())}", extra={'correlation_id': correlation_id})
             
             return MCPServerStdio(command=command, args=args, env=env_dict)
             

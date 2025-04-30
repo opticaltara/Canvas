@@ -236,7 +236,7 @@ class WebSocketManager:
                 # Remove the notebook entry if no connections remain
                 if not self.active_connections[notebook_id]:
                     del self.active_connections[notebook_id]
-                    self.logger.debug(
+                    self.logger.info(
                         f"Removed notebook from active connections",
                         extra={
                             'correlation_id': str(uuid4()),
@@ -260,7 +260,7 @@ class WebSocketManager:
             for websocket in self.active_connections[notebook_id]:
                 try:
                     await websocket.send_text(data)
-                    self.logger.debug(
+                    self.logger.info(
                         f"Message sent to client",
                         extra={
                             'correlation_id': str(uuid4()),
@@ -331,10 +331,9 @@ async def websocket_endpoint(websocket: WebSocket, notebook_id: UUID):
                 # Wait for messages from the client
                 try:
                     data = await websocket.receive_text()
-                    # Process client messages here if needed
                     
                     # Log received message
-                    websocket_logger.debug(
+                    websocket_logger.info(
                         f"Received WebSocket message",
                         extra={
                             'correlation_id': request_id,

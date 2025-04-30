@@ -21,6 +21,8 @@ from backend.config import get_settings
 from backend.db.database import get_db_session
 from backend.db.repositories import ConnectionRepository
 
+from backend.core.types import MCPToolInfo
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -347,7 +349,7 @@ class ConnectionManager:
         logger.info(f"Creating new {type} connection: {name}", extra={'correlation_id': correlation_id})
 
         # Validate the connection and prepare final config
-        logger.debug(f"Validating connection {name}", extra={'correlation_id': correlation_id})
+        logger.info(f"Validating connection {name}", extra={'correlation_id': correlation_id})
         
         # Pass kwargs for type-specific validation data (like PAT)
         is_valid, message, prepared_config = await self._validate_and_prepare_connection(
@@ -414,7 +416,7 @@ class ConnectionManager:
             raise ValueError(f"Connection not found: {connection_id}")
 
         # Validate the connection and prepare final config
-        logger.debug(f"Validating updated connection {name} ({connection_id})", extra={'correlation_id': correlation_id})
+        logger.info(f"Validating updated connection {name} ({connection_id})", extra={'correlation_id': correlation_id})
         
         is_valid, message, prepared_config = await self._validate_and_prepare_connection(
             connection_id=connection_id, 
@@ -530,7 +532,7 @@ class ConnectionManager:
         Returns:
             Tuple (is_valid: bool, message: str)
         """
-        logger.debug(f"Testing {connection_type} connection configuration")
+        logger.info(f"Testing {connection_type} connection configuration")
         try:
             # Delegate to the validation logic
             is_valid, message, _ = await self._validate_and_prepare_connection(
@@ -568,7 +570,7 @@ class ConnectionManager:
             prepared_config is the config to be saved to the DB.
         """
         correlation_id = kwargs.get('correlation_id', str(uuid4()))
-        logger.debug(f"Validating connection type {connection_type}", extra={'correlation_id': correlation_id})
+        logger.info(f"Validating connection type {connection_type}", extra={'correlation_id': correlation_id})
         
         try:
             if connection_type == "grafana":
@@ -736,7 +738,7 @@ class ConnectionManager:
         )
 
         try:
-            logger.debug(f"Attempting stdio_client connection with Grafana params: {server_params}", extra={'correlation_id': correlation_id})
+            logger.info(f"Attempting stdio_client connection with Grafana params: {server_params}", extra={'correlation_id': correlation_id})
             async with stdio_client(server_params) as (read, write):
                 async with ClientSession(read, write) as session:
                     logger.info("Initializing MCP session for Grafana validation...", extra={'correlation_id': correlation_id})
@@ -979,6 +981,100 @@ class ConnectionManager:
             "defaults": default_connections
         }
 
+    # --- Tool Discovery --- 
+    async def get_tools_for_connection_type(self, connection_type: str) -> List[MCPToolInfo]:
+        """
+        Retrieves the list of available tools for a given connection type by querying its MCP.
+        Returns basic tool info including the raw inputSchema.
+        """
+        correlation_id = str(uuid4())
+        logger.info(f"Fetching tools for connection type: {connection_type}", extra={'correlation_id': correlation_id})
+        
+        # --- Start Implementation (Modified for MCPToolInfo) --- 
+        connection_config = await self.get_default_connection(connection_type)
+        if not connection_config: 
+            logger.warning(f"No default connection found for {connection_type}", extra={'correlation_id': correlation_id})
+            return []
+        config_dict = connection_config.config
+        if not isinstance(config_dict, dict): raise ValueError(f"Invalid config for {connection_config.id}")
+
+        mcp_command_list = config_dict.get("mcp_command")
+        mcp_args_template = config_dict.get("mcp_args_template", []) 
+        mcp_env = config_dict.get("env", {})
+        if not mcp_command_list or not isinstance(mcp_command_list, list) or not mcp_command_list: raise ValueError(f"Missing MCP command config for {connection_type}")
+        command = mcp_command_list[0]
+        base_args = mcp_command_list[1:]
+        full_args = base_args + mcp_args_template
+
+        # Handle GitHub PAT injection (same as before)
+        if connection_type == "github":
+            github_pat = config_dict.get("github_pat")
+            if not github_pat or not isinstance(github_pat, str): raise ValueError("Missing GitHub PAT")
+            if command == "docker" and "run" in base_args:
+                pat_arg_index = -1
+                if mcp_args_template: 
+                    try: pat_arg_index = full_args.index(mcp_args_template[0])
+                    except ValueError: pass 
+                if pat_arg_index != -1: full_args.insert(pat_arg_index, f"GITHUB_PERSONAL_ACCESS_TOKEN={github_pat}"); full_args.insert(pat_arg_index, "-e")
+                else: 
+                    if mcp_args_template: full_args = base_args + ["-e", f"GITHUB_PERSONAL_ACCESS_TOKEN={github_pat}"] + mcp_args_template
+                    else: logger.warning("Cannot determine where to insert GitHub PAT env var, appending.", extra={'correlation_id': correlation_id}); full_args.extend(["-e", f"GITHUB_PERSONAL_ACCESS_TOKEN={github_pat}"])
+            else: logger.warning("GitHub not using 'docker run', PAT injection might fail.", extra={'correlation_id': correlation_id}); mcp_env["GITHUB_PERSONAL_ACCESS_TOKEN"] = github_pat
+
+        server_params = StdioServerParameters(command=command, args=full_args, env=mcp_env)
+        
+        try:
+            logger.info(f"Attempting MCP connection for {connection_type} with params: {server_params}", extra={'correlation_id': correlation_id})
+            async with stdio_client(server_params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    logger.info(f"Initializing MCP session for {connection_type} tool discovery...", extra={'correlation_id': correlation_id})
+                    try: await asyncio.wait_for(session.initialize(), timeout=30.0)
+                    except asyncio.TimeoutError: raise ValueError(f"Timeout initializing MCP session for {connection_type}")
+                    except Exception as init_err: raise ValueError(f"Error initializing MCP session for {connection_type}: {init_err}")
+
+                    logger.info(f"Listing tools via MCP session for {connection_type}...", extra={'correlation_id': correlation_id})
+                    try:
+                         response = await asyncio.wait_for(session.list_tools(), timeout=15.0) 
+                         
+                         # --- Simplified MCP Tool Parsing --- 
+                         parsed_tools: List[MCPToolInfo] = [] # Updated type
+                         mcp_tools_list = getattr(response, 'tools', [])
+                         if not isinstance(mcp_tools_list, list): 
+                             logger.warning(f"MCP list_tools response for {connection_type} lacked a list in 'tools' attribute.", extra={'correlation_id': correlation_id}); mcp_tools_list = []
+
+                         for mcp_tool in mcp_tools_list:
+                             try:
+                                 # Extract basic info + raw schema
+                                 tool_name = getattr(mcp_tool, 'name', 'Unknown Tool')
+                                 tool_description = getattr(mcp_tool, 'description', None)
+                                 input_schema = getattr(mcp_tool, 'inputSchema', {})
+                                 
+                                 # Ensure inputSchema is a dict
+                                 if not isinstance(input_schema, dict):
+                                     logger.warning(f"Tool '{tool_name}' has invalid inputSchema format (not a dict), skipping.", extra={'correlation_id': correlation_id})
+                                     continue
+                                 
+                                 # Create MCPToolInfo instance
+                                 tool_info = MCPToolInfo(
+                                     name=tool_name,
+                                     description=tool_description,
+                                     inputSchema=input_schema # Store the raw schema
+                                 )
+                                 parsed_tools.append(tool_info)
+                             except Exception as tool_parse_err:
+                                 logger.error(f"Skipping tool due to error: {tool_parse_err}", extra={'correlation_id': correlation_id}, exc_info=True)
+                                 continue # Skip this tool if basic extraction fails
+                         # --- End Simplified Parsing --- 
+                         
+                         logger.info(f"Retrieved {len(parsed_tools)} tools info for {connection_type}", extra={'correlation_id': correlation_id})
+                         return parsed_tools
+                         
+                    except asyncio.TimeoutError: raise ValueError(f"Timeout listing tools via MCP for {connection_type}")
+                    except Exception as list_err: raise ValueError(f"Error listing tools via MCP for {connection_type}: {list_err}")
+        except FileNotFoundError: raise ValueError(f"Command '{command}' not found for {connection_type}")
+        except Exception as e: raise ValueError(f"Failed to communicate with MCP for {connection_type}: {str(e)}")
+    # --- End Tool Discovery ---
+
 # --- Helper Function for GitHub Stdio Params --- 
 
 async def get_github_stdio_params() -> Optional[StdioServerParameters]:
@@ -991,21 +1087,19 @@ async def get_github_stdio_params() -> Optional[StdioServerParameters]:
     logger = logging.getLogger("connection_manager") # Use appropriate logger
     try:
         connection_manager = get_connection_manager() # Get manager instance
-        # Use the string literal for the connection type
         github_conn = await connection_manager.get_default_connection("github")
         
         if not github_conn:
             logger.error("No default GitHub connection found.")
             return None
         
-        # Ensure config is a dictionary
         config = github_conn.config
         if not isinstance(config, dict):
             logger.error(f"GitHub connection {github_conn.id} config is not a dictionary: {type(config)}")
             return None
 
         command_list = config.get("mcp_command")
-        args_template = config.get("mcp_args_template")
+        args_template = config.get("mcp_args_template", [])
         pat = config.get("github_pat")
         
         if not command_list or not isinstance(command_list, list) or not command_list:

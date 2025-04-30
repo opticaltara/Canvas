@@ -454,7 +454,7 @@ class CellExecutor:
             variables = self._get_dependency_results(notebook, cell_id)
             dependency_time = time.time() - dependency_start
             
-            self.logger.debug(
+            self.logger.info(
                 "Dependencies resolved",
                 extra={
                     'correlation_id': correlation_id,

@@ -3,6 +3,8 @@ import axios from "axios"
 import { BACKEND_URL } from "@/config/api-config"
 // Import the canonical Connection type
 import type { Connection } from "../store/types"
+// Import MCPToolInfo type
+import type { MCPToolInfo } from "../store/types";
 
 export interface ConnectionType {
   id: string
@@ -119,6 +121,23 @@ export const connectionApi = {
     return true // Assume success if no error
   },
 
+  async getToolsForConnection(connectionType: string): Promise<MCPToolInfo[]> {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/connections/${connectionType}/tools`);
+      // TODO: Add validation logic here if necessary (e.g., using Zod)
+      return response.data as MCPToolInfo[];
+    } catch (error) {
+      console.error(`Failed to fetch tools for connection type ${connectionType}:`, error);
+      // Re-throw or return empty array based on desired error handling
+      if (axios.isAxiosError(error) && error.response?.status === 404) {
+        // Treat 404 (Not Found) as no tools defined, not necessarily an error
+        return [];
+      }
+      // For other errors, re-throw to be caught by the store action
+      throw error;
+    }
+  },
+
   async testConnection(connectionData: Partial<Connection>): Promise<{ valid: boolean; message: string }> {
     // For GitHub connections
     if (connectionData.type === "github") {
@@ -164,6 +183,7 @@ export const connections = {
   delete: connectionApi.deleteConnection,
   setDefault: connectionApi.setDefaultConnection,
   test: connectionApi.testConnection,
+  getTools: connectionApi.getToolsForConnection,
 }
 
 // Also export the API client for direct use

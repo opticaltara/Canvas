@@ -324,7 +324,7 @@ class NotebookRepository:
                 return notebook # Return current notebook if no valid updates
 
             valid_attrs['updated_at'] = datetime.now(timezone.utc)
-            logger.debug("Valid update attributes for notebook %s: %s", notebook_id, valid_attrs, extra={'correlation_id': 'N/A'})
+            logger.info("Valid update attributes for notebook %s: %s", notebook_id, valid_attrs, extra={'correlation_id': 'N/A'})
 
             # Use SQLAlchemy update statement
             with self._transaction():
@@ -355,7 +355,7 @@ class NotebookRepository:
                 # Log cell/dependency deletion within their respective methods if needed
                 # For simplicity here, we just log the count
                 cell_ids_to_delete = [cell.id for cell in notebook.cells]
-                logger.debug("Found %d cells to delete for notebook %s: %s", len(cell_ids_to_delete), notebook_id, cell_ids_to_delete, extra={'correlation_id': 'N/A'})
+                logger.info("Found %d cells to delete for notebook %s: %s", len(cell_ids_to_delete), notebook_id, cell_ids_to_delete, extra={'correlation_id': 'N/A'})
 
                 if cell_ids_to_delete:
                     # Delete dependencies first
@@ -455,7 +455,7 @@ class NotebookRepository:
                  return cell # Return current cell if no valid updates
 
             valid_attrs['updated_at'] = datetime.now(timezone.utc)
-            logger.debug("Valid update attributes for cell %s: %s", cell_id, valid_attrs, extra={'correlation_id': 'N/A'})
+            logger.info("Valid update attributes for cell %s: %s", cell_id, valid_attrs, extra={'correlation_id': 'N/A'})
 
             with self._transaction():
                 # Use SQLAlchemy update statement
@@ -546,12 +546,12 @@ class NotebookRepository:
                     dependency_id=dependency_id
                 )
                 self.db.add(cell_dependency)
-                logger.debug("Added CellDependency record: Dependent='%s', Dependency='%s'", dependent_id, dependency_id, extra={'correlation_id': 'N/A'})
+                logger.info("Added CellDependency record: Dependent='%s', Dependency='%s'", dependent_id, dependency_id, extra={'correlation_id': 'N/A'})
 
                 # Update dependent cell status to stale using update statement
                 stmt = update(Cell).where(Cell.id == dependent_id).values(status=CellStatus.STALE.value)
                 self.db.execute(stmt)
-                logger.debug("Marked dependent cell %s as stale", dependent_id, extra={'correlation_id': 'N/A'})
+                logger.info("Marked dependent cell %s as stale", dependent_id, extra={'correlation_id': 'N/A'})
 
                 # Update notebook timestamp
                 self._update_notebook_timestamp(notebook_id)

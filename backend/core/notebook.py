@@ -638,7 +638,7 @@ class Notebook(BaseModel):
             }
             
             process_time = time.time() - start_time
-            notebook_logger.debug(
+            notebook_logger.info(
                 "Notebook serialized",
                 extra={
                     'notebook_id': str(self.id),

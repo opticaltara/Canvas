@@ -700,7 +700,8 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
                 ))}
                 {/* Render active agent statuses */}
                 {Object.values(agentStatuses)
-                  .filter((status) => status.isActive || status.messages.length > 0) // Show if active or has messages (even if finished)
+                  // Filter out chat_agent statuses from this specific UI block
+                  .filter((status) => (status.isActive || status.messages.length > 0) && status.agentType !== 'chat_agent') 
                   .map((status) => (
                     <div key={status.agentType} className="flex justify-start message-enter">
                       <div className="flex items-start space-x-2 max-w-[85%]">

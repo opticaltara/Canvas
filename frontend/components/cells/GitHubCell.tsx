@@ -13,6 +13,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 
+// Import connection store
+import { useConnectionStore } from "@/app/store/connectionStore"
+
 interface GitHubCellProps {
   cell: {
     id: string
@@ -41,6 +44,10 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
   const [activeToolIndex, setActiveToolIndex] = useState(0)
   const [isResultExpanded, setIsResultExpanded] = useState(true)
   const [copiedStates, setCopiedStates] = useState<Record<string, boolean>>({})
+
+  // Access connection store for tool definitions
+  const toolDefinitions = useConnectionStore((state) => state.toolDefinitions.github);
+  const toolLoadingStatus = useConnectionStore((state) => state.toolLoadingStatus.github);
 
   // Initialize the tool form based on cell metadata when the cell data changes
   useEffect(() => {
@@ -126,264 +133,140 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
     onExecute(cell.id, params)
   }
 
-  // Render the tool form inputs based on the tool name
+  // --- Modified: Render tool form inputs dynamically based on JSON Schema --- 
   const renderToolFormInputs = (toolForm: ToolForm, toolIndex: number) => {
     const { toolName, toolArgs } = toolForm
 
-    switch (toolName) {
-      case "get_repository":
-        return (
-          <>
-            <div className="grid grid-cols-2 gap-3 mb-3">
-              <div>
-                <Label htmlFor={`owner-${toolIndex}`} className="text-xs text-gray-700">
-                  Owner
-                </Label>
-                <Input
-                  id={`owner-${toolIndex}`}
-                  value={toolArgs.owner || ""}
-                  onChange={(e) => handleToolArgChange(toolIndex, "owner", e.target.value)}
-                  placeholder="e.g., octocat"
-                  className="mt-1 h-8 text-xs"
-                />
-              </div>
-              <div>
-                <Label htmlFor={`repo-${toolIndex}`} className="text-xs text-gray-700">
-                  Repository
-                </Label>
-                <Input
-                  id={`repo-${toolIndex}`}
-                  value={toolArgs.repo || ""}
-                  onChange={(e) => handleToolArgChange(toolIndex, "repo", e.target.value)}
-                  placeholder="e.g., hello-world"
-                  className="mt-1 h-8 text-xs"
-                />
-              </div>
-            </div>
-          </>
-        )
+    // Find the tool definition from the store
+    const toolInfo = toolDefinitions?.find(def => def.name === toolName);
 
-      case "list_repositories":
-        return (
-          <>
-            <div className="grid grid-cols-2 gap-3 mb-3">
-              <div>
-                <Label htmlFor={`visibility-${toolIndex}`} className="text-xs text-gray-700">
-                  Visibility
-                </Label>
-                <Select
-                  value={toolArgs.visibility || "all"}
-                  onValueChange={(value) => handleToolArgChange(toolIndex, "visibility", value)}
-                >
-                  <SelectTrigger id={`visibility-${toolIndex}`} className="mt-1 h-8 text-xs">
-                    <SelectValue placeholder="Select visibility" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">All</SelectItem>
-                    <SelectItem value="public">Public</SelectItem>
-                    <SelectItem value="private">Private</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div>
-                <Label htmlFor={`sort-${toolIndex}`} className="text-xs text-gray-700">
-                  Sort By
-                </Label>
-                <Select
-                  value={toolArgs.sort || "updated"}
-                  onValueChange={(value) => handleToolArgChange(toolIndex, "sort", value)}
-                >
-                  <SelectTrigger id={`sort-${toolIndex}`} className="mt-1 h-8 text-xs">
-                    <SelectValue placeholder="Select sort order" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="created">Created</SelectItem>
-                    <SelectItem value="updated">Updated</SelectItem>
-                    <SelectItem value="pushed">Pushed</SelectItem>
-                    <SelectItem value="full_name">Name</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-          </>
-        )
-
-      case "search_repositories":
-        return (
-          <>
-            <div className="mb-3">
-              <Label htmlFor={`query-${toolIndex}`} className="text-xs text-gray-700">
-                Search Query
-              </Label>
-              <Textarea
-                id={`query-${toolIndex}`}
-                value={toolArgs.query || ""}
-                onChange={(e) => handleToolArgChange(toolIndex, "query", e.target.value)}
-                placeholder="e.g., topic:react stars:>1000"
-                className="mt-1 h-16 text-xs"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-3 mb-3">
-              <div>
-                <Label htmlFor={`sort-${toolIndex}`} className="text-xs text-gray-700">
-                  Sort By
-                </Label>
-                <Select
-                  value={toolArgs.sort || "updated"}
-                  onValueChange={(value) => handleToolArgChange(toolIndex, "sort", value)}
-                >
-                  <SelectTrigger id={`sort-${toolIndex}`} className="mt-1 h-8 text-xs">
-                    <SelectValue placeholder="Select sort order" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="stars">Stars</SelectItem>
-                    <SelectItem value="forks">Forks</SelectItem>
-                    <SelectItem value="updated">Updated</SelectItem>
-                    <SelectItem value="help-wanted-issues">Help Wanted Issues</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div>
-                <Label htmlFor={`per-page-${toolIndex}`} className="text-xs text-gray-700">
-                  Results Per Page
-                </Label>
-                <Input
-                  id={`per-page-${toolIndex}`}
-                  type="number"
-                  value={toolArgs.per_page || 10}
-                  onChange={(e) =>
-                    handleToolArgChange(toolIndex, "per_page", Number.parseInt(e.target.value) || 10)
-                  }
-                  min={1}
-                  max={100}
-                  className="mt-1 h-8 text-xs"
-                />
-              </div>
-            </div>
-          </>
-        )
-
-      case "list_commits":
-        return (
-          <>
-            <div className="grid grid-cols-2 gap-3 mb-3">
-              <div>
-                <Label htmlFor={`owner-${toolIndex}`} className="text-xs text-gray-700">
-                  Owner
-                </Label>
-                <Input
-                  id={`owner-${toolIndex}`}
-                  value={toolArgs.owner || ""}
-                  onChange={(e) => handleToolArgChange(toolIndex, "owner", e.target.value)}
-                  placeholder="e.g., octocat"
-                  className="mt-1 h-8 text-xs"
-                />
-              </div>
-              <div>
-                <Label htmlFor={`repo-${toolIndex}`} className="text-xs text-gray-700">
-                  Repository
-                </Label>
-                <Input
-                  id={`repo-${toolIndex}`}
-                  value={toolArgs.repo || ""}
-                  onChange={(e) => handleToolArgChange(toolIndex, "repo", e.target.value)}
-                  placeholder="e.g., hello-world"
-                  className="mt-1 h-8 text-xs"
-                />
-              </div>
-            </div>
-            <div className="mb-3">
-              <Label htmlFor={`path-${toolIndex}`} className="text-xs text-gray-700">
-                Path (Optional)
-              </Label>
-              <Input
-                id={`path-${toolIndex}`}
-                value={toolArgs.path || ""}
-                onChange={(e) => handleToolArgChange(toolIndex, "path", e.target.value)}
-                placeholder="e.g., src/main.js"
-                className="mt-1 h-8 text-xs"
-              />
-            </div>
-          </>
-        )
-        
-      case "get_commit":
-        return (
-          <>
-            <div className="grid grid-cols-2 gap-3 mb-3">
-              <div>
-                <Label htmlFor={`owner-${toolIndex}`} className="text-xs text-gray-700">
-                  Owner
-                </Label>
-                <Input
-                  id={`owner-${toolIndex}`}
-                  value={toolArgs.owner || ""}
-                  onChange={(e) => handleToolArgChange(toolIndex, "owner", e.target.value)}
-                  placeholder="e.g., octocat"
-                  className="mt-1 h-8 text-xs"
-                />
-              </div>
-              <div>
-                <Label htmlFor={`repo-${toolIndex}`} className="text-xs text-gray-700">
-                  Repository
-                </Label>
-                <Input
-                  id={`repo-${toolIndex}`}
-                  value={toolArgs.repo || ""}
-                  onChange={(e) => handleToolArgChange(toolIndex, "repo", e.target.value)}
-                  placeholder="e.g., hello-world"
-                  className="mt-1 h-8 text-xs"
-                />
-              </div>
-            </div>
-            <div className="mb-3">
-              <Label htmlFor={`ref-${toolIndex}`} className="text-xs text-gray-700">
-                Commit Ref (SHA, Branch, Tag)
-              </Label>
-              <Input
-                id={`ref-${toolIndex}`}
-                value={toolArgs.ref || ""}
-                onChange={(e) => handleToolArgChange(toolIndex, "ref", e.target.value)}
-                placeholder="e.g., main, v1.0.0, c1dd4f2..."
-                className="mt-1 h-8 text-xs"
-              />
-            </div>
-          </>
-        )
-
-      case "get_me":
-        return (
-          <div className="mb-3 text-xs text-gray-600">
-             This tool requires no arguments.
-          </div>
-        )
-
-      default:
-        // Generic form for any other tool
-        return (
-          <div className="mb-3">
-            <Label htmlFor={`args-${toolIndex}`} className="text-xs text-gray-700">
-              Arguments (JSON)
-            </Label>
-            <Textarea
-              id={`args-${toolIndex}`}
-              value={JSON.stringify(toolArgs, null, 2)}
-              onChange={(e) => {
-                try {
-                  const parsedArgs = JSON.parse(e.target.value)
-                  handleToolArgChange(toolIndex, "__raw_json__", parsedArgs) // Use a special key or handle directly
-                } catch (err) {
-                  // Invalid JSON, maybe provide feedback or just ignore
-                  console.warn("Invalid JSON input for tool args")
-                }
-              }}
-              className="mt-1 h-24 font-mono text-xs"
-            />
-             <p className="text-xs text-gray-500 mt-1">Edit the arguments directly in JSON format.</p>
-          </div>
-        )
+    // Handle loading state
+    if (toolLoadingStatus === 'loading') {
+      return <div className="text-xs text-gray-500">Loading tool parameters...</div>;
     }
+    // Handle error state or missing definition
+    if (toolLoadingStatus === 'error' || !toolInfo) {
+      return <div className="text-xs text-red-500">Error loading parameters for tool: {toolName}</div>;
+    }
+
+    const schema = toolInfo.inputSchema;
+    const properties = schema?.properties as Record<string, any> | undefined;
+    const requiredFields = new Set(schema?.required || []);
+
+    if (!properties || Object.keys(properties).length === 0) {
+      return <div className="text-xs text-gray-600 mb-3">This tool requires no arguments.</div>;
+    }
+    
+    // Helper function to render individual input fields
+    const renderField = (paramName: string, paramSchema: any) => {
+        const fieldId = `${paramName}-${toolIndex}`;
+        const label = paramSchema.title || paramName; // Use title for label
+        const isRequired = requiredFields.has(paramName);
+        const description = paramSchema.description;
+        const placeholder = paramSchema.examples?.[0] || paramSchema.description || `Enter ${label}`;
+        const currentValue = toolArgs[paramName] ?? paramSchema.default ?? ''; // Use current value or default
+
+        let inputElement: React.ReactNode = null;
+
+        // Determine input type based on schema
+        const schemaType = paramSchema.type;
+        const schemaFormat = paramSchema.format;
+        const enumValues = paramSchema.enum as string[] | undefined;
+
+        if (enumValues && Array.isArray(enumValues)) {
+             // Render Select for enum
+             inputElement = (
+                <Select
+                  value={currentValue}
+                  onValueChange={(value) => handleToolArgChange(toolIndex, paramName, value)}
+                  required={isRequired}
+                >
+                  <SelectTrigger id={fieldId} className="mt-1 h-8 text-xs">
+                    <SelectValue placeholder={placeholder} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {enumValues.map((option) => (
+                      <SelectItem key={option} value={option}>{option}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+             );
+        } else if (schemaType === 'string' && (schemaFormat === 'textarea' || (description && description.length > 50))) { // Heuristic for textarea
+             // Render Textarea for long descriptions or specific format
+             inputElement = (
+                 <Textarea
+                    id={fieldId}
+                    value={currentValue}
+                    onChange={(e) => handleToolArgChange(toolIndex, paramName, e.target.value)}
+                    placeholder={placeholder}
+                    required={isRequired}
+                    className="mt-1 h-16 text-xs"
+                 />
+             );
+        } else if (schemaType === 'number' || schemaType === 'integer') {
+            // Render Input type number
+            inputElement = (
+                <Input
+                    id={fieldId}
+                    type="number"
+                    value={currentValue}
+                    onChange={(e) => handleToolArgChange(toolIndex, paramName, e.target.value === '' ? '' : Number(e.target.value))}
+                    placeholder={placeholder}
+                    required={isRequired}
+                    min={paramSchema.minimum}
+                    max={paramSchema.maximum}
+                    step={paramSchema.multipleOf || 'any'} // Assuming step corresponds to multipleOf
+                    className="mt-1 h-8 text-xs"
+                 />
+            );
+        } else if (schemaType === 'boolean') {
+            // Render Checkbox for boolean (example - adjust UI as needed)
+             inputElement = (
+                 <div className="flex items-center space-x-2 mt-1 h-8"> 
+                   <input
+                     type="checkbox"
+                     id={fieldId}
+                     checked={!!currentValue}
+                     onChange={(e) => handleToolArgChange(toolIndex, paramName, e.target.checked)}
+                     className="h-4 w-4 text-green-600 border-gray-300 rounded focus:ring-green-500"
+                    />
+                    {/* Optional: label next to checkbox if needed */}
+                 </div>
+             );
+        } else { // Default to string input
+            inputElement = (
+                <Input
+                  id={fieldId}
+                  type="text"
+                  value={currentValue}
+                  onChange={(e) => handleToolArgChange(toolIndex, paramName, e.target.value)}
+                  placeholder={placeholder}
+                  required={isRequired}
+                  className="mt-1 h-8 text-xs"
+                />
+            );
+        }
+
+        return (
+          <div key={fieldId} className="mb-3">
+            <Label htmlFor={fieldId} className="text-xs text-gray-700">
+              {label} {isRequired && <span className="text-red-500">*</span>}
+            </Label>
+            {inputElement}
+            {description && <p className="text-xs text-gray-500 mt-1">{description}</p>}
+          </div>
+        );
+    };
+
+    return (
+      <div className="space-y-2"> 
+        {Object.entries(properties).map(([paramName, paramSchema]) => 
+          renderField(paramName, paramSchema)
+        )}
+      </div>
+    );
   }
+  // --- End Modified renderToolFormInputs --- 
 
   // Render the result data in a formatted way
   const renderResultData = () => {

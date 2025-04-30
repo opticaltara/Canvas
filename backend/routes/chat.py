@@ -14,22 +14,16 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from pydantic_ai.mcp import MCPServerHTTP
 from pydantic_ai.messages import (
-    ModelMessage,
     ModelRequest,
     ModelResponse,
-    TextPart,
     UserPromptPart
 )
 
 from backend.ai.chat_agent import (
     ChatAgentService,
-    ChatRequest,
     ChatMessage,
     to_chat_message,
-    CellResponsePart,
-    StatusResponsePart
 )
 from backend.db.chat_db import ChatDatabase
 from backend.services.notebook_manager import NotebookManager, get_notebook_manager
@@ -51,16 +45,17 @@ chat_logger.addFilter(CorrelationIdFilter())
 # Create router
 router = APIRouter()
 
+# Simple in-memory store for active chat agent sessions
+# IMPORTANT: This is simple but won't scale across multiple workers/instances.
+# Consider Redis or another shared cache for production.
+active_chat_sessions: Dict[str, ChatAgentService] = {}
 
-# Dependency to get chat agent service
-async def get_chat_agent_service(
+# Updated Dependency: Get managers, not the service directly
+async def get_managers(
     notebook_manager: NotebookManager = Depends(get_notebook_manager),
     connection_manager: ConnectionManager = Depends(get_connection_manager)
-) -> ChatAgentService:
-    """Get the chat agent service singleton"""
-    chat_logger.info(f"Instantiating ChatAgentService with NotebookManager and ConnectionManager.")
-    return ChatAgentService(notebook_manager=notebook_manager, connection_manager=connection_manager)
-
+) -> Tuple[NotebookManager, ConnectionManager]:
+    return notebook_manager, connection_manager
 
 # Dependency to get chat database
 async def get_chat_db(request: Request) -> ChatDatabase:
@@ -80,8 +75,8 @@ class CreateSessionResponse(BaseModel):
 
 @router.post("/sessions", response_model=CreateSessionResponse)
 async def create_session(
-    request: CreateSessionRequest,
-    chat_agent: ChatAgentService = Depends(get_chat_agent_service),
+    request_data: CreateSessionRequest, # Renamed from 'request' to avoid conflict
+    managers: Tuple[NotebookManager, ConnectionManager] = Depends(get_managers),
     chat_db: ChatDatabase = Depends(get_chat_db)
 ) -> Dict:
     """
@@ -95,20 +90,30 @@ async def create_session(
     try:
         # Generate a new session ID
         session_id = str(uuid4())
-        
+        notebook_id = request_data.notebook_id # Use request_data
+        notebook_manager, connection_manager = managers # Unpack managers
+
         # Create the session in the database
-        await chat_db.create_session(session_id, request.notebook_id)
-        
-        # Initialize the session with the agent
-        await chat_agent.create_session(session_id, request.notebook_id)
-        
+        await chat_db.create_session(session_id, notebook_id) # Use notebook_id
+
+        # Instantiate ChatAgentService for this session
+        chat_agent = ChatAgentService(
+            notebook_manager=notebook_manager,
+            connection_manager=connection_manager
+        )
+        await chat_agent.create_session(session_id, notebook_id) # Use notebook_id
+
+        # Store the agent instance
+        active_chat_sessions[session_id] = chat_agent
+        chat_logger.info(f"Stored new ChatAgentService instance for session {session_id}")
+
         process_time = time.time() - start_time
         chat_logger.info(
-            f"Created new chat session",
+            f"Created new chat session and agent instance", # Updated log message
             extra={
                 'correlation_id': str(uuid4()),
                 'session_id': session_id,
-                'notebook_id': request.notebook_id,
+                'notebook_id': notebook_id, # Use notebook_id
                 'processing_time_ms': round(process_time * 1000, 2)
             }
         )
@@ -193,8 +198,8 @@ async def get_session_messages(
 async def post_message(
     session_id: str,
     prompt: str = Form(...),
-    chat_agent: ChatAgentService = Depends(get_chat_agent_service),
-    chat_db: ChatDatabase = Depends(get_chat_db)
+    chat_db: ChatDatabase = Depends(get_chat_db) # Keep chat_db dependency
+    # Remove direct dependency on get_chat_agent_service
 ) -> StreamingResponse:
     """
     Send a message to the chat agent and stream the response
@@ -206,93 +211,106 @@ async def post_message(
     Returns:
         Streaming response with newline-delimited JSON messages
     """
-    correlation_id = str(uuid4())
     start_time = time.time()
+    request_id = str(uuid4())
+
+    # Get the specific ChatAgentService instance for this session
+    chat_agent = active_chat_sessions.get(session_id)
+    if not chat_agent:
+        chat_logger.error(f"ChatAgentService not found for session {session_id}. Session might not exist or wasn't initialized correctly.")
+        raise HTTPException(status_code=404, detail=f"Chat session {session_id} not found or agent not initialized.")
+
+    # Get message history from DB
+    try:
+        history_from_db = await chat_db.get_messages(session_id)
+    except Exception as e:
+        chat_logger.error(f"Error retrieving history for session {session_id}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to retrieve message history.")
+
+    # Ensure the agent has the associated notebook_id (it should from create_session)
+    if session_id not in chat_agent.sessions or not chat_agent.sessions.get(session_id):
+         # This might indicate an issue if the agent was retrieved but lost its internal state
+         chat_logger.error(f"Agent for session {session_id} exists but has no associated notebook_id.")
+         raise HTTPException(status_code=500, detail="Internal server error: Agent state inconsistency.")
+
+
+    # Construct the user message object expected by the agent
+    user_message = ModelRequest(parts=[UserPromptPart(content=prompt)])
     
-    async def stream_response():
+    # Append the new user message to the history *before* passing to handle_message
+    # Note: We're passing the raw prompt string AND the history including the new message
+    current_history = history_from_db + [user_message]
+
+    # Save the new user message to the database asynchronously
+    # We can do this in parallel with the agent processing
+    async def save_user_message():
         try:
-            # Verify the session exists and get notebook_id
-            session = await chat_db.get_session(session_id)
-            if not session:
-                error_json = json.dumps({
-                    "error": f"Chat session {session_id} not found",
-                    "status_code": 404
-                })
-                yield error_json.encode('utf-8') + b'\n'
-                return
-            
-            if session_id not in chat_agent.sessions:
-                await chat_agent.create_session(session_id, session["notebook_id"])
-            
-            # --- Save and Stream User Prompt ---
-            # Create ChatMessage for streaming to frontend
-            user_msg_chat = ChatMessage(
-                role="user",
-                content=prompt,
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                agent="user"
-            )
-            yield json.dumps(user_msg_chat.model_dump()).encode('utf-8') + b'\n'
+            await chat_db.add_message(session_id, user_message)
+        except Exception as e:
+            chat_logger.error(f"Error saving user message for session {session_id}", exc_info=True)
+            # Decide if this should be fatal or just logged
 
-            # Create ModelRequest for saving to database
-            user_msg_model = ModelRequest(
-                parts=[UserPromptPart(content=prompt, timestamp=datetime.now(timezone.utc))]
-            )
-            # Save the user message to the database
-            await chat_db.add_message(session_id, user_msg_model)
-            # --- End Save and Stream User Prompt ---
+    await save_user_message() # Or run in background task if preferred asyncio.create_task(save_user_message())
 
-            # Get message history from the database (now includes the user prompt)
-            messages = await chat_db.get_messages(session_id)
+    chat_logger.info(
+        f"Processing message for session {session_id}",
+        extra={
+            'correlation_id': request_id,
+            'session_id': session_id,
+            'prompt': prompt,
+            'history_length': len(history_from_db) # Log length before adding current prompt
+        }
+    )
 
-            # Use handle_message flow which includes clarification and investigation
-            async for status_type, response in chat_agent.handle_message(
-                prompt=prompt,
+    async def stream_response():
+        nonlocal start_time # Allow modification for response time logging
+        message_buffer: List[Tuple[str, ModelResponse]] = [] # Buffer for DB saving
+
+        try:
+            async for status_type, response_part in chat_agent.handle_message(
+                prompt=prompt, # Pass the raw prompt string
                 session_id=session_id,
-                message_history=messages
+                message_history=history_from_db # Pass history *before* current prompt
             ):
-                # --- Determine agent and yield chat_msg ---
-                agent = status_type # Default agent to status_type
-                # Ensure response has parts before accessing
-                if response.parts:
-                    first_part = response.parts[0]
-                    # Explicitly check for known custom types first
-                    if isinstance(first_part, CellResponsePart):
-                        agent = first_part.agent_type
-                    elif isinstance(first_part, StatusResponsePart):
-                        agent = first_part.agent_type
-                    # Linter is satisfied as agent_type exists on these specific classes
+                message_buffer.append((status_type, response_part))
+                
+                # Convert ModelResponse to ChatMessage for streaming
+                chat_message = to_chat_message(response_part)
+                
+                # Ensure chat_message content is JSON serializable before streaming
+                try:
+                    stream_content = json.dumps(chat_message.model_dump()) + "\\n"
+                    yield stream_content
+                    chat_logger.debug(f"Streamed part: {stream_content.strip()} for session {session_id}")
+                except TypeError as e:
+                    chat_logger.error(f"Serialization error for chat message part: {e} - {chat_message}", exc_info=True)
+                    # Yield an error message or skip? For now, skip.
+                    yield json.dumps({"role": "error", "content": f"Serialization error: {e}", "timestamp": datetime.now(timezone.utc).isoformat()}) + "\\n"
 
-                chat_msg = to_chat_message(response, agent=agent)
-                yield json.dumps(chat_msg.model_dump()).encode('utf-8') + b'\n'
-
-                # --- Conditionally save the agent response ---
-                should_save = False
-                # Only save based on status_type indicating a final step outcome
-                if status_type.endswith(("_completed", "_error")):
-                    should_save = True
-
-                if should_save:
-                    # Save the ModelMessage (`response`), not the ChatMessage (`chat_msg`)
-                    await chat_db.add_message(session_id, response)
-                # --- End Conditional Save ---
+            # After streaming finishes, save all buffered model responses to DB
+            for _, response_to_save in message_buffer:
+                 try:
+                    await chat_db.add_message(session_id, response_to_save)
+                 except Exception as e:
+                     chat_logger.error(f"Error saving buffered model response for session {session_id}", exc_info=True)
+                     # Log error but continue saving others
 
             process_time = time.time() - start_time
             chat_logger.info(
                 f"Completed chat message stream",
                 extra={
-                    'correlation_id': correlation_id,
+                    'correlation_id': request_id,
                     'session_id': session_id,
                     'processing_time_ms': round(process_time * 1000, 2)
                 }
             )
-            
+
         except Exception as e:
             process_time = time.time() - start_time
             chat_logger.error(
-                f"Error streaming chat response",
+                f"Error during chat stream",
                 extra={
-                    'correlation_id': correlation_id,
+                    'correlation_id': request_id,
                     'session_id': session_id,
                     'error': str(e),
                     'error_type': type(e).__name__,
@@ -300,26 +318,19 @@ async def post_message(
                 },
                 exc_info=True
             )
-            
-            # Return error as JSON
-            error_json = json.dumps({
-                "error": f"Error streaming response: {str(e)}",
-                "status_code": 500
-            })
-            yield error_json.encode('utf-8') + b'\n'
-    
-    chat_logger.info(
-        f"Starting chat message stream",
-        extra={
-            'correlation_id': correlation_id,
-            'session_id': session_id
-        }
-    )
-    
-    return StreamingResponse(
-        stream_response(),
-        media_type="text/plain"
-    )
+            # Stream an error message to the client
+            error_message = ChatMessage(
+                role="error", # Custom role for errors
+                content=f"An error occurred: {str(e)}",
+                timestamp=datetime.now(timezone.utc).isoformat()
+            ).model_dump()
+            try:
+                yield json.dumps(error_message) + "\\n"
+            except Exception as serialization_error:
+                 chat_logger.error(f"Failed to serialize error message: {serialization_error}", exc_info=True)
+
+
+    return StreamingResponse(stream_response(), media_type="application/x-ndjson")
 
 
 @router.delete("/sessions/{session_id}", status_code=204)
@@ -344,6 +355,12 @@ async def delete_session(
         # Clear all messages
         await chat_db.clear_session_messages(session_id)
         
+        # Delete from in-memory store
+        deleted_agent = active_chat_sessions.pop(session_id, None)
+
+        if not deleted_agent is None:
+             chat_logger.info(f"Deleted active ChatAgentService instance for session {session_id}")
+            
         process_time = time.time() - start_time
         chat_logger.info(
             f"Deleted chat session",
@@ -373,150 +390,6 @@ async def delete_session(
         raise HTTPException(status_code=500, detail=f"Failed to delete chat session: {str(e)}")
 
 
-@router.post("/chat")
-async def unified_chat(
-    request: ChatRequest,
-    chat_agent: ChatAgentService = Depends(get_chat_agent_service),
-    chat_db: ChatDatabase = Depends(get_chat_db)
-) -> StreamingResponse:
-    """
-    Unified endpoint for chat that creates a session if not provided
-    
-    This is a convenience endpoint that combines session creation and messaging
-    """
-    correlation_id = str(uuid4())
-    start_time = time.time()
-    
-    async def process_chat():
-        try:
-            session_id = request.session_id
-            
-            # If no session ID provided, create a new session
-            if not session_id:
-                if not request.notebook_id:
-                    error_json = json.dumps({
-                        "error": "notebook_id is required when creating a new session",
-                        "status_code": 400
-                    })
-                    yield error_json.encode('utf-8') + b'\n'
-                    return
-                    
-                session_id = str(uuid4())
-                await chat_db.create_session(session_id, request.notebook_id)
-                await chat_agent.create_session(session_id, request.notebook_id)
-                
-                # Return the session ID in the first message
-                session_info = json.dumps({
-                    "session_id": session_id
-                })
-                yield session_info.encode('utf-8') + b'\n'
-            else:
-                # Verify the session exists
-                session = await chat_db.get_session(session_id)
-                if not session:
-                    error_json = json.dumps({
-                        "error": f"Chat session {session_id} not found",
-                        "status_code": 404
-                    })
-                    yield error_json.encode('utf-8') + b'\n'
-                    return
-                
-                # If a different notebook_id is provided, return an error
-                if request.notebook_id and request.notebook_id != session["notebook_id"]:
-                    error_json = json.dumps({
-                        "error": f"Cannot change notebook_id for existing session {session_id}",
-                        "status_code": 400
-                    })
-                    yield error_json.encode('utf-8') + b'\n'
-                    return
-            
-            # --- Save and Stream User Prompt ---
-            # Stream the user prompt
-            user_msg_chat = ChatMessage(
-                role="user",
-                content=request.prompt,
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                agent="user"
-            )
-            yield json.dumps(user_msg_chat.model_dump()).encode('utf-8') + b'\n'
+# Removed commented-out unified_chat endpoint for now
 
-             # Create ModelRequest for saving to database
-            user_msg_model = ModelRequest(
-                parts=[UserPromptPart(content=request.prompt, timestamp=datetime.now(timezone.utc))]
-            )
-            # Save the user message to the database
-            await chat_db.add_message(session_id, user_msg_model)
-            # --- End Save and Stream User Prompt ---
-
-            # Get message history (now includes the user prompt)
-            messages = await chat_db.get_messages(session_id)
-
-            # Use handle_message flow which includes clarification and investigation
-            async for status_type, response in chat_agent.handle_message(
-                prompt=request.prompt,
-                session_id=session_id,
-                message_history=messages
-            ):
-                # --- Determine agent and yield chat_msg ---
-                agent = status_type
-                if response.parts:
-                    first_part = response.parts[0]
-                    if isinstance(first_part, CellResponsePart):
-                        agent = first_part.agent_type
-                    elif isinstance(first_part, StatusResponsePart):
-                        agent = first_part.agent_type
-
-                chat_msg = to_chat_message(response, agent=agent)
-                yield json.dumps(chat_msg.model_dump()).encode('utf-8') + b'\n'
-
-                # --- Conditionally save the agent response ---
-                should_save = False
-                # Only save based on status_type indicating a final step outcome
-                if status_type.endswith(("_completed", "_error")):
-                    should_save = True
-
-                if should_save:
-                    await chat_db.add_message(session_id, response)
-                # --- End Conditional Save ---
-
-            process_time = time.time() - start_time
-            chat_logger.info(
-                f"Completed unified chat",
-                extra={
-                    'correlation_id': correlation_id,
-                    'session_id': session_id,
-                    'processing_time_ms': round(process_time * 1000, 2)
-                }
-            )
-            
-        except Exception as e:
-            process_time = time.time() - start_time
-            chat_logger.error(
-                f"Error in unified chat",
-                extra={
-                    'correlation_id': correlation_id,
-                    'error': str(e),
-                    'error_type': type(e).__name__,
-                    'processing_time_ms': round(process_time * 1000, 2)
-                },
-                exc_info=True
-            )
-            
-            # Return error as JSON
-            error_json = json.dumps({
-                "error": f"Error in chat: {str(e)}",
-                "status_code": 500
-            })
-            yield error_json.encode('utf-8') + b'\n'
-    
-    chat_logger.info(
-        f"Starting unified chat processing",
-        extra={
-            'correlation_id': correlation_id
-        }
-    )
-    
-    return StreamingResponse(
-        process_chat(),
-        media_type="text/plain"
-    ) 
+# Removed commented-out unified_chat endpoint for now 

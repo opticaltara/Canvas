@@ -1,6 +1,6 @@
 from uuid import UUID, uuid4
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List, Literal
 from pydantic import BaseModel, Field
 
 from backend.core.dependency import ToolCallID # Assuming ToolCallID is here
@@ -38,3 +38,13 @@ class ToolCallRecord(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True # Allow ToolOutputReference in parameters 
+
+
+# --- Simplified Tool Info Structure --- 
+class MCPToolInfo(BaseModel):
+    """Basic information about a tool provided by an MCP server."""
+    name: str
+    description: Optional[str] = None
+    inputSchema: Dict[str, Any] # Raw JSON Schema from MCP
+
+# --- End Simplified Tool Info Structure --- 

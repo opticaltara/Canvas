@@ -131,7 +131,7 @@ class NotebookManager:
         
         # Convert to model
         notebook = self._db_notebook_to_model(db_notebook)
-        logger.debug(f"Retrieved notebook {notebook_id}")
+        logger.info(f"Retrieved notebook {notebook_id}")
         return notebook
     
     def list_notebooks(self) -> List[Notebook]:
@@ -263,7 +263,7 @@ class NotebookManager:
         
         # Convert to model
         cell = self._db_cell_to_model(db_cell)
-        logger.debug(f"Retrieved cell {cell_id}")
+        logger.info(f"Retrieved cell {cell_id}")
         return cell
     
     def update_cell_content(self, cell_id: UUID, content: str) -> Cell:

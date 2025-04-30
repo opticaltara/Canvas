@@ -54,3 +54,14 @@ export const WebSocketMessageSchema = z.object({
   data: z.any(),
 })
 export type WebSocketMessage = z.infer<typeof WebSocketMessageSchema>
+
+// --- Tool Definitions --- 
+// Removed ToolParameter and ToolDefinition
+
+// --- Simplified Tool Info Structure (matches backend) --- 
+export interface MCPToolInfo {
+  name: string;
+  description?: string | null; // Match Optional[str] from Pydantic
+  inputSchema: Record<string, any>; // Raw JSON Schema (Record<string, any> is equivalent to Dict[str, Any])
+}
+// --- End Simplified Tool Info Structure ---
