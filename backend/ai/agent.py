@@ -23,14 +23,14 @@ from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.mcp import MCPServerHTTP
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
 
 from backend.ai.log_query_agent import LogQueryAgent
 from backend.ai.metric_query_agent import MetricQueryAgent
 from backend.ai.github_query_agent import GitHubQueryAgent
 from backend.ai.summarization_agent import SummarizationAgent
 from backend.config import get_settings
-from backend.core.execution import ExecutionContext, ToolCallRecord, register_tool_dependencies, propagate_tool_results
+from backend.core.execution import ToolCallRecord, register_tool_dependencies, propagate_tool_results
 from backend.core.query_result import (
     QueryResult, 
     LogQueryResult, 
@@ -39,13 +39,18 @@ from backend.core.query_result import (
     GithubQueryResult,
     SummarizationQueryResult
 )
-from backend.services.connection_manager import get_connection_manager
 from backend.ai.chat_tools import NotebookCellTools, CreateCellParams
-from backend.core.dependency import ToolOutputReference
 from backend.core.notebook import Notebook
 from backend.services.notebook_manager import get_notebook_manager
 
 import asyncio # Add this import at the top of the file
+
+# Import the prompts
+from backend.ai.prompts.investigation_prompts import (
+    INVESTIGATION_PLANNER_SYSTEM_PROMPT,
+    PLAN_REVISER_SYSTEM_PROMPT,
+    MARKDOWN_GENERATOR_SYSTEM_PROMPT
+)
 
 # Get logger for AI operations
 ai_logger = logging.getLogger("ai")
@@ -76,6 +81,10 @@ class InvestigationStepModel(BaseModel):
         default=StepCategory.PHASE
     )
     description: str = Field(description="Description of what this step will do")
+    tool_name: Optional[str] = Field(
+        description="The specific tool name to be executed in this step, if applicable (e.g., 'get_file_contents')",
+        default=None
+    )
     dependencies: List[str] = Field(
         description="List of step IDs this step depends on",
         default_factory=list
@@ -150,6 +159,31 @@ class PlanRevisionResult(BaseModel):
     explanation: str = Field(description="Explanation of the revision decision")
 
 
+def format_message_history(history: List[ModelMessage]) -> str:
+    """Formats message history into a simple string for the prompt."""
+    formatted_lines = []
+    for msg in history:
+        role = "Unknown"
+        content = ""
+        if isinstance(msg, ModelRequest) and msg.parts:
+            role = "User"
+            content = getattr(msg.parts[0], 'content', '')
+        elif isinstance(msg, ModelResponse) and msg.parts:
+            role = "Assistant"
+            # Handle different part types (StatusResponsePart, CellResponsePart etc.)
+            if hasattr(msg.parts[0], 'content'):
+                content = getattr(msg.parts[0], 'content', '')
+            elif hasattr(msg.parts[0], 'cell_params'): # Example for CellResponsePart
+                 content = f"[Assistant created cell: {getattr(msg.parts[0], 'cell_id', 'unknown')}]"
+            else:
+                 content = f"[Assistant action: {getattr(msg.parts[0], 'part_kind', 'unknown')}]"
+
+        if content:
+             # Basic cleaning/truncation might be needed here for long content
+             cleaned_content = str(content).replace('\n', ' ').strip()
+             formatted_lines.append(f"{role}: {cleaned_content}")
+             
+    return "\n".join(formatted_lines)
 
 class AIAgent:
     """
@@ -181,147 +215,38 @@ class AIAgent:
         # Log the received MCP server map and available sources
         ai_logger.info(f"AIAgent for notebook {self.notebook_id} initialized with available data sources: {self.available_data_sources}")
         
+        # Format the planner prompt with the available data sources
+        available_data_sources_str = ', '.join(self.available_data_sources) if self.available_data_sources else 'None'
+        formatted_planner_prompt = INVESTIGATION_PLANNER_SYSTEM_PROMPT.format(
+            available_data_sources_str=available_data_sources_str
+        )
+
         # Create the full list of MCPServerHTTP for general agents
         all_mcps_list = list(self.mcp_server_map.values())
         ai_logger.info(f"Initializing general agents with {len(all_mcps_list)} HTTP MCP servers.")
         
-        # Initialize investigation planner
+        # Initialize investigation planner using the formatted prompt from the constants file
         self.investigation_planner = Agent(
             self.model,
             deps_type=InvestigationDependencies,
             result_type=InvestigationPlanModel,
-            system_prompt="""
-            You are a Senior Software Engineer and the Lead Investigator. Your purpose is to 
-            coordinate a team of specialized agents by creating and adapting investigation plans.
-            
-            You will be given a user query and a list of available data sources.
-            You will need to create a plan for an investigation team to address the query.
-            Sometimes the query will be a simple ask such as "What is my most starred github repo?"
-            If this question, can be answered with a simple tool call, you should do that.
-            Otherwise, you should create a plan that uses the github agent to answer the query.
-
-            When analyzing a user query about a software incident:
-
-            **Complex Query Handling (Multi-Step Plan):**
-            If the query requires multiple steps or analysis across different data sources:
-
-            1. CONTEXT ASSESSMENT
-              • Extract the key incident characteristics (affected services, error patterns, timing)
-              • Consider the available data sources provided in the investigation dependencies (you have access to: {', '.join(self.available_data_sources) if self.available_data_sources else 'None'})
-              • Frame the investigation as a structured debugging process
-
-            2. INVESTIGATION DESIGN
-              Produce **1–5 PHASES**, each a coarse investigative goal (e.g. "Identify error fingerprint",
-              "Correlate spikes with deploys").  Do **NOT** emit fine‑grained LogQL/PromQL/code;
-              micro‑agents will handle that.
-
-            3. STEP SPECIFICATION
-              For each step in your plan, define:
-              
-              • step_id: A unique identifier (use S1, S2, etc.)
-              • step_type: Choose the *primary* data source this phase will use ("log", "metric", "github", "summarization", or "markdown" for analysis/decision steps)
-              • category: Choose the *primary* category for this step ("PHASE" or "DECISION"). Always "phase" here.
-              • description: Instructions for the specialized agent that will:
-                - State precisely what question this step answers
-                - Provide all context needed for the specialized agent (including relevant prior results)
-                - Explain how to interpret the results
-                - Reference specific artifacts from previous steps when needed
-                - **If the step_type is 'summarization', ensure the description clearly indicates what text needs summarizing (e.g., referencing results from a previous step).**
-              • dependencies: Array of step IDs required before this step can execute
-              • parameters: Configuration details relevant to this step type. 
-                - For "github" type, should contain 'connection_id' (string) referencing the relevant GitHub connection.
-                - **For "summarization", parameters are generally not needed unless specifying constraints (e.g., max length), but the text to summarize should come from the description or dependencies.**
-                - **REFERENCING OUTPUTS:** If a parameter needs to use the output of a previous step (listed in `dependencies`), use the following structure within the `parameters` dict: `"<parameter_name>": {"__ref__": {"step_id": "<ID_of_dependency_step>", "output_name": "result"}}`. For now, always use `"result"` as the `output_name`. For example, if step S2 needs the result of S1 as its 'input_data' parameter, its parameters might look like: `{"input_data": {"__ref__": {"step_id": "S1", "output_name": "result"}}}`.
-              • is_decision_point: Set to true for markdown steps that evaluate previous results
-              
-            4. DECISION POINTS
-              Include explicit markdown steps that will:
-              
-              • Evaluate results from previous steps
-              • Determine if hypothesis needs revision
-              • Decide whether to continue with planned steps or pivot
-              • Document the reasoning for continuing or changing direction
-
-            5. COMPLETION CRITERIA
-              Define specific technical indicators that will confirm:
-              
-              • Root cause has been identified
-              • Impact has been quantified
-              • Contributing factors are understood
-              • Potential remediation approaches
-
-            IMPORTANT CONSTRAINTS (for multi-step plans):
-            • Keep the investigation plan concise. Aim for the minimum number of steps required to address the user's core query. 
-            Do not generate more than 5 steps unless absolutely necessary for a complex investigation.
-            • Stick strictly to the scope of the user's request. Do not add steps for tangential inquiries 
-            or explorations not explicitly requested.
-            • Keep the `thinking` explanation brief (2-3 sentences maximum). Focus on the core strategy and rationale, omitting excessive detail.
-
-            Remember that you are creating instructions for specialized agents, not executing the investigation yourself.
-            Your instructions must be detailed and self-contained, as each specialized agent only sees its specific task.
-            """
+            system_prompt=formatted_planner_prompt # Use the formatted constant
         )
 
-
-        # Initialize plan reviser
+        # Initialize plan reviser using the constant
         self.plan_reviser = Agent(
             self.model,
             deps_type=PlanRevisionRequest,
             result_type=PlanRevisionResult,
-            system_prompt="""
-            You are an Investigation Plan Reviser responsible for analyzing the results of executed steps and determining if the investigation plan should be adjusted.
-
-            When reviewing executed steps and their results:
-
-            1. ANALYZE EXECUTED STEPS
-              • Review the data and insights gained from steps executed so far
-              • Compare actual results against expected outputs
-              • Identify any unexpected patterns or anomalies
-              • Evaluate how the results support or contradict the current hypothesis
-
-            2. REVISION DECISION
-              Decide whether to:
-              • Continue with the existing plan (if results align with expectations)
-              • Modify the plan by adding new steps or removing planned steps
-              • Update the working hypothesis based on new evidence
-              
-            3. NEW STEP SPECIFICATION
-              If adding new steps, define each one with:
-              • step_id: A unique identifier not conflicting with existing steps
-              • step_type: The appropriate type for this step
-              • description: Detailed instructions for the specialized agent
-              • dependencies: Steps that must complete before this one
-              • parameters: Configuration for this step
-              • is_decision_point: Whether this is another evaluation step
-
-            4. EXPLANATION
-              Provide clear reasoning for your decision, including:
-              • How executed results influenced your decision
-              • Why the current plan is sufficient or needs changes
-              • How any new steps will address gaps in the investigation
-              • How updated hypothesis better explains the observed behavior
-
-            Your role is critical for adaptive investigation - don't hesitate to recommend significant changes if the evidence warrants it, but also maintain investigation focus and avoid unnecessary steps.
-            """
+            system_prompt=PLAN_REVISER_SYSTEM_PROMPT # Use the constant
         )
-        
+
+        # Initialize markdown generator using the constant
         self.markdown_generator = Agent(
             self.model,
             result_type=MarkdownQueryResult,
-            mcp_servers=all_mcps_list,
-            system_prompt="""
-            You are an expert at technical documentation and result analysis. Create clear and **concise** markdown to address the user's request. 
-            Your primary goal is brevity and clarity. Avoid unnecessary jargon or overly detailed explanations.
-            
-            When analyzing investigation results:
-            1. Summarize key findings **briefly** and objectively
-            2. Identify patterns and anomalies in the data
-            3. Draw connections between different data sources
-            4. Evaluate how findings support or contradict hypotheses
-            5. Recommend next steps based on the evidence
-            
-            Focus on being succinct. Return ONLY the markdown with no meta-commentary.
-            """
+            mcp_servers=all_mcps_list, # Pass MCP servers here if needed, otherwise remove
+            system_prompt=MARKDOWN_GENERATOR_SYSTEM_PROMPT # Use the constant
         )
 
         # Initialize specialized agents without passing mcp_servers
@@ -431,28 +356,30 @@ class AIAgent:
             if single_step.step_type == StepType.MARKDOWN:
                 query_content = str(final_result_data.data) 
 
-            # --- Create Cell ---
+            # --- Create Cell (Single Step) ---
+            cell_metadata = {
+                "session_id": session_id,
+                "step_id": single_step.step_id,
+                "dependencies": single_step.dependencies
+            }
+            # Add tool info directly from the plan step to metadata if it's a GitHub step
+            if single_step.step_type == StepType.GITHUB:
+                cell_metadata['tool_name'] = single_step.tool_name # Use tool_name from step
+                cell_metadata['tool_args'] = single_step.parameters # Use parameters from step
+
             cell_params_for_step = CreateCellParams(
                 notebook_id=notebook_id_str,
                 cell_type=single_step.step_type,
-                content=query_content, 
-                metadata={
-                    "session_id": session_id,
-                    "step_id": single_step.step_id,
-                    "dependencies": single_step.dependencies # Keep original step dependencies here for info
-                }
+                content=query_content, # Use query_content generally
+                metadata=cell_metadata
             )
-            # --- Add tool info to cell params if it's a GitHub cell ---
-            tool_info_kwargs = {}
-            if single_step.step_type == StepType.GITHUB and isinstance(final_result_data, GithubQueryResult) and final_result_data.tool_calls:
-                last_tool_call = final_result_data.tool_calls[-1] # Get the last successful call
-                tool_info_kwargs['tool_name'] = last_tool_call.tool_name
-                tool_info_kwargs['tool_arguments'] = last_tool_call.tool_args
-            
+            # Use step description as title for GitHub cell content
+            if single_step.step_type == StepType.GITHUB:
+                cell_params_for_step.content = single_step.description
+                
             cell_result = await cell_tools.create_cell(
                 params=cell_params_for_step,
-                # Pass tool info as additional kwargs if available
-                **tool_info_kwargs 
+                # No extra kwargs needed, metadata is in params
             )
             created_cell_id = cell_result.get("cell_id")
             if not created_cell_id:
@@ -649,30 +576,37 @@ class AIAgent:
                 if current_step.step_type == StepType.MARKDOWN:
                     query = str(final_result_data.data) # Use data for markdown cell content
 
-                # --- Create Cell ---
+                # --- Create Cell (Multi Step) ---
+                # Determine content based on type
+                query_content = final_result_data.query
+                if current_step.step_type == StepType.MARKDOWN:
+                    query_content = str(final_result_data.data)
+
+                cell_metadata_multi = {
+                    "session_id": session_id,
+                    "step_id": current_step.step_id,
+                    "dependencies": current_step.dependencies
+                }
+                # Add tool info directly from the plan step to metadata if it's a GitHub step
+                if current_step.step_type == StepType.GITHUB:
+                    cell_metadata_multi['tool_name'] = current_step.tool_name # Use tool_name from step
+                    cell_metadata_multi['tool_args'] = current_step.parameters # Use parameters from step
+
                 cell_params_for_step = CreateCellParams(
                     notebook_id=notebook_id_str,
                     cell_type=current_step.step_type,
-                    content=query,
-                    metadata={
-                        "session_id": session_id,
-                        "step_id": current_step.step_id,
-                        "dependencies": current_step.dependencies # Keep original step dependencies here for info
-                    }
+                    content=query_content, # Use query_content generally
+                    metadata=cell_metadata_multi
                 )
-                # --- Add tool info to cell params if it's a GitHub cell ---
-                tool_info_kwargs_multi = {}
-                if current_step.step_type == StepType.GITHUB and isinstance(final_result_data, GithubQueryResult) and final_result_data.tool_calls:
-                    last_tool_call = final_result_data.tool_calls[-1] # Get the last successful call
-                    tool_info_kwargs_multi['tool_name'] = last_tool_call.tool_name
-                    tool_info_kwargs_multi['tool_arguments'] = last_tool_call.tool_args
-                    
+                # Use step description as title for GitHub cell content
+                if current_step.step_type == StepType.GITHUB:
+                    cell_params_for_step.content = current_step.description
+
                 try:
                     ai_logger.info(f"[Agent] Attempting to create cell for step {current_step.step_id} with params: {cell_params_for_step.model_dump()}")
                     cell_result = await cell_tools.create_cell(
                         params=cell_params_for_step,
-                        # Pass tool info as additional kwargs if available
-                        **tool_info_kwargs_multi 
+                        # No extra kwargs needed, metadata is in params
                     )
                     created_cell_id = cell_result.get("cell_id")
                     ai_logger.info(f"[Agent] Cell creation result for step {current_step.step_id}: {cell_result}")
@@ -776,28 +710,35 @@ class AIAgent:
         
 
     async def create_investigation_plan(self, query: str, notebook_id: Optional[str] = None, message_history: List[ModelMessage] = []) -> InvestigationPlanModel:
-        """Create an investigation plan for the given query"""
-        # Use stored notebook_id if none provided
+        """Create an investigation plan for the given query, incorporating history into the prompt."""
         notebook_id = notebook_id or self.notebook_id
         if not notebook_id:
             raise ValueError("notebook_id is required for creating investigation plan")
-            
-        # Create dependencies for the investigation planner
+
+        # Format the history
+        formatted_history = format_message_history(message_history)
+
+        # Combine history and the latest query into a single prompt
+        combined_prompt = f"Conversation History:\n---\n{formatted_history}\n---\n\nLatest User Query: {query}"
+        ai_logger.info(f"Planner combined prompt:\n{combined_prompt}")
+
+        # Create dependencies, but exclude message_history as it's now in the prompt
         deps = InvestigationDependencies(
-            user_query=query,
+            user_query=query, # Keep the original query here for potential separate use if needed
             notebook_id=UUID(notebook_id),
             available_data_sources=self.available_data_sources,
-            executed_steps={},
+            executed_steps={}, # Assuming fresh plan creation
             current_hypothesis=None,
-            message_history=message_history
+            message_history=[] # Pass empty list or None if model allows
         )
 
-        # Generate the plan
+        # Generate the plan using the combined prompt
         result = await self.investigation_planner.run(
-            user_prompt=deps.user_query,
-            deps=deps
+            user_prompt=combined_prompt, # Use the combined history + query
+            deps=deps # Pass deps object (without history)
         )
-        plan_data = result.data
+        # Use .output instead of .data
+        plan_data = result.output
 
         # Convert to InvestigationPlan
         steps = []
@@ -852,13 +793,12 @@ class AIAgent:
             user_prompt="Revise the investigation plan based on executed steps and their results.",
             deps=revision_request
         )
-        
-        return result.data
+        return result.output
 
     async def _yield_result_async(self, result):
         """Helper to wrap a non-async-generator result."""
         yield result
-        await asyncio.sleep(0) # Yield control briefly
+        await asyncio.sleep(0)
 
     async def generate_content(
         self,
@@ -881,29 +821,45 @@ class AIAgent:
         Yields:
             Dictionaries with status updates, and finally the QueryResult.
         """
-        if description in step_results:
-            # Ensure we return the correct type if cached
-            cached_result = step_results[description]
-            if isinstance(cached_result, QueryResult):
-                 # Wrap the cached result in an async generator
-                 async for item in self._yield_result_async(cached_result):
-                     yield item
-                 return # Important: exit after yielding cached result
-            else:
-                 # If it's not a QueryResult subclass, log a warning and potentially wrap it
-                 ai_logger.warning(f"Cached result for '{description}' is not a QueryResult type: {type(cached_result)}. Attempting to use as data.")
-                 # Fallback: yield a generic QueryResult - adjust if needed
-                 fallback_result = QueryResult(query=description, data=cached_result)
-                 async for item in self._yield_result_async(fallback_result):
-                     yield item
-                 return # Important: exit after yielding cached result
+        # Removed caching logic based on description - potentially unreliable
+        # if description in step_results:
+        #    ... (removed)
 
         context = ""
-        if executed_steps and step_results:
-            # TODO: Consider how large context might get. Maybe pass relevant parts only?
-            context = f"\n\nContext from previous steps:\n{executed_steps}\n\nResults from previous steps:\n{step_results}"
+        if executed_steps:
+            # Simplify context - passing full dicts can be very large and may hit token limits
+            # Pass only the descriptions and outcome status/error of direct dependencies
+            dependency_context = []
+            for dep_id in current_step.dependencies:
+                if dep_id in executed_steps:
+                    dep_step_info = executed_steps[dep_id]
+                    dep_desc = dep_step_info.get('step', {}).get('description', '')
+                    dep_error = dep_step_info.get('error')
+                    status = "Error" if dep_error else "Success"
+                    context_line = f"- Dependency {dep_id} ({status}): {dep_desc[:100]}..." # Truncate description
+                    if dep_error:
+                        context_line += f" (Error: {str(dep_error)[:100]}...)" # Truncate error
+                    dependency_context.append(context_line)
+            if dependency_context:
+                 context = f"\n\nContext from Dependencies:\n" + "\n".join(dependency_context)
 
-        full_description = description + context
+        # --- Prepare the description for the sub-agent ---
+        # Start with the original step description
+        agent_prompt = description
+
+        # Append parameters clearly if they exist
+        if current_step.parameters:
+            params_str = "\n".join([f"- {k}: {v}" for k, v in current_step.parameters.items()])
+            agent_prompt += f"\n\nParameters for this step:\n{params_str}"
+
+        # Append the dependency context
+        agent_prompt += context
+
+        # Assign to full_description for use by agents
+        full_description = agent_prompt
+        ai_logger.info(f"[generate_content] Passing to sub-agent ({step_type.value}): {full_description}")
+        # -------------------------------------------------
+
         final_result: Optional[QueryResult] = None
 
         try:
@@ -921,14 +877,14 @@ class AIAgent:
                  # Markdown generator's run might not be async generator
                  yield {"status": "generating_markdown", "agent": "markdown_generator"}
                  result = await self.markdown_generator.run(full_description)
-                 # Ensure we get the actual MarkdownQueryResult
-                 if isinstance(result, MarkdownQueryResult):
-                     final_result = result
-                 elif result and hasattr(result, 'data') and isinstance(result.data, MarkdownQueryResult):
-                     final_result = result.data
+                 # Expect the result in .output, matching the result_type
+                 if isinstance(result.output, MarkdownQueryResult):
+                     final_result = result.output
                  else:
-                     ai_logger.warning(f"Markdown generator did not return MarkdownQueryResult. Got: {type(result)}. Falling back.")
-                     fallback_content = str(getattr(result, 'data', getattr(result, 'output', ''))) if result else ''
+                     # Log and handle unexpected output type
+                     ai_logger.warning(f"Markdown generator did not return MarkdownQueryResult in output. Got: {type(result.output)}. Falling back.")
+                     # Create a fallback result, potentially using str representation
+                     fallback_content = str(result.output) if result.output else ''
                      final_result = MarkdownQueryResult(query=description, data=fallback_content)
                  yield final_result # Yield the final result
             elif step_type == StepType.GITHUB:

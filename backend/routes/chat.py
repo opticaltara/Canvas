@@ -66,45 +66,52 @@ MAX_CELL_HISTORY = 5
 MAX_SUMMARY_LENGTH = 150 # Max chars for code/output summaries
 
 def summarize_cell(cell_dict: Dict) -> str:
-    """Creates a concise summary string for a notebook cell dictionary."""
-    cell_id = cell_dict.get('id', 'N/A')
-    cell_type = cell_dict.get('type', 'unknown')
-    status = cell_dict.get('status', cell_dict.get('metadata', {}).get('status', 'unknown')) 
-    summary = f"[Cell ID: {cell_id}, Type: {cell_type}, Status: {status}"
-
+    """Creates a concise summary string for a notebook cell dictionary, focusing on results."""
+    cell_type = cell_dict.get('type', 'unknown').capitalize()
     content = cell_dict.get('content', '')
-    if content:
-        if len(content) > MAX_SUMMARY_LENGTH:
-            content_summary = content[:MAX_SUMMARY_LENGTH] + "..."
-        else:
-            content_summary = content
-        # Clean summary before adding to f-string
-        cleaned_content_summary = content_summary.replace("\n", " ")
-        summary += f', Content: \'{cleaned_content_summary}\''
-
     result = cell_dict.get('result')
+    error = None
+    output_summary = None
+
     if isinstance(result, dict):
         error = result.get('error')
-        output = result.get('output', result.get('content')) 
+        output = result.get('output', result.get('content')) # Use 'content' as fallback within result
+
         if error:
-             error_str = str(error)
-             if len(error_str) > MAX_SUMMARY_LENGTH:
-                 error_summary = error_str[:MAX_SUMMARY_LENGTH] + "..."
-             else:
-                 error_summary = error_str
-             cleaned_error = error_summary.replace("\n", " ")
-             summary += f', Error: {cleaned_error}'
+            error_str = str(error)
+            if len(error_str) > MAX_SUMMARY_LENGTH:
+                error_summary = error_str[:MAX_SUMMARY_LENGTH] + "..."
+            else:
+                error_summary = error_str
+            # Clean summary
+            cleaned_error = error_summary.replace("\n", " ").strip()
+            return f"Failed {cell_type} Query: {cleaned_error}" 
         elif output:
             output_str = str(output)
             if len(output_str) > MAX_SUMMARY_LENGTH:
-                 output_summary = output_str[:MAX_SUMMARY_LENGTH] + "..."
+                output_summary = output_str[:MAX_SUMMARY_LENGTH] + "..."
             else:
-                 output_summary = output_str
-            cleaned_output = output_summary.replace("\n", " ")
-            summary += f', Result: {cleaned_output}'
+                output_summary = output_str
+            # Clean summary
+            cleaned_output = output_summary.replace("\n", " ").strip()
+            return f"Successful {cell_type} Query: {cleaned_output}"
 
-    summary += "]"
-    return summary
+    # Handle Markdown or cells without error/output in result dict
+    if cell_type.lower() == 'markdown':
+        if content:
+            if len(content) > MAX_SUMMARY_LENGTH:
+                content_summary = content[:MAX_SUMMARY_LENGTH] + "..."
+            else:
+                content_summary = content
+            cleaned_content = content_summary.replace("\n", " ").strip()
+            return cleaned_content
+        else:
+            return f"Empty Markdown Cell"
+    
+    # Fallback for other cell types if no error/output was processed
+    # or result wasn't a dict
+    status = cell_dict.get('status', cell_dict.get('metadata', {}).get('status', 'unknown'))
+    return f"{cell_type} Cell (Status: {status}) - No result/error summary available."
 
 class CreateSessionRequest(BaseModel):
     """Request to create a new chat session"""
@@ -344,7 +351,7 @@ async def post_message(
         raise HTTPException(status_code=500, detail="Failed to retrieve message history.")
 
     # Fetch and Summarize Cell History
-    cell_history_context = "No recent cell history found."
+    cell_history_context = None
     try:
         # Access notebook_id directly from the injected & initialized agent
         notebook_manager = chat_agent.notebook_manager
@@ -361,21 +368,28 @@ async def post_message(
             else:
                  cell_history_context = "Found notebook but no recent cells to summarize."
         elif notebook:
-             cell_history_context = "Notebook found, but it has no cells."
-             
-        chat_logger.debug(f"Generated cell history context for session {session_id}:\n{cell_history_context}")
+             # Log the status, but don't set it as context to prepend
+             chat_logger.debug(f"Notebook {notebook.id} found, but it has no cells.")
+             cell_history_context = None # Explicitly set to None if no cells
+
+        if cell_history_context: # Only log if there's actual context to log
+            chat_logger.debug(f"Generated cell history context for session {session_id}:\\n{cell_history_context}")
     except (KeyError, ValueError) as e: # Catch potential UUID conversion error too
         notebook_id_for_log = chat_agent.notebook_id if chat_agent and chat_agent.notebook_id else "<UNKNOWN>"
         chat_logger.warning(f"Notebook {notebook_id_for_log} not found or invalid UUID when fetching cell history: {e}")
-        cell_history_context = "Could not retrieve notebook for cell history."
-    
-    # Prepend cell history context to the user's prompt
-    prompt_with_context = f"{cell_history_context}\n\nUser Prompt:\n{prompt}"
+        # Don't prepend error messages either
+        cell_history_context = None # Set to None on error
+
+    # Only prepend context if it was successfully generated (i.e., not None)
+    if cell_history_context:
+        prompt_to_use = f"{cell_history_context}\\n\\nUser Prompt:\\n{prompt}"
+    else:
+        prompt_to_use = prompt # Use the original user prompt
+
     # --- End Fetch and Summarize Cell History ---
 
-    # Construct the user message object using the combined prompt
-    # Timestamp added automatically by UserPromptPart if not provided
-    user_message = ModelRequest(parts=[UserPromptPart(content=prompt_with_context)]) 
+    # Construct the user message object using the potentially unmodified prompt
+    user_message = ModelRequest(parts=[UserPromptPart(content=prompt_to_use)])
     
     # --- Prepare history FOR THE AGENT (including the new user message) ---
     # Ensure history_from_db contains ModelMessage objects (or compatible dicts)
@@ -427,7 +441,7 @@ async def post_message(
         try:
             # Pass the UPDATED history INCLUDING the current user message
             async for status_type, response_part in chat_agent.handle_message(
-                prompt=prompt_with_context, # Pass the prompt string WITH context
+                prompt=prompt_to_use, # Pass the prompt string WITH context
                 session_id=session_id,
                 message_history=history_for_agent # Pass the history WITH the latest user message
             ):
