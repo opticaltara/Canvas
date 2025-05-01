@@ -4,7 +4,17 @@ import { useState, useEffect, useCallback } from "react"
 import { useWebSocket } from "./useWebSocket"
 import { useToast } from "@/hooks/use-toast"
 import { useCanvasStore } from "@/store/canvas" // Import useCanvasStore
-import { type CellStatus } from "@/store/types"; // Import CellStatus type
+import { type CellStatus, type CellType } from "@/store/types"; // Import CellStatus & CellType
+
+// Define a simple QueryResult type matching backend structure
+export interface QueryResult {
+  data: any;
+  query: string;
+  error?: string | null;
+  metadata?: Record<string, any>;
+  // Add fields specific to subclasses if needed, e.g., tool_calls for GithubQueryResult
+  tool_calls?: any[] | null;
+}
 
 // Define event types based on the documentation
 export interface BaseEvent {
@@ -28,14 +38,13 @@ export interface StepCompletedEvent extends BaseEvent {
   type: string // "step_${stepId}_completed"
   status: "step_completed"
   step_id: string
-  step_type: "log" | "metric" | "markdown" | "sql" | "python" | "ai_query"
+  step_type: "log" | "metric" | "markdown" | "github" // Removed summarization, sql, python, ai_query (update if others are used)
   cell_id: string
-  result: {
-    data: any
-    query: string
-    error: string | null
-    metadata?: Record<string, any>
-  }
+  result: QueryResult // Use the imported QueryResult type from store/types
+  cell_params: Partial<CellCreationParams>; // Add cell_params used by backend
+  agent_type: string;
+  is_single_step_plan?: boolean;
+  tool_call_record_id?: string;
 }
 
 export interface PlanRevisedEvent extends BaseEvent {
@@ -44,24 +53,87 @@ export interface PlanRevisedEvent extends BaseEvent {
   explanation: string
 }
 
-export interface SummaryCreatedEvent extends BaseEvent {
-  type: "summary_created"
-  status: "summary_created"
-}
-
 export interface ErrorEvent extends BaseEvent {
   type: "error"
   status: "error"
   message: string
 }
 
+// --- New Summarization Events ---
+export interface SummaryStartedEvent extends BaseEvent {
+  type: "summary_started";
+  status: "summary_started";
+  agent_type: "summarization_generator";
+}
+
+export interface SummaryUpdateEvent extends BaseEvent {
+  type: "summary_update";
+  status: "summary_update";
+  agent_type: "summarization_generator";
+  update_info: {
+    status?: string; // e.g., "agent_ready", "attempt_start"
+    message?: string;
+    error?: string;
+    attempt?: number;
+    max_attempts?: number;
+  };
+}
+
+export interface SummaryCellCreatedEvent extends BaseEvent {
+  type: "summary_cell_created";
+  status: "summary_cell_created";
+  agent_type: "summarization_generator";
+  cell_params: CellCreationParams; // Assuming backend sends params matching CellCreationParams
+  cell_id: string;
+  error: string | null; // Error during summary generation
+}
+
+export interface SummaryCellErrorEvent extends BaseEvent {
+  type: "summary_cell_error";
+  status: "summary_cell_error";
+  agent_type: "summarization_generator";
+  error: string; // Error during cell creation itself
+}
+
+// --- ADDED: GitHub Tool Events --- 
+export interface GithubToolCellCreatedEvent extends BaseEvent {
+  type: "github_tool_cell_created";
+  status: "success";
+  original_plan_step_id: string;
+  cell_id: string;
+  tool_call_record_id: string;
+  tool_name: string;
+  tool_args: Record<string, any>;
+  result: any; // The actual result from the tool call
+  agent_type: "github_tool";
+  cell_params: Partial<CellCreationParams>; // Params used by backend to create cell
+}
+
+export interface GithubToolErrorEvent extends BaseEvent {
+  type: "github_tool_error";
+  status: "error";
+  original_plan_step_id?: string; // Optional as it might fail before step ID known
+  tool_name?: string;
+  tool_args?: Record<string, any>;
+  error: string; // Error message from the tool execution/cell creation
+  agent_type: "github_tool";
+}
+
+// --- Investigation Event Union ---
 export type InvestigationEvent =
   | PlanCreatedEvent
   | PlanCellCreatedEvent
   | StepCompletedEvent
   | PlanRevisedEvent
-  | SummaryCreatedEvent
   | ErrorEvent
+  // Add new summary events
+  | SummaryStartedEvent
+  | SummaryUpdateEvent
+  | SummaryCellCreatedEvent
+  | SummaryCellErrorEvent
+  // ADDED: GitHub Tool Events
+  | GithubToolCellCreatedEvent
+  | GithubToolErrorEvent
 
 // Define cell creation parameters
 export interface CellCreationParams {
@@ -126,9 +198,24 @@ export function useInvestigationEvents({
         case "plan_revised":
           handlePlanRevised(event as PlanRevisedEvent)
           break
-        case "summary_created":
-          handleSummaryCreated(event as SummaryCreatedEvent)
-          break
+        case "summary_started":
+          handleSummaryStarted(event as SummaryStartedEvent);
+          break;
+        case "summary_update":
+          handleSummaryUpdate(event as SummaryUpdateEvent);
+          break;
+        case "summary_cell_created":
+          handleSummaryCellCreated(event as SummaryCellCreatedEvent);
+          break;
+        case "summary_cell_error":
+          handleSummaryCellError(event as SummaryCellErrorEvent);
+          break;
+        case "github_tool_cell_created":
+          handleGithubToolCellCreated(event as GithubToolCellCreatedEvent);
+          break;
+        case "github_tool_error":
+          handleGithubToolError(event as GithubToolErrorEvent);
+          break;
         case "error":
           handleError(event as ErrorEvent)
           break
@@ -136,6 +223,15 @@ export function useInvestigationEvents({
           // Check if it's a step completion event
           if (event.type.startsWith("step_") && event.type.endsWith("_completed")) {
             handleStepCompleted(event as StepCompletedEvent)
+          } else if (event.type === "investigation_complete") {
+            // Handle the final completion signal if necessary (might be redundant with summary_cell_created)
+            console.log("Received investigation_complete signal");
+            // Optionally ensure UI state reflects completion if not already done by summary handler
+            // setIsInvestigationRunning(false);
+            // setCurrentStatus("Investigation finished.");
+          } else if (event.type.startsWith("step_") && event.type.endsWith("_event")) {
+            // Generic handler for other potential step events (like status updates)
+            handleStepUpdate(event); // Placeholder function 
           } else {
             console.warn("Unknown event type:", event.type)
           }
@@ -176,15 +272,22 @@ export function useInvestigationEvents({
       // Update status
       setCurrentStatus(`Completed step ${event.step_id}`)
 
-      // Create the cell - THIS IS THE ONLY PLACE WE CREATE CELLS
+      // Use content directly from cell_params if available, otherwise derive (for non-github)
+      let cellContent = event.cell_params?.content || event.result?.query || "";
+      if (event.step_type === "markdown" && event.result?.data) {
+        cellContent = String(event.result.data);
+      }
+
+      // Create the cell - THIS IS THE ONLY PLACE WE CREATE STEP CELLS
       const cellParams: CellCreationParams = {
         id: event.cell_id,
         step_id: event.step_id,
         type: event.step_type,
-        content: event.result.query || "",
+        content: cellContent,
         status: event.result.error ? "error" : "success",
         result: event.result.data,
         error: event.result.error || undefined,
+        metadata: { ...(event.result.metadata || {}), ...(event.cell_params?.metadata || {})}, // Merge metadata
       }
 
       // Create the cell
@@ -212,19 +315,166 @@ export function useInvestigationEvents({
     [currentPlan, toast],
   )
 
-  // Handle summary_created event - just update status, don't create a cell
-  const handleSummaryCreated = useCallback(
-    (event: SummaryCreatedEvent) => {
-      setIsInvestigationRunning(false)
-      setCurrentStatus("Investigation completed")
+  // --- New Handlers for Summarization Flow ---
+
+  const handleSummaryStarted = useCallback(
+    (event: SummaryStartedEvent) => {
+      setCurrentStatus("Generating final answer...");
+      toast({
+        title: "Summarizing Findings",
+        description: "AI is generating the final answer...",
+      });
+    },
+    [toast]
+  );
+
+  const handleSummaryUpdate = useCallback(
+    (event: SummaryUpdateEvent) => {
+      const { update_info } = event;
+      let message = "Summarization in progress...";
+      if (update_info.message) {
+        message = update_info.message;
+      } else if (update_info.status) {
+        message = `Summarization status: ${update_info.status}`;
+      }
+      setCurrentStatus(message);
+
+      // Optionally show toast for errors during update
+      if (update_info.error) {
+        console.error("Summarization update error:", update_info.error);
+        toast({
+          variant: "destructive",
+          title: "Summarization Issue",
+          description: `An issue occurred during summary generation: ${update_info.error}`,
+        });
+      }
+    },
+    [toast]
+  );
+
+  const handleSummaryCellCreated = useCallback(
+    (event: SummaryCellCreatedEvent) => {
+      // Extract cell parameters from the event
+      const backendCellParams = event.cell_params;
+
+      // Create the final summary cell
+      const cellParams: CellCreationParams = {
+        id: event.cell_id,
+        step_id: backendCellParams.step_id || "final_summary", // Use step_id from backend or default
+        type: backendCellParams.type || "markdown",
+        content: backendCellParams.content || "",
+        status: event.error ? "error" : "success", // Status reflects summary generation error
+        result: null, // No direct 'result' data for the summary cell itself
+        error: event.error || undefined,
+        metadata: backendCellParams.metadata,
+      };
+
+      onCreateCell(cellParams);
+
+      // Final status updates
+      setIsInvestigationRunning(false); // Investigation is now complete
+      setCurrentStatus("Investigation complete.");
+
+      if (event.error) {
+        toast({
+          title: "Investigation Complete (with Summary Issue)",
+          description: `Investigation finished, but there was an issue generating the summary: ${event.error}`,
+        });
+      } else {
+        toast({
+          title: "Investigation Complete",
+          description: "The investigation has finished and the final answer is ready.",
+        });
+      }
+    },
+    [onCreateCell, toast]
+  );
+
+  const handleSummaryCellError = useCallback(
+    (event: SummaryCellErrorEvent) => {
+      const errorMsg = `Failed to create final summary cell: ${event.error}`;
+      console.error(errorMsg);
+      onError(errorMsg); // Propagate error
+      setCurrentStatus("Error creating final summary cell.");
+      setIsInvestigationRunning(false); // Mark as complete even if cell creation failed
 
       toast({
-        title: "Investigation Complete",
-        description: "The investigation has been completed and a summary has been created.",
-      })
+        variant: "destructive",
+        title: "Summary Cell Error",
+        description: errorMsg,
+      });
     },
-    [toast],
-  )
+    [onError, toast]
+  );
+
+  // --- ADDED: GitHub Tool Event Handlers --- 
+  const handleGithubToolCellCreated = useCallback(
+    (event: GithubToolCellCreatedEvent) => {
+      setCurrentStatus(`Completed tool: ${event.tool_name}`);
+
+      const backendCellParams = event.cell_params || {};
+      const backendMetadata = backendCellParams.metadata || {};
+      
+      // Construct CellCreationParams for the frontend store
+      const cellParams: CellCreationParams = {
+        id: event.cell_id,
+        step_id: event.original_plan_step_id, // Link back to original plan step
+        type: "github", // Explicitly set type
+        content: backendCellParams.content || `GitHub: ${event.tool_name}`, // Use backend content or generate default
+        status: "success", // Tool execution was successful
+        result: event.result, // The actual result data from the tool
+        error: undefined,
+        // Combine metadata from backend params and event details
+        metadata: {
+          ...backendMetadata,
+          tool_name: event.tool_name,
+          tool_args: event.tool_args,
+          tool_call_record_id: event.tool_call_record_id,
+          pydantic_ai_tool_call_id: backendMetadata.pydantic_ai_tool_call_id, // Get original ID if present
+          source_agent: event.agent_type,
+        },
+      };
+
+      onCreateCell(cellParams);
+
+      toast({
+        title: "GitHub Tool Completed",
+        description: `Tool '${event.tool_name}' executed successfully.`,
+      });
+    },
+    [onCreateCell, toast]
+  );
+
+  const handleGithubToolError = useCallback(
+    (event: GithubToolErrorEvent) => {
+      const errorMsg = `GitHub tool '${event.tool_name || 'unknown'} failed: ${event.error}`;
+      console.error(errorMsg);
+      onError(errorMsg); // Propagate error
+      setCurrentStatus(`Error executing tool: ${event.tool_name || 'unknown'}`);
+      // No cell is created for tool errors
+
+      toast({
+        variant: "destructive",
+        title: "GitHub Tool Error",
+        description: errorMsg,
+      });
+    },
+    [onError, toast]
+  );
+  // --- END ADDED ---
+
+  // Placeholder for handling intermediate step updates (like GitHub status)
+  const handleStepUpdate = useCallback((event: any) => {
+    // Example: Update cell status visually if needed
+    const stepId = event.type.split('_')[1]; // Extract step ID
+    const updateInfo = event.update_info;
+    console.log(`Received update for step ${stepId}:`, updateInfo);
+    // Find the corresponding cell and update its status/display?
+    // This might require finding the cellId associated with the stepId
+    // and calling onUpdateCell. Needs more logic based on how cell IDs map to step IDs.
+    // For now, just log it.
+    setCurrentStatus(`Updating step ${stepId}: ${updateInfo?.message || updateInfo?.status || '...'}`);
+  }, [onUpdateCell]); // Add dependencies if it interacts with state/props
 
   // Handle error event
   const handleError = useCallback(

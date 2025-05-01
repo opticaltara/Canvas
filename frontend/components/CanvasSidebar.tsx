@@ -20,12 +20,33 @@ import { Search, Plus, MoreVertical, Trash2, FileText, ChevronLeft, ChevronRight
 import { api } from "@/api/client"
 import { useToast } from "@/hooks/use-toast"
 
+// Define a type for the raw notebook data structure from the API
+interface RawNotebook {
+  id: string
+  metadata?: {
+    title?: string
+    description?: string
+    created_at?: string
+    updated_at?: string
+    [key: string]: any // Allow other potential metadata fields
+  }
+  created_at?: string
+  updated_at?: string
+  // Include other top-level fields returned by the API
+  [key: string]: any // Allow other potential top-level fields
+}
+
+// Keep the desired Canvas interface for the component's state
 interface Canvas {
   id: string
-  name: string
-  description?: string
-  created_at: string
-  updated_at: string
+  metadata: {
+    title: string
+    description?: string
+    created_at: string
+    updated_at: string
+  }
+  created_at: string // Keep top-level if needed elsewhere
+  updated_at: string // Keep top-level if needed elsewhere
 }
 
 export default function CanvasSidebar() {
@@ -44,16 +65,35 @@ export default function CanvasSidebar() {
   // Add state for sidebar collapse
   const [isCollapsed, setIsCollapsed] = useState(false)
 
+  // Helper to safely format RawNotebook to Canvas
+  const formatNotebookToCanvas = (notebook: RawNotebook): Canvas => {
+    const now = new Date().toISOString();
+    const meta = notebook.metadata || {};
+    return {
+      id: notebook.id,
+      metadata: {
+        title: meta.title ?? 'Untitled Canvas',
+        description: meta.description,
+        created_at: meta.created_at ?? now,
+        updated_at: meta.updated_at ?? now,
+      },
+      created_at: notebook.created_at ?? meta.created_at ?? now,
+      updated_at: notebook.updated_at ?? meta.updated_at ?? now,
+    };
+  };
+
   // Fetch canvases
   useEffect(() => {
     const fetchCanvases = async () => {
       try {
         setLoading(true)
         console.log("Fetching notebooks with api:", api.notebooks)
-        const notebooks = await api.notebooks.list()
-        console.log("Fetched notebooks:", notebooks)
-        setCanvases(notebooks)
-        setFilteredCanvases(notebooks)
+        // Assuming api.notebooks.list() returns RawNotebook[] or similar
+        const rawNotebooks: RawNotebook[] = await api.notebooks.list()
+        console.log("Fetched raw notebooks:", rawNotebooks)
+        const formattedCanvases: Canvas[] = rawNotebooks.map(formatNotebookToCanvas)
+        setCanvases(formattedCanvases)
+        setFilteredCanvases(formattedCanvases)
       } catch (error) {
         console.error("Failed to fetch canvases:", error)
         toast({
@@ -67,14 +107,16 @@ export default function CanvasSidebar() {
     }
 
     fetchCanvases()
-  }, [toast])
+  }, [toast]) // Removed formatNotebookToCanvas from dependency array as it's stable
 
   // Filter canvases based on search query
   useEffect(() => {
     if (!searchQuery.trim()) {
       setFilteredCanvases(canvases)
     } else {
-      const filtered = canvases.filter((canvas) => canvas.name.toLowerCase().includes(searchQuery.toLowerCase()))
+      const filtered = canvases.filter((canvas) =>
+        canvas.metadata.title.toLowerCase().includes(searchQuery.toLowerCase())
+      )
       setFilteredCanvases(filtered)
     }
   }, [searchQuery, canvases])
@@ -84,12 +126,27 @@ export default function CanvasSidebar() {
     if (!newCanvasName.trim()) return
 
     try {
-      const newCanvas = await api.notebooks.create({
-        name: newCanvasName,
+      // Assuming create response structure is similar to list item structure (RawNotebook)
+      const newRawNotebook: RawNotebook = await api.notebooks.create({
+        name: newCanvasName, // API likely expects 'name'/'title' for creation
         description: newCanvasDescription,
+        // Send metadata directly if API expects it
+        // metadata: {
+        //   title: newCanvasName,
+        //   description: newCanvasDescription
+        // }
       })
 
+      // Format the response to match the Canvas interface
+      const newCanvas = formatNotebookToCanvas(newRawNotebook)
+
+      // Update state with the correctly formatted canvas
       setCanvases((prev) => [...prev, newCanvas])
+      // Also update filteredCanvases if search is inactive or matches
+      if (!searchQuery.trim() || newCanvas.metadata.title.toLowerCase().includes(searchQuery.toLowerCase())) {
+        setFilteredCanvases((prev) => [...prev, newCanvas]);
+      }
+
       setNewCanvasName("")
       setNewCanvasDescription("")
       setIsCreateDialogOpen(false)
@@ -99,7 +156,7 @@ export default function CanvasSidebar() {
 
       toast({
         title: "Canvas Created",
-        description: "Your new canvas has been created successfully.",
+        description: `"${newCanvas.metadata.title}" has been created successfully.`,
       })
     } catch (error) {
       console.error("Failed to create canvas:", error)
@@ -115,7 +172,9 @@ export default function CanvasSidebar() {
   const handleDeleteCanvas = async (id: string, name: string) => {
     try {
       await api.notebooks.delete(id)
+      // Update both state arrays
       setCanvases((prev) => prev.filter((canvas) => canvas.id !== id))
+      setFilteredCanvases((prev) => prev.filter((canvas) => canvas.id !== id))
 
       toast({
         title: "Canvas Deleted",
@@ -142,7 +201,8 @@ export default function CanvasSidebar() {
     try {
       return new Date(dateString).toLocaleDateString()
     } catch (error) {
-      return dateString
+      console.error("Error formatting date:", error)
+      return "Invalid Date"
     }
   }
 
@@ -153,27 +213,25 @@ export default function CanvasSidebar() {
 
   return (
     <div
-      className={`h-screen border-r bg-background flex flex-col transition-all duration-300 ${
+      className={`relative h-screen border-r bg-background flex flex-col transition-all duration-300 ${
         isCollapsed ? "w-16" : "w-64"
       }`}
     >
-      {/* Collapse Toggle Button */}
-      <div className="absolute -right-3 top-4 z-10">
-        <Button
-          variant="outline"
-          size="icon"
-          className="h-6 w-6 rounded-full border-gray-200 bg-white shadow-md"
-          onClick={toggleSidebar}
-        >
-          {isCollapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronLeft className="h-3 w-3" />}
-        </Button>
-      </div>
+      {/* Collapse Toggle Button - Positioned relative to the parent */}
+      <Button
+        variant="outline"
+        size="icon"
+        className="absolute top-4 -right-3 z-10 h-6 w-6 rounded-full border-gray-200 bg-white shadow-md"
+        onClick={toggleSidebar}
+      >
+        {isCollapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronLeft className="h-3 w-3" />}
+      </Button>
 
       {/* Sidebar Header */}
       <div className={`p-4 border-b ${isCollapsed ? "flex justify-center" : ""}`}>
         {!isCollapsed && (
           <>
-            <h2 className="text-lg font-semibold mb-4">Canvases</h2>
+            <h2 className="text-lg font-semibold mb-4">Sherlog</h2>
             <div className="relative">
               <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
@@ -185,7 +243,7 @@ export default function CanvasSidebar() {
             </div>
           </>
         )}
-        {isCollapsed && <FileText className="h-5 w-5 text-muted-foreground" />}
+        {isCollapsed && <span className="font-bold text-lg text-green-700">S</span>}
       </div>
 
       {/* Canvas List */}
@@ -207,9 +265,9 @@ export default function CanvasSidebar() {
                   <Link href={`/canvas/${canvas.id}`} className="flex items-center flex-1 min-w-0">
                     <FileText className="h-4 w-4 mr-2 text-muted-foreground" />
                     {!isCollapsed && (
-                      <div className="truncate">
-                        <div className="font-medium truncate">{canvas.name}</div>
-                        <div className="text-xs text-muted-foreground">{formatDate(canvas.updated_at)}</div>
+                      <div className="truncate text-foreground">
+                        <div className="font-medium truncate">{canvas.metadata.title}</div>
+                        <div className="text-xs text-muted-foreground">{formatDate(canvas.metadata.updated_at)}</div>
                       </div>
                     )}
                   </Link>
@@ -224,7 +282,7 @@ export default function CanvasSidebar() {
                       <DropdownMenuContent align="end">
                         <DropdownMenuItem
                           className="text-destructive focus:text-destructive"
-                          onClick={() => handleDeleteCanvas(canvas.id, canvas.name)}
+                          onClick={() => handleDeleteCanvas(canvas.id, canvas.metadata.title)}
                         >
                           <Trash2 className="h-4 w-4 mr-2" />
                           Delete

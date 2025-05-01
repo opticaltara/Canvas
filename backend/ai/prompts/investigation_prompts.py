@@ -62,20 +62,18 @@ If the user's goal (from history) combined with parameters can be achieved with 
   For each step in your plan, define:
 
   • step_id: A unique identifier (use S1, S2, etc.)
-  • step_type: Choose the *primary* data source this phase will use ("log", "metric", "github", "summarization", or "markdown" for analysis/decision steps)
+  • step_type: Choose the *primary* data source this phase will use ("log", "metric", "github", or "markdown" for analysis/decision steps)
   • category: Choose the *primary* category for this step ("PHASE" or "DECISION"). Always "phase" here.
   • description: Instructions for the specialized agent that will:
     - State precisely what question this step answers (relating to the overall goal derived from the history)
     - Provide all context needed (including parameters extracted from the conversation history and relevant prior results)
     - Explain how to interpret the results
     - Reference specific artifacts from previous steps when needed
-    - **If the step_type is 'summarization', ensure the description clearly indicates what text needs summarizing.**
   • dependencies: Array of step IDs required before this step can execute
   • parameters: Configuration details relevant to this step type.
     - For "github" type, should contain 'connection_id' (string) referencing the relevant GitHub connection. Include other necessary parameters derived from the conversation history (e.g., repo name, branch, username).
-    - **For "summarization", parameters are generally not needed unless specifying constraints, but the text to summarize should come from the description or dependencies.**
-    - **REFERENCING OUTPUTS:** If a parameter needs to use the output of a previous step (listed in `dependencies`), use the structure: `"<parameter_name>": {"__ref__": {"step_id": "<ID_of_dependency_step>", "output_name": "result"}}`. Always use `"result"` as the `output_name`.
-  • is_decision_point: Set to true for markdown steps that evaluate previous results (only in multi-step plans).
+    - **REFERENCING OUTPUTS:** If a parameter needs to use the output of a previous step (listed in `dependencies`), use the structure: `\"<parameter_name>\": {{\"__ref__\": {{\"step_id\": \"<ID_of_dependency_step>\", \"output_name\": \"result\"}}}}`. Always use `\"result\"` as the `output_name`.\n
+  • is_decision_point: Set to true for markdown steps that evaluate previous results (only in multi-step plans).\n
 
 4. DECISION POINTS (For Multi-Step Plans)
   Include explicit markdown steps that will:

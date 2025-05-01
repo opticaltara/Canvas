@@ -41,6 +41,8 @@ const handleStreamingResponse = async (
 
       console.log("Parsed agent response content:", contentObj)
 
+      // REMOVED: GitHub specific cell creation logic is now handled by useInvestigationEvents
+      /*
       // Check if this is a final response containing successful tool calls to be turned into cells
       if (
         contentObj.type === "cell_response" &&
@@ -107,11 +109,12 @@ const handleStreamingResponse = async (
         message.content = JSON.stringify({ type: "status", message: `Generated ${contentObj.result.tool_calls.length} GitHub cells.` })
 
 
-      } else if (
+      } else */ if ( // Keep the standard cell creation logic (for plan/summary cells)
         contentObj.type === "cell_response" &&
         contentObj.cell_params &&
-        ["plan_cell_created", "summary_created"].includes(contentObj.status_type) &&
-        contentObj.agent_type !== "github" // Make sure the old logic doesn't apply to github agent final messages
+        ["plan_cell_created", "summary_cell_created", "step_completed"].includes(contentObj.status_type)
+        // REMOVED: agent_type check - this should apply to any non-GitHub cell creation event
+        // && contentObj.agent_type !== "github" 
       ) {
         // --- Keep existing logic for non-GitHub agents or other message types ---
         const { notebook_id, cell_type, content, metadata, position } = contentObj.cell_params

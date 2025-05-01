@@ -13,6 +13,8 @@ from typing import Dict, List, Optional, Any, Tuple, AsyncGenerator
 from datetime import datetime, timezone
 from pathlib import Path
 import asyncio
+import redis.asyncio as redis
+from redis.asyncio.client import Redis as AsyncRedis
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
@@ -171,13 +173,16 @@ class ChatAgentService:
     def __init__(
         self,
         notebook_manager: NotebookManager,
-        connection_manager: Optional[ConnectionManager] = None # Allow None initially
+        connection_manager: Optional[ConnectionManager] = None, # Allow None initially
+        redis_client: Optional[AsyncRedis] = None # Use imported class alias
     ):
         self.settings = get_settings()
         chat_agent_logger.info(f"Instantiating ChatAgentService (initialization pending)...")
         self.notebook_manager = notebook_manager
         # Store connection manager instance, get default if not provided
         self._connection_manager = connection_manager or get_connection_manager()
+        # Store the redis client
+        self.redis_client = redis_client
 
         # Initialize state variables to None, will be set in initialize()
         self.notebook_id: Optional[str] = None
@@ -306,20 +311,40 @@ class ChatAgentService:
         start_time = time.time()
         
         try:
-
-            # Check if the last message was a clarification request from this agent
-            should_skip_clarification = False
-            if message_history:
-                # Check the message *before* the current user prompt in the history
-                if len(message_history) > 1:
-                   last_model_message = message_history[-2] # Corrected index
-                   if (isinstance(last_model_message, ModelResponse) and 
-                       last_model_message.parts and 
-                       isinstance(last_model_message.parts[0], StatusResponsePart) and
-                       last_model_message.parts[0].agent_type == 'chat_agent'):
-                       chat_agent_logger.info(f"Last model message was a clarification request, skipping new check for session {session_id}.")
-                       should_skip_clarification = True
+            # Define Redis key for the skip flag
+            redis_skip_key = f"skip_clarification:{session_id}"
+            CLARIFICATION_SKIP_TTL = 300 # 5 minutes
             
+            # --- Check Redis FIRST --- 
+            should_skip_clarification = False
+            if self.redis_client:
+                try:
+                    skip_flag = await self.redis_client.get(redis_skip_key)
+                    if skip_flag == "True":
+                        chat_agent_logger.info(f"Redis flag found, skipping clarification check for session {session_id}.")
+                        should_skip_clarification = True
+                        # Consume the flag
+                        await self.redis_client.delete(redis_skip_key)
+                except redis.RedisError as redis_err:
+                    chat_agent_logger.warning(f"Redis error checking skip flag for session {session_id}: {redis_err}. Proceeding without skip.")
+            else:
+                 chat_agent_logger.warning(f"Redis client not available in ChatAgentService for session {session_id}. Cannot check skip flag.")
+
+            # --- Original History Check (Optional Fallback - can be removed if Redis is reliable) --- 
+            # If Redis didn't tell us to skip, we can still check history as a fallback
+            # Remove this block if you want to rely purely on the Redis flag.
+            if not should_skip_clarification:
+                if message_history and len(message_history) > 1:
+                    last_model_message = message_history[-2]
+                    if (isinstance(last_model_message, ModelResponse) and
+                        last_model_message.parts and
+                        isinstance(last_model_message.parts[0], StatusResponsePart) and
+                        last_model_message.parts[0].agent_type == 'chat_agent'):
+                        chat_agent_logger.info(f"DB History indicates last message was clarification, setting skip flag (Redis flag was missing/expired). Session: {session_id}")
+                        should_skip_clarification = True
+            # --- End Optional History Check --- 
+
+            # ---> Run Clarification Agent only if NOT skipping <--- 
             if not should_skip_clarification:
                 chat_agent_logger.info(f"Checking if clarification is needed for session {session_id}...")
                 # Construct the prompt for clarification assessment based on the full context
@@ -331,17 +356,17 @@ class ChatAgentService:
                     f"If the latest user message sufficiently answers the previous clarification or provides enough information to take the *next step*, then DO NOT ask for clarification again (needs_clarification: false). "
                     f"Only ask for clarification (needs_clarification: true) if the request *remains* genuinely ambiguous or is *still* missing essential details *despite* the user's last message."
                 )
-                
+
                 # Log the history being passed to the clarification check
                 chat_agent_logger.info(f"Message history for clarification check (session {session_id}): {len(message_history)} messages.")
                 if message_history: # Log the last message if history is not empty
                     chat_agent_logger.info(f"Last message in history for clarification: {str(message_history[-1])}")
-                    
+
                 try:
                     # Call the correctly typed agent
                     clarification_run_result = await self.chat_agent.run(
                         clarification_assessment_prompt,
-                        message_history=message_history,
+                        message_history=message_history, # History includes user's LATEST reply here
                     )
                     # Access the actual output model from the result
                     clarification_output: ClarificationResult = clarification_run_result.output
@@ -352,76 +377,99 @@ class ChatAgentService:
                     return
 
                 chat_agent_logger.info(f"Clarification check completed. Result: {clarification_output.needs_clarification}")
-                
+
                 if clarification_output.needs_clarification and clarification_output.clarification_message:
                     chat_agent_logger.info(f"Asking for clarification: {clarification_output.clarification_message}")
+                    
+                    # --- SET Redis Flag BEFORE yielding --- 
+                    if self.redis_client:
+                        try:
+                             await self.redis_client.set(redis_skip_key, "True", ex=CLARIFICATION_SKIP_TTL)
+                             chat_agent_logger.info(f"Set Redis skip flag for session {session_id} with TTL {CLARIFICATION_SKIP_TTL}s.")
+                        except redis.RedisError as redis_err:
+                             chat_agent_logger.warning(f"Redis error setting skip flag for session {session_id}: {redis_err}")
+                    # --- End SET Redis Flag ---
+                    
                     clarification_response = ModelResponse(
                         parts=[StatusResponsePart(
                             content=clarification_output.clarification_message,
-                            agent_type="chat_agent"
+                            agent_type="chat_agent" # Mark as chat_agent response
                         )],
                         timestamp=datetime.now(timezone.utc)
                     )
                     yield "clarification", clarification_response
-                    return
+                    return # Exit after asking for clarification
 
-            # If clarification wasn't needed or was skipped, proceed to investigation
-            chat_agent_logger.info(f"Starting investigation for prompt: '{prompt}' in session {session_id}")
-            async for status_type, status in self.ai_agent.investigate(
-                prompt,
+            # If clarification wasn't needed OR was skipped (by Redis or History check), proceed to investigation
+            if should_skip_clarification:
+                 log_msg = f"Proceeding to investigation for session {session_id} (Clarification skipped)."
+            else:
+                 log_msg = f"Proceeding to investigation for session {session_id} (Clarification not needed)."
+            chat_agent_logger.info(log_msg)
+            
+            # ---> Investigation block starts here <---
+            # Make sure to pass the correct prompt (prompt_to_use includes context)
+            # Ensure message_history includes the user's latest reply which might be the clarification
+            async for status_dict in self.ai_agent.investigate(
+                prompt, # Pass the potentially context-enhanced prompt
                 session_id,
                 notebook_id=self.notebook_id,
-                message_history=message_history,
+                message_history=message_history, # Pass history including the user's latest message
                 cell_tools=self.cell_tools
             ):
-                chat_agent_logger.info(f"Yielding status update for session {session_id}. Type: {status_type}")
-                chat_agent_logger.info(f"Received status dictionary for {status_type}: {status}")
+                # Extract event type from the dict itself
+                event_type = status_dict.get('type', 'unknown_event') # Use 'type' key
+                chat_agent_logger.info(f"Yielding status update for session {session_id}. Type: {event_type}")
+                chat_agent_logger.info(f"Received status dictionary for {event_type}: {status_dict}")
                 
-                # Check if the status_type indicates an event that should create a cell response
+                # Determine if it's a cell event based on the type key
                 is_cell_event = (
-                    status_type.endswith("_completed") or 
-                    status_type.endswith("_error") or 
-                    status_type == "plan_cell_created" or 
-                    status_type == "summary_created"
+                    event_type.startswith("step_") or 
+                    event_type == "plan_cell_created" or 
+                    event_type == "summary_cell_created" or
+                    event_type == "github_tool_cell_created"
                 )
                 
-                if is_cell_event and 'cell_params' in status:
-                    chat_agent_logger.info(f"Creating CellResponsePart for {status_type}")
+                # Use status_dict instead of status
+                if is_cell_event and 'cell_params' in status_dict:
+                    chat_agent_logger.info(f"Creating CellResponsePart for {event_type}")
                     # Format as CellResponsePart if it's a cell event and has params
                     response = ModelResponse(
                         parts=[CellResponsePart(
-                            cell_id=status.get('cell_id', ''),
-                            cell_params=status.get('cell_params', {}),
-                            status_type=status.get('status', status_type), # Use status['status'] if available, else status_type
-                            agent_type=status.get('agent_type', 'unknown'),
-                            result=status.get('result', None)
+                            cell_id=status_dict.get('cell_id', ''),
+                            cell_params=status_dict.get('cell_params', {}),
+                            # Use status from dict if available, else event_type
+                            status_type=status_dict.get('status', event_type), 
+                            agent_type=status_dict.get('agent_type', 'unknown'),
+                            result=status_dict.get('result', None)
                         )],
                         timestamp=datetime.now(timezone.utc)
                     )
                 else:
-                    chat_agent_logger.info(f"Creating StatusResponsePart for {status_type} (is_cell_event={is_cell_event}, has_cell_params={'cell_params' in status})")
+                    chat_agent_logger.info(f"Creating StatusResponsePart for {event_type} (is_cell_event={is_cell_event}, has_cell_params={'cell_params' in status_dict})")
                     # Otherwise, format as StatusResponsePart
-                    update_info = status.get('update_info')
-                    # Default content from status['status'] or the status_type itself
-                    content_message = f"Status: {status.get('status', status_type)}"
+                    update_info = status_dict.get('update_info')
+                    # Default content from status_dict['status'] or the event_type itself
+                    content_message = f"Status: {status_dict.get('status', event_type)}"
                     
-                    # Try getting more specific message from update_info if available
+                    # Try getting more specific message from update_info or top level
                     if isinstance(update_info, dict):
                         content_message = update_info.get('message', update_info.get('error', content_message))
-                    elif isinstance(status.get("message"), str): # Check for top-level message/error too
-                        content_message = status["message"]
-                    elif isinstance(status.get("error"), str):
-                        content_message = status["error"]
+                    elif isinstance(status_dict.get("message"), str):
+                        content_message = status_dict["message"]
+                    elif isinstance(status_dict.get("error"), str):
+                        content_message = status_dict["error"]
                     
                     response = ModelResponse(
                         parts=[StatusResponsePart(
                             content=content_message,
-                            agent_type=status.get('agent_type', 'unknown')
+                            agent_type=status_dict.get('agent_type', 'unknown')
                         )],
                         timestamp=datetime.now(timezone.utc)
                     )
                 
-                yield status_type, response
+                # Yield the original event type string and the response object
+                yield event_type, response
             
             response_time = time.time() - start_time
             chat_agent_logger.info(

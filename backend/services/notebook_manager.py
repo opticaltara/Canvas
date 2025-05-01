@@ -31,33 +31,36 @@ class CorrelationIdFilter(logging.Filter):
 # Add the filter to our logger
 logger.addFilter(CorrelationIdFilter())
 
-# Singleton instance
-_notebook_manager_instance = None
-
+# Type hint for session dependency
+DbSession = Session
 
 def get_notebook_manager():
-    """Get the singleton NotebookManager instance"""
-    global _notebook_manager_instance
-    if _notebook_manager_instance is None:
-        _notebook_manager_instance = NotebookManager()
-    return _notebook_manager_instance
+    """Factory function to get a NotebookManager instance."""
+    # global _notebook_manager_instance
+    # if _notebook_manager_instance is None:
+    #     _notebook_manager_instance = NotebookManager()
+    # return _notebook_manager_instance
+    # Return a new instance each time
+    return NotebookManager()
 
 
 class NotebookManager:
     """
-    Manages notebook instances and their persistence
+    Service layer for managing notebooks.
+    Handles interactions between API/agents and the database repository.
+    Database session is injected per method call.
     """
     def __init__(self):
         correlation_id = str(uuid4())
         self.settings = get_settings()
         self.notify_callback: Optional[Callable] = None
         
-        # Get a session from the generator and initialize repository
-        session_generator = get_db()
-        self.db: Session = next(session_generator)
-        self.repository = NotebookRepository(self.db)
+        # REMOVED: Session and Repository initialization moved to methods
+        # session_generator = get_db()
+        # self.db: Session = next(session_generator)
+        # self.repository = NotebookRepository(self.db)
         
-        logger.info("NotebookManager initialized", extra={'correlation_id': correlation_id})
+        logger.info("NotebookManager instance created", extra={'correlation_id': correlation_id})
     
     def set_notify_callback(self, callback: Callable) -> None:
         """
@@ -68,23 +71,16 @@ class NotebookManager:
         """
         self.notify_callback = callback
     
-    def create_notebook(self, name: str, description: Optional[str] = None, metadata: Optional[Dict] = None) -> Notebook:
-        """
-        Create a new notebook
-        
-        Args:
-            name: The name of the notebook
-            description: Optional description
-            metadata: Optional metadata
-            
-        Returns:
-            The created notebook
-        """
+    def create_notebook(self, db: DbSession, name: str, description: Optional[str] = None, metadata: Optional[Dict] = None) -> Notebook:
+        """Create a new notebook"""
         correlation_id = str(uuid4())
         logger.info(f"Creating new notebook with name '{name}'", extra={'correlation_id': correlation_id})
         
+        # Instantiate repository locally
+        repository = NotebookRepository(db)
+
         # Create notebook in database
-        db_notebook = self.repository.create_notebook(
+        db_notebook = repository.create_notebook(
             title=name,
             description=description,
             created_by=metadata.get("created_by") if metadata else None,
@@ -94,37 +90,17 @@ class NotebookManager:
         # Get data as dictionary from to_dict
         notebook_data = db_notebook.to_dict()
         
-        # Create notebook model with values from dictionary and default values for datetimes if needed
-        notebook = Notebook(
-            id=UUID(notebook_data["id"]),
-            metadata=NotebookMetadata(
-                title=notebook_data["metadata"]["title"],
-                description=notebook_data["metadata"]["description"],
-                created_by=notebook_data["metadata"]["created_by"],
-                created_at=datetime.fromisoformat(notebook_data["metadata"]["created_at"]) if notebook_data["metadata"]["created_at"] else datetime.now(timezone.utc),
-                updated_at=datetime.fromisoformat(notebook_data["metadata"]["updated_at"]) if notebook_data["metadata"]["updated_at"] else datetime.now(timezone.utc),
-                tags=notebook_data["metadata"]["tags"]
-            )
-        )
-        
+        # Create notebook model 
+        notebook = self._db_notebook_to_model(db_notebook) # Use helper
+
         logger.info(f"Successfully created notebook {notebook.id}", extra={'correlation_id': correlation_id})
-        
         return notebook
     
-    def get_notebook(self, notebook_id: UUID) -> Notebook:
-        """
-        Get a notebook by ID
-        
-        Args:
-            notebook_id: The ID of the notebook
-            
-        Returns:
-            The notebook
-            
-        Raises:
-            KeyError: If the notebook is not found
-        """
-        db_notebook = self.repository.get_notebook(str(notebook_id))
+    def get_notebook(self, db: DbSession, notebook_id: UUID) -> Notebook:
+        """Get a notebook by ID"""
+        # Instantiate repository locally
+        repository = NotebookRepository(db)
+        db_notebook = repository.get_notebook(str(notebook_id))
         if not db_notebook:
             logger.error(f"Notebook {notebook_id} not found")
             raise KeyError(f"Notebook {notebook_id} not found")
@@ -134,77 +110,114 @@ class NotebookManager:
         logger.info(f"Retrieved notebook {notebook_id}")
         return notebook
     
-    def list_notebooks(self) -> List[Notebook]:
-        """
-        Get a list of all notebooks
-        
-        Returns:
-            List of notebooks
-        """
-        db_notebooks = self.repository.list_notebooks()
+    def list_notebooks(self, db: DbSession) -> List[Notebook]:
+        """Get a list of all notebooks"""
+        # Instantiate repository locally
+        repository = NotebookRepository(db)
+        db_notebooks = repository.list_notebooks()
         return [self._db_notebook_to_model(db_notebook) for db_notebook in db_notebooks]
     
-    def save_notebook(self, notebook_id: UUID) -> None:
+    def save_notebook(self, db: DbSession, notebook_id: UUID, notebook: Notebook) -> None:
         """
-        Save a notebook to storage
-        
+        Save the complete state of a Notebook object to the database.
+        This includes tool call records, cell links, cell order, and timestamps.
+
         Args:
-            notebook_id: The ID of the notebook
+            db: The database session.
+            notebook_id: The ID of the notebook to save.
+            notebook: The Notebook object containing the state to save.
             
         Raises:
-            KeyError: If the notebook is not found
+            KeyError: If the notebook is not found (potentially by repository methods).
+            Exception: If repository methods fail.
         """
-        # This method is now a no-op since changes are saved immediately
-        # to the database in the repository methods
-        pass
+        correlation_id = str(uuid4())
+        logger.info(f"Saving full state for notebook {notebook_id}", extra={'correlation_id': correlation_id})
+        
+        try:
+            # Instantiate repository locally
+            repository = NotebookRepository(db)
+
+            # 1. Save Tool Call Records
+            if notebook.tool_call_records:
+                # Assuming repository has a method like bulk_upsert_tool_call_records
+                # This method needs to be implemented in NotebookRepository
+                logger.debug(f"[{correlation_id}] Saving {len(notebook.tool_call_records)} tool call records...")
+                # repository.bulk_upsert_tool_call_records(list(notebook.tool_call_records.values())) 
+                # Placeholder log until repository method is implemented:
+                logger.info(f"[{correlation_id}] Placeholder: Would save {len(notebook.tool_call_records)} tool call records.")
+            else:
+                logger.debug(f"[{correlation_id}] No tool call records to save.")
+
+            # 2. Save Cell Links (tool_call_ids)
+            cell_updates: Dict[str, List[UUID]] = {}
+            for cell in notebook.cells.values():
+                if cell.tool_call_ids: # Only update if there are links
+                     cell_updates[str(cell.id)] = cell.tool_call_ids
+            
+            if cell_updates:
+                # Assuming repository has a method like bulk_update_cell_tool_call_ids
+                # This method needs to be implemented in NotebookRepository
+                logger.debug(f"[{correlation_id}] Saving tool call links for {len(cell_updates)} cells...")
+                # repository.bulk_update_cell_tool_call_ids(cell_updates)
+                # Placeholder log until repository method is implemented:
+                logger.info(f"[{correlation_id}] Placeholder: Would update tool links for cells: {list(cell_updates.keys())}")
+            else:
+                 logger.debug(f"[{correlation_id}] No cell tool links to update.")
+
+            # 3. Save Cell Order
+            if notebook.cell_order:
+                # Assuming repository has a method like update_cell_order
+                # This method needs to be implemented in NotebookRepository
+                str_cell_order = [str(cell_id) for cell_id in notebook.cell_order]
+                logger.debug(f"[{correlation_id}] Saving cell order: {str_cell_order}")
+                # repository.update_cell_order(str(notebook_id), str_cell_order)
+                # Placeholder log until repository method is implemented:
+                logger.info(f"[{correlation_id}] Placeholder: Would save cell order.")
+            else:
+                 logger.debug(f"[{correlation_id}] No cell order provided to save.")
+                 
+            # 4. Update Notebook Timestamp
+            # Assuming repository has update_notebook_timestamp or similar
+            logger.debug(f"[{correlation_id}] Updating notebook timestamp...")
+            # repository.update_notebook_timestamp(str(notebook_id))
+            # Placeholder log until repository method is implemented:
+            logger.info(f"[{correlation_id}] Placeholder: Would update notebook timestamp.")
+
+            logger.info(f"Successfully completed save operations for notebook {notebook_id}", extra={'correlation_id': correlation_id})
+
+        except Exception as e:
+            logger.error(f"Error saving full state for notebook {notebook_id}: {e}", extra={'correlation_id': correlation_id}, exc_info=True)
+            # Re-raise the exception to be handled by the caller
+            raise
     
-    def delete_notebook(self, notebook_id: UUID) -> None:
-        """
-        Delete a notebook
-        
-        Args:
-            notebook_id: The ID of the notebook
-            
-        Raises:
-            KeyError: If the notebook is not found
-        """
-        success = self.repository.delete_notebook(str(notebook_id))
+    def delete_notebook(self, db: DbSession, notebook_id: UUID) -> None:
+        """Delete a notebook"""
+        # Instantiate repository locally
+        repository = NotebookRepository(db)
+        success = repository.delete_notebook(str(notebook_id))
         if not success:
             logger.error(f"Cannot delete notebook {notebook_id}: not found")
             raise KeyError(f"Notebook {notebook_id} not found")
-        
         logger.info(f"Successfully deleted notebook {notebook_id}")
     
-    def create_cell(self, notebook_id: UUID, cell_type: CellType, content: str, 
+    def create_cell(self, db: DbSession, notebook_id: UUID, cell_type: CellType, content: str, 
                     position: Optional[int] = None, connection_id: Optional[str] = None,
                     metadata: Optional[Dict] = None, settings: Optional[Dict] = None) -> Cell:
-        """
-        Create a new cell in a notebook
+        """Create a new cell in a notebook"""
+        # Instantiate repository locally
+        repository = NotebookRepository(db)
         
-        Args:
-            notebook_id: ID of the notebook
-            cell_type: Type of cell to create
-            content: Content for the cell
-            position: Optional position in the cell order
-            connection_id: Optional connection ID
-            metadata: Optional metadata
-            settings: Optional settings
-            
-        Returns:
-            The created cell
-            
-        Raises:
-            KeyError: If the notebook is not found
-        """
-        # Get notebook to verify it exists
-        notebook = self.get_notebook(notebook_id)
+        # Get notebook to determine position if needed (uses its own repository instance)
+        # Note: This might fetch the notebook twice if called right after get_notebook.
+        # Could optimize later if performance becomes an issue.
+        notebook_for_pos = self.get_notebook(db, notebook_id)
         
-        # Determine position
         if position is None:
-            position = len(notebook.cells)
+            position = len(notebook_for_pos.cells)
         
         # Create cell in database
-        db_cell = self.repository.create_cell(
+        db_cell = repository.create_cell(
             notebook_id=str(notebook_id),
             cell_type=cell_type.value,
             content=content,
@@ -217,71 +230,44 @@ class NotebookManager:
         if not db_cell:
             raise KeyError(f"Failed to create cell in notebook {notebook_id}")
         
-        # Convert to model using to_dict
-        cell_dict = db_cell.to_dict()
-        
-        # Create cell model
-        cell = Cell(
-            id=UUID(cell_dict["id"]),
-            type=cell_type,
-            content=content,
-            status=CellStatus(cell_dict["status"]),
-            created_at=datetime.fromisoformat(cell_dict["created_at"]) if cell_dict["created_at"] else datetime.now(timezone.utc),
-            updated_at=datetime.fromisoformat(cell_dict["updated_at"]) if cell_dict["updated_at"] else datetime.now(timezone.utc),
-            connection_id=cell_dict["connection_id"],
-            metadata=cell_dict["metadata"],
-            settings=cell_dict["settings"]
-        )
-        
-        # Add to notebook model
-        notebook.cells[cell.id] = cell
-        if position is not None and 0 <= position <= len(notebook.cell_order):
-            notebook.cell_order.insert(position, cell.id)
-        else:
-            notebook.cell_order.append(cell.id)
+        # Convert to model
+        cell = self._db_cell_to_model(db_cell)
         
         logger.info(f"Created cell {cell.id} in notebook {notebook_id}")
         return cell
     
-    def get_cell(self, cell_id: UUID) -> Cell:
-        """
-        Get a cell by ID
-        
-        Args:
-            cell_id: The ID of the cell
-            
-        Returns:
-            The cell
-            
-        Raises:
-            KeyError: If the cell is not found
-        """
-        db_cell = self.repository.get_cell(str(cell_id))
+    def get_cell(self, db: DbSession, notebook_id: UUID, cell_id: UUID) -> Cell:
+        """Get a cell by ID"""
+        # Instantiate repository locally
+        repository = NotebookRepository(db)
+        db_cell = repository.get_cell(str(cell_id))
         if not db_cell:
             logger.error(f"Cell {cell_id} not found")
             raise KeyError(f"Cell {cell_id} not found")
         
+        # Optional: Verify cell belongs to notebook_id
+        if str(db_cell.notebook_id) != str(notebook_id):
+             logger.error(f"Cell {cell_id} does not belong to notebook {notebook_id}")
+             raise KeyError(f"Cell {cell_id} not found in notebook {notebook_id}")
+
         # Convert to model
         cell = self._db_cell_to_model(db_cell)
         logger.info(f"Retrieved cell {cell_id}")
         return cell
     
-    def update_cell_content(self, cell_id: UUID, content: str) -> Cell:
-        """
-        Update a cell's content
+    def update_cell_content(self, db: DbSession, notebook_id: UUID, cell_id: UUID, content: str) -> Cell:
+        """Update a cell's content"""
+        # Instantiate repository locally
+        repository = NotebookRepository(db)
         
-        Args:
-            cell_id: ID of the cell to update
-            content: New content for the cell
-            
-        Returns:
-            The updated cell
-            
-        Raises:
-            KeyError: If the cell is not found
-        """
+        # Optional: Verify cell belongs to notebook before updating
+        # db_cell_check = repository.get_cell(str(cell_id))
+        # if not db_cell_check or str(db_cell_check.notebook_id) != str(notebook_id):
+        #     logger.error(f"Cell {cell_id} not found in notebook {notebook_id} for update.")
+        #     raise KeyError(f"Cell {cell_id} not found in notebook {notebook_id}")
+
         # Update in database
-        db_cell = self.repository.update_cell(
+        db_cell = repository.update_cell(
             str(cell_id),
             content=content
         )
@@ -290,82 +276,69 @@ class NotebookManager:
             logger.error(f"Cell {cell_id} not found")
             raise KeyError(f"Cell {cell_id} not found")
         
-        # Mark as stale
-        self.repository.mark_cell_stale(str(cell_id))
+        # Mark as stale (also uses the repository)
+        repository.mark_cell_stale(str(cell_id))
         
-        # Convert to model
-        cell = self._db_cell_to_model(db_cell)
+        # Fetch the updated cell again to reflect changes
+        updated_db_cell = repository.get_cell(str(cell_id))
+        if not updated_db_cell:
+             # Should not happen if update succeeded, but handle defensively
+             logger.error(f"Could not re-fetch cell {cell_id} after update.")
+             raise KeyError(f"Could not re-fetch cell {cell_id} after update.")
+
+        cell = self._db_cell_to_model(updated_db_cell)
         logger.info(f"Updated content for cell {cell_id}")
         return cell
     
-    def delete_cell(self, cell_id: UUID) -> None:
-        """
-        Delete a cell
-        
-        Args:
-            cell_id: ID of the cell to delete
-            
-        Raises:
-            KeyError: If the cell is not found
-        """
-        success = self.repository.delete_cell(str(cell_id))
+    def delete_cell(self, db: DbSession, notebook_id: UUID, cell_id: UUID) -> None:
+        """Delete a cell"""
+        # Instantiate repository locally
+        repository = NotebookRepository(db)
+
+        # Optional: Verify cell belongs to notebook before deleting
+        # db_cell_check = repository.get_cell(str(cell_id))
+        # if not db_cell_check or str(db_cell_check.notebook_id) != str(notebook_id):
+        #     logger.error(f"Cell {cell_id} not found in notebook {notebook_id} for deletion.")
+        #     raise KeyError(f"Cell {cell_id} not found in notebook {notebook_id}")
+
+        success = repository.delete_cell(str(cell_id))
         if not success:
             logger.error(f"Cell {cell_id} not found")
             raise KeyError(f"Cell {cell_id} not found")
         
         logger.info(f"Deleted cell {cell_id}")
     
-    def add_dependency(self, dependent_id: UUID, dependency_id: UUID) -> None:
-        """
-        Add a dependency between cells
-        
-        Args:
-            dependent_id: ID of the cell that depends on another
-            dependency_id: ID of the cell that is depended upon
-            
-        Raises:
-            KeyError: If either cell is not found
-        """
-        success = self.repository.add_dependency(str(dependent_id), str(dependency_id))
+    def add_dependency(self, db: DbSession, notebook_id: UUID, dependent_id: UUID, dependency_id: UUID) -> None:
+        """Add a dependency between cells"""
+        # Instantiate repository locally
+        repository = NotebookRepository(db)
+        # Optional: Validate cells belong to the notebook?
+        success = repository.add_dependency(str(dependent_id), str(dependency_id))
         if not success:
             logger.error(f"Failed to add dependency between cells {dependent_id} and {dependency_id}")
             raise KeyError(f"Failed to add dependency between cells {dependent_id} and {dependency_id}")
         
         logger.info(f"Added dependency: {dependent_id} depends on {dependency_id}")
     
-    def remove_dependency(self, dependent_id: UUID, dependency_id: UUID) -> None:
-        """
-        Remove a dependency between cells
-        
-        Args:
-            dependent_id: ID of the cell that depends on another
-            dependency_id: ID of the cell that is depended upon
-            
-        Raises:
-            KeyError: If either cell is not found
-        """
-        success = self.repository.remove_dependency(str(dependent_id), str(dependency_id))
+    def remove_dependency(self, db: DbSession, notebook_id: UUID, dependent_id: UUID, dependency_id: UUID) -> None:
+        """Remove a dependency between cells"""
+        # Instantiate repository locally
+        repository = NotebookRepository(db)
+        # Optional: Validate cells belong to the notebook?
+        success = repository.remove_dependency(str(dependent_id), str(dependency_id))
         if not success:
             logger.error(f"Failed to remove dependency between cells {dependent_id} and {dependency_id}")
             raise KeyError(f"Failed to remove dependency between cells {dependent_id} and {dependency_id}")
         
         logger.info(f"Removed dependency: {dependent_id} no longer depends on {dependency_id}")
     
-    def set_cell_result(self, cell_id: UUID, result: Any, error: Optional[str] = None, 
+    def set_cell_result(self, db: DbSession, notebook_id: UUID, cell_id: UUID, result: Any, error: Optional[str] = None, 
                         execution_time: float = 0.0) -> None:
-        """
-        Set the execution result for a cell
-        
-        Args:
-            cell_id: ID of the cell
-            result: The result data
-            error: Optional error message
-            execution_time: Time taken to execute the cell
-            
-        Raises:
-            KeyError: If the cell is not found
-        """
-        db_cell = self.repository.set_cell_result(
+        """Set the execution result for a cell"""
+        # Instantiate repository locally
+        repository = NotebookRepository(db)
+        # Optional: Validate cell belongs to the notebook?
+        db_cell = repository.set_cell_result(
             str(cell_id),
             content=result,
             error=error,
@@ -378,97 +351,69 @@ class NotebookManager:
         
         logger.info(f"Set result for cell {cell_id}")
     
-    def mark_dependents_stale(self, cell_id: UUID) -> Set[UUID]:
-        """
-        Mark all cells that depend on this cell as stale
-        
-        Args:
-            cell_id: ID of the cell whose dependents should be marked stale
-            
-        Returns:
-            Set of cell IDs that were marked stale
-            
-        Raises:
-            KeyError: If the cell is not found
-        """
+    def mark_dependents_stale(self, db: DbSession, notebook_id: UUID, cell_id: UUID) -> Set[UUID]:
+        """Mark all cells that depend on this cell as stale"""
+        # Instantiate repository locally
+        repository = NotebookRepository(db)
+        # Optional: Validate cell belongs to the notebook?
         # Get dependents from database
-        db_dependents = self.repository.get_dependents(str(cell_id))
+        db_dependents = repository.get_dependents(str(cell_id))
         if not db_dependents:
             return set()
         
         # Mark each dependent as stale
         stale_cells = set()
         for db_dependent in db_dependents:
-            # Convert to dict first
-            dependent_dict = db_dependent.to_dict()
-            self.repository.mark_cell_stale(dependent_dict["id"])
-            stale_cells.add(UUID(dependent_dict["id"]))
+            dependent_id = repository._ensure_str_id(db_dependent.id) # Use repo helper
+            if dependent_id:
+                # Use the same repository instance for marking stale
+                repository.mark_cell_stale(dependent_id) 
+                stale_cells.add(UUID(dependent_id))
         
         logger.info(f"Marked {len(stale_cells)} dependents of cell {cell_id} as stale")
         return stale_cells
-    
-    def reorder_cells(self, notebook_id: UUID, cell_order: List[UUID]) -> None:
-        """
-        Reorder cells in a notebook
-        
-        Args:
-            notebook_id: ID of the notebook
-            cell_order: New order of cell IDs
-            
-        Raises:
-            KeyError: If the notebook is not found
-        """
-        success = self.repository.reorder_cells(
-            str(notebook_id),
-            [str(cell_id) for cell_id in cell_order]
-        )
-        
+
+    def reorder_cells(self, db: DbSession, notebook_id: UUID, cell_order: List[UUID]) -> None:
+        """Reorder cells in a notebook"""
+        # Instantiate repository locally
+        repository = NotebookRepository(db)
+        success = repository.reorder_cells(str(notebook_id), [str(c_id) for c_id in cell_order])
         if not success:
-            logger.error(f"Notebook {notebook_id} not found")
-            raise KeyError(f"Notebook {notebook_id} not found")
-        
+             logger.error(f"Failed to reorder cells in notebook {notebook_id}")
+             raise ValueError(f"Failed to reorder cells in notebook {notebook_id}") # Or specific error
+
         logger.info(f"Reordered cells in notebook {notebook_id}")
     
+    # Helper methods _db_notebook_to_model and _db_cell_to_model do not need DB access directly
+    # They operate on data already fetched from the DB
     def _db_notebook_to_model(self, db_notebook) -> Notebook:
-        """Convert database notebook to model"""
-        # Get cells
-        cells = {}
-        cell_order = []
+        notebook_data = db_notebook.to_dict()
+        cells = {
+             UUID(cell_id): self._db_cell_to_model(cell_obj) 
+             for cell_id, cell_obj in db_notebook.cells.items()
+        } if hasattr(db_notebook, 'cells') and isinstance(db_notebook.cells, dict) else {
+             UUID(cell.id): self._db_cell_to_model(cell) 
+             for cell in getattr(db_notebook, 'cells', []) # Handle relationship list case
+        }
         
-        for db_cell in db_notebook.cells:
-            cell = self._db_cell_to_model(db_cell)
-            cells[cell.id] = cell
-            cell_order.append(cell.id)
-        
-        # Sort cell order by position
-        cell_order.sort(key=lambda cell_id: cells[cell_id].metadata.get("position", 0))
-        
-        # Get data as dict
-        notebook_dict = db_notebook.to_dict()
-        
-        # Create notebook model
-        notebook = Notebook(
-            id=UUID(notebook_dict["id"]),
+        return Notebook(
+            id=UUID(notebook_data["id"]),
             metadata=NotebookMetadata(
-                title=notebook_dict["metadata"]["title"],
-                description=notebook_dict["metadata"]["description"],
-                created_by=notebook_dict["metadata"]["created_by"],
-                created_at=datetime.fromisoformat(notebook_dict["metadata"]["created_at"]) if notebook_dict["metadata"]["created_at"] else datetime.now(timezone.utc),
-                updated_at=datetime.fromisoformat(notebook_dict["metadata"]["updated_at"]) if notebook_dict["metadata"]["updated_at"] else datetime.now(timezone.utc),
-                tags=notebook_dict["metadata"]["tags"]
+                title=notebook_data["metadata"]["title"],
+                description=notebook_data["metadata"]["description"],
+                created_by=notebook_data["metadata"]["created_by"],
+                created_at=datetime.fromisoformat(notebook_data["metadata"]["created_at"]) if notebook_data["metadata"]["created_at"] else datetime.now(timezone.utc),
+                updated_at=datetime.fromisoformat(notebook_data["metadata"]["updated_at"]) if notebook_data["metadata"]["updated_at"] else datetime.now(timezone.utc),
+                tags=notebook_data["metadata"]["tags"]
             ),
-            cells=cells,
-            cell_order=cell_order
+             cells=cells,
+             cell_order=[UUID(cell_id) for cell_id in notebook_data["cell_order"]],
+             # tool_call_records might need loading here if not handled by relationship/to_dict
         )
-        
-        return notebook
-    
+
     def _db_cell_to_model(self, db_cell) -> Cell:
-        """Convert database cell to model"""
-        # Get data as dict
         cell_dict = db_cell.to_dict()
         
-        # Create result if exists
         result = None
         if cell_dict["result"] is not None:
             result = CellResult(
@@ -478,7 +423,6 @@ class NotebookManager:
                 timestamp=datetime.fromisoformat(cell_dict["result"]["timestamp"]) if cell_dict["result"]["timestamp"] else datetime.now(timezone.utc)
             )
         
-        # Create cell model
         cell = Cell(
             id=UUID(cell_dict["id"]),
             type=CellType(cell_dict["type"]),
@@ -498,5 +442,7 @@ class NotebookManager:
         
         for dep_id in cell_dict["dependents"]:
             cell.dependents.add(UUID(dep_id))
+            
+        # tool_call_ids might need loading here if not handled by relationship/to_dict
         
         return cell

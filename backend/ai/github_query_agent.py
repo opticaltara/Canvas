@@ -5,10 +5,10 @@ Agent for handling GitHub interactions via a locally running MCP server.
 """
 
 import logging
-from typing import  Optional, AsyncGenerator, Union, Dict, Any, List
+from typing import  Optional, AsyncGenerator, Dict, Any
 from datetime import datetime, timezone
 import json
-import os # Added import
+import os
 
 from pydantic_ai import Agent, UnexpectedModelBehavior, CallToolsNode
 from pydantic_ai.messages import (
@@ -21,7 +21,6 @@ from pydantic_ai.mcp import MCPServerStdio
 from mcp.shared.exceptions import McpError 
 
 from backend.config import get_settings
-from backend.core.query_result import GithubQueryResult, ToolCallRecord
 from backend.services.connection_manager import get_github_stdio_params
 
 github_query_agent_logger = logging.getLogger("ai.github_query_agent")
@@ -31,7 +30,6 @@ class GitHubQueryAgent:
     def __init__(self, notebook_id: str):
         github_query_agent_logger.info(f"Initializing GitHubQueryAgent for notebook_id: {notebook_id}")
         self.settings = get_settings()
-        # Revert to using standard OpenAIModel
         self.model = OpenAIModel(
                 self.settings.ai_model,
                 provider=OpenAIProvider(
@@ -41,9 +39,6 @@ class GitHubQueryAgent:
         )
         self.notebook_id = notebook_id
         self.agent = None
-        # Add instance variables to store results from the last attempt
-        self._last_run_result: Any = None
-        self._last_successful_calls: List[ToolCallRecord] = []
         github_query_agent_logger.info(f"GitHubQueryAgent initialized successfully (Agent instance created later).")
 
     async def _get_stdio_server(self) -> Optional[MCPServerStdio]:
@@ -69,37 +64,29 @@ class GitHubQueryAgent:
                 return f.read()
         except FileNotFoundError:
             github_query_agent_logger.error(f"System prompt file not found at: {prompt_file_path}")
-            # Return a default minimal prompt as fallback
             return "You are a helpful AI assistant interacting with a GitHub MCP server."
         except Exception as e:
             github_query_agent_logger.error(f"Error reading system prompt file {prompt_file_path}: {e}", exc_info=True)
-            return "You are a helpful AI assistant interacting with a GitHub MCP server." # Fallback
+            return "You are a helpful AI assistant interacting with a GitHub MCP server."
 
     def _initialize_agent(self, stdio_server: MCPServerStdio) -> Agent:
         """Initializes the Pydantic AI Agent with GitHub specific configuration."""
-        # Read system prompt from file
         system_prompt = self._read_system_prompt()
 
-        # Revert Agent instantiation type hint if necessary (or keep previous simple form)
         agent = Agent(
             self.model,
-            output_type=GithubQueryResult,
             mcp_servers=[stdio_server],
             system_prompt=system_prompt,
         )
         github_query_agent_logger.info(f"Agent instance created with MCPServerStdio.")
-        # Add back type: ignore if needed by linter/type checker
-        return agent # type: ignore
+        return agent
 
     async def _run_single_attempt(self, agent: Agent, current_description: str, attempt_num: int) -> AsyncGenerator[Dict[str, Any], None]:
-        """Runs a single attempt of the agent iteration, yielding status updates."""
+        """Runs a single attempt of the agent iteration, yielding status updates and individual tool success/error dictionaries."""
         github_query_agent_logger.info(f"Starting agent iteration attempt {attempt_num}...")
-        yield {"status": "agent_iterating", "attempt": attempt_num, "message": "Agent is processing..."}
+        yield {"type": "status_update", "status": "agent_iterating", "attempt": attempt_num, "message": "Agent is processing..."}
 
-        successful_tool_calls_in_attempt: List[ToolCallRecord] = []
         run_result = None
-        self._last_run_result = None
-        self._last_successful_calls = []
         
         async with agent.iter(current_description) as agent_run:
             pending_tool_calls: Dict[str, Dict[str, Any]] = {}
@@ -116,92 +103,92 @@ class GitHubQueryAgent:
                                     if not tool_name:
                                         github_query_agent_logger.warning(f"Attempt {attempt_num}: ToolCallPart missing 'tool_name'. Part: {event.part!r}")
                                         tool_name = "UnknownTool"
+                                    
+                                    if isinstance(tool_args, str):
+                                        try:
+                                            tool_args = json.loads(tool_args)
+                                        except json.JSONDecodeError as json_err:
+                                            github_query_agent_logger.error(f"Attempt {attempt_num}: Failed to parse tool_args JSON string: {tool_args}. Error: {json_err}")
+                                            tool_args = {}
                                     pending_tool_calls[tool_call_id] = {"tool_name": tool_name, "tool_args": tool_args}
-                                    yield {"status": "tool_call_requested", "attempt": attempt_num, "tool_call_id": tool_call_id, "tool_name": tool_name, "tool_args": tool_args}
+                                    yield {"type": "status_update", "status": "tool_call_requested", "agent_type": "github_agent", "attempt": attempt_num, "tool_call_id": tool_call_id, "tool_name": tool_name, "tool_args": tool_args}
+                                
                                 elif isinstance(event, FunctionToolResultEvent):
                                     tool_call_id = event.tool_call_id
                                     tool_result = event.result.content
                                     if tool_call_id in pending_tool_calls:
                                         call_info = pending_tool_calls.pop(tool_call_id)
                                         args_data = call_info["tool_args"]
-                                        if isinstance(args_data, str):
-                                            try:
-                                                args_data = json.loads(args_data)
-                                            except json.JSONDecodeError as json_err:
-                                                github_query_agent_logger.error(f"Attempt {attempt_num}: Failed to parse tool_args JSON string: {args_data}. Error: {json_err}")
-                                                args_data = {}
-
-                                        record = ToolCallRecord(tool_call_id=tool_call_id, tool_name=call_info["tool_name"], tool_args=args_data, tool_result=tool_result)
-                                        successful_tool_calls_in_attempt.append(record)
-                                        github_query_agent_logger.info(f"Attempt {attempt_num}: Stored tool record: {record}")
+                                        
+                                        yield {
+                                            "type": "status_update",
+                                            "status": "tool_success",
+                                            "agent_type": "github_agent",
+                                            "tool_call_id": tool_call_id,
+                                            "tool_name": call_info["tool_name"],
+                                            "tool_args": args_data,
+                                            "tool_result": tool_result
+                                        }
+                                        github_query_agent_logger.info(f"Attempt {attempt_num}: Yielded success for tool: {call_info['tool_name']} (ID: {tool_call_id})")
                                     else:
                                         github_query_agent_logger.warning(f"Attempt {attempt_num}: Received result for unknown/processed ID: {tool_call_id}")
+                    
+                    except McpError as mcp_err:
+                        error_str = str(mcp_err)
+                        github_query_agent_logger.warning(f"MCPError during CallToolsNode stream in attempt {attempt_num}: {error_str}")
+                        yield {
+                             "type": "tool_error",
+                             "status": "error",
+                             "agent_type": "github_agent",
+                             "tool_call_id": None,
+                             "tool_name": None,
+                             "tool_args": None,
+                             "error": f"MCP Tool Error: {error_str}"
+                         }
+                        raise mcp_err
+
                     except Exception as stream_err:
                         github_query_agent_logger.error(f"Attempt {attempt_num}: Error during CallToolsNode stream: {stream_err}", exc_info=True)
-                        raise stream_err 
+                        yield {
+                            "type": "tool_error",
+                            "status": "error",
+                            "agent_type": "github_agent",
+                            "tool_call_id": None, 
+                            "tool_name": None,
+                            "tool_args": None,
+                            "error": f"Stream Processing Error: {stream_err}"
+                        }
+                        raise stream_err
             
-            run_result = agent_run.result
-            github_query_agent_logger.info(f"Attempt {attempt_num}: Agent iteration finished. Raw result: {run_result}")
+            run_result = agent_run.result 
+            github_query_agent_logger.info(f"Attempt {attempt_num}: Agent iteration finished. Raw final result (less relevant now): {run_result}")
 
-        self._last_run_result = run_result
-        self._last_successful_calls = successful_tool_calls_in_attempt
-
-        yield {"status": "agent_run_complete", "attempt": attempt_num}
-
-    def _process_final_result(self, run_result: Any, successful_tool_calls_in_attempt: List[ToolCallRecord], original_description: str) -> Optional[GithubQueryResult]:
-        """Processes the raw agent result, filters tool calls, and constructs the final GithubQueryResult."""
-        # Access the final output using .output
-        result_data_obj = None
-        if run_result and hasattr(run_result, 'output'):
-            result_data_obj = run_result.output
-        elif run_result:
-            github_query_agent_logger.warning(f"AgentRunResult structure unexpected: {run_result}. Attempting to use directly.")
-            result_data_obj = run_result
-
-        if result_data_obj and isinstance(result_data_obj, GithubQueryResult) and result_data_obj.data is not None:
-            github_query_agent_logger.info(f"Processing GithubQueryResult directly.")
-            final_result_data = result_data_obj
-            final_result_data.query = original_description # Ensure original query is set
-            final_result_data.tool_calls = successful_tool_calls_in_attempt
-            return final_result_data
-        elif result_data_obj is not None:
-            github_query_agent_logger.info(f"Wrapping non-GithubQueryResult data: {type(result_data_obj)}.")
-            final_result_data = GithubQueryResult(
-                query=original_description, 
-                data=result_data_obj,
-                tool_calls=successful_tool_calls_in_attempt
-            )
-            return final_result_data
-        else:
-            github_query_agent_logger.error(f"Final data object from agent run was None or invalid. Raw run_result: {run_result}")
-            return None
+        yield {"type": "status_update", "status": "agent_run_complete", "agent_type": "github_agent", "attempt": attempt_num}
 
     async def run_query(
         self,
         description: str,
-    ) -> AsyncGenerator[Union[Dict[str, Any], GithubQueryResult], None]:
-        """Run a query (natural language request) against the GitHub MCP server via stdio, yielding status updates."""
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Run a query (natural language request) against the GitHub MCP server via stdio, yielding status updates and individual tool results/errors."""
         github_query_agent_logger.info(f"Running GitHub query. Original description: '{description}'")
-        yield {"status": "starting", "message": "Initializing GitHub connection..."}
+        yield {"type": "status_update", "status": "starting", "agent_type": "github_agent", "message": "Initializing GitHub connection..."}
         
         stdio_server = await self._get_stdio_server()
         if not stdio_server:
             error_msg = "Failed to configure GitHub MCP stdio server. Check default connection and configuration."
             github_query_agent_logger.error(error_msg)
-            yield {"status": "error", "message": error_msg}
-            yield GithubQueryResult(query=description, data=None, error=error_msg) # Yield final error result
+            yield {"type": "tool_error", "status": "error", "agent_type": "github_agent", "error": error_msg, "message": error_msg}
             return
             
-        yield {"status": "connection_ready", "message": "GitHub connection established."}
+        yield {"type": "status_update", "status": "connection_ready", "agent_type": "github_agent", "message": "GitHub connection established."}
         
         try:
             agent = self._initialize_agent(stdio_server)
-            yield {"status": "agent_created", "message": "GitHub agent ready."}
+            yield {"type": "status_update", "status": "agent_created", "agent_type": "github_agent", "message": "GitHub agent ready."}
         except Exception as init_err:
             error_msg = f"Failed to initialize GitHub Agent: {init_err}"
             github_query_agent_logger.error(error_msg, exc_info=True)
-            yield {"status": "error", "message": error_msg}
-            yield GithubQueryResult(query=description, data=None, error=error_msg)
+            yield {"type": "tool_error", "status": "error", "agent_type": "github_agent", "error": error_msg, "message": error_msg}
             return
             
         current_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S %Z')
@@ -210,132 +197,111 @@ class GitHubQueryAgent:
         
         max_attempts = 5
         last_error = None
-        final_result_data: Optional[GithubQueryResult] = None
-        attempt_completed = 0 # Track last completed attempt number for logging
+        attempt_completed = 0
+        success_occurred = False
 
-        yield {"status": "starting_attempts", "message": f"Attempting GitHub query (max {max_attempts} attempts)..."}
+        yield {"type": "status_update", "status": "starting_attempts", "agent_type": "github_agent", "message": f"Attempting GitHub query (max {max_attempts} attempts)..."}
 
-        # Wrap the MCP server management and loop logic in a try block
         try:
             for attempt in range(max_attempts):
                 attempt_completed = attempt + 1
                 github_query_agent_logger.info(f"GitHub Query Attempt {attempt_completed}/{max_attempts}")
-                yield {"status": "attempt_start", "attempt": attempt_completed, "max_attempts": max_attempts}
+                yield {"type": "status_update", "status": "attempt_start", "agent_type": "github_agent", "attempt": attempt_completed, "max_attempts": max_attempts}
+                attempt_failed = False
 
                 try: 
-                    # MCP Server context manager is now INSIDE the loop for each attempt
                     async with agent.run_mcp_servers():
                         github_query_agent_logger.info(f"Attempt {attempt_completed}: MCP Server connection active.")
-                        yield {"status": "mcp_connection_active", "attempt": attempt_completed, "message": "MCP server connection established."}
+                        yield {"type": "status_update", "status": "mcp_connection_active", "agent_type": "github_agent", "attempt": attempt_completed, "message": "MCP server connection established."}
 
-                        # --- Inner try block for the actual agent run within the MCP context --- 
                         try:
-                            # Consume the async generator to execute the attempt
-                            async for status_update in self._run_single_attempt(agent, current_description, attempt_completed):
-                                yield status_update # Forward the status updates
+                            async for event_data in self._run_single_attempt(agent, current_description, attempt_completed):
+                                yield event_data
 
-                            # Attempt finished, access results stored in instance variables
-                            run_result = self._last_run_result
-                            successful_calls = self._last_successful_calls
+                                if event_data.get("type") == "status_update" and event_data.get("status") == "tool_success":
+                                    success_occurred = True
+                                if event_data.get("type") == "tool_error":
+                                    last_error = event_data.get("error", "Unknown tool error")
 
-                            # --- Process the successful result ---
-                            final_result_data = self._process_final_result(run_result, successful_calls, description)
-
-                            # --- If successful, exit the outer loop ---
-                            if final_result_data:
-                                github_query_agent_logger.info(f"Successfully processed result on attempt {attempt_completed}.")
-                                yield {"status": "parsing_success", "attempt": attempt_completed} # Use a distinct status
-                                break # Break inner try block; outer loop will break due to final_result_data check
-                            else:
-                                # Handle case where processing the result failed (returned None)
-                                github_query_agent_logger.error(f"_process_final_result returned None on attempt {attempt_completed}. Raw run_result: {run_result}")
-                                last_error = "Failed to process successful agent result."
-
-                                # Non-retryable for now, break inner try block
-                                yield {"status": "error", "attempt": attempt_completed, "reason": "result processing failed"}
-                                break 
+                            github_query_agent_logger.info(f"Agent iteration attempt {attempt_completed} completed without raising exceptions.")
 
                         except McpError as mcp_err:
                             error_str = str(mcp_err)
-                            github_query_agent_logger.warning(f"MCPError during agent run attempt {attempt_completed}: {error_str}")
-                            yield {"status": "mcp_error", "attempt": attempt_completed, "error": error_str}
-                            last_error = error_str
-                            # Check if retry is possible (move continue outside inner try)
+                            github_query_agent_logger.warning(f"Attempt {attempt_completed} caught MCPError: {error_str}")
+                            last_error = f"MCP Tool Error: {error_str}"
+                            attempt_failed = True
                             if attempt < max_attempts - 1:
-                                error_context = f"\\n\\nINFO: Attempt {attempt_completed} failed with MCP tool error: {error_str}. Retrying..."
+                                error_context = f"\n\nINFO: Attempt {attempt_completed} failed with MCP tool error: {error_str}. Retrying..."
                                 current_description += error_context
-                                yield {"status": "retrying", "attempt": attempt_completed, "reason": "mcp_error"}
-                                # No break here, let the outer loop continue after this inner try block finishes
+                                yield {"type": "status_update", "status": "retrying", "agent_type": "github_agent", "attempt": attempt_completed, "reason": "mcp_error"}
+                                continue
                             else:
                                 github_query_agent_logger.error(f"MCPError on final attempt {max_attempts}: {error_str}", exc_info=True)
-                                break # Break inner try block
+                                break
 
                         except UnexpectedModelBehavior as e:
-                            github_query_agent_logger.error(f"UnexpectedModelBehavior during agent run attempt {attempt_completed}: {e}", exc_info=True)
-                            yield {"status": "model_error", "attempt": attempt_completed, "error": str(e)}
+                            github_query_agent_logger.error(f"Attempt {attempt_completed} caught UnexpectedModelBehavior: {e}", exc_info=True)
+                            yield {"type": "error", "status": "model_error", "agent_type": "github_agent", "attempt": attempt_completed, "error": str(e)}
                             last_error = f"Agent run failed due to unexpected model behavior: {str(e)}"
-                            break # Break inner try block
+                            attempt_failed = True
+                            break
 
-                        except Exception as e: # Catch other potential errors during agent iteration or processing
+                        except Exception as e:
                             if isinstance(e, TypeError) and "'NoneType' object cannot be interpreted as an integer" in str(e):
                                 error_msg = "TypeError: OpenAI API response likely missing 'created' timestamp."
-                                github_query_agent_logger.error(f"Timestamp Error during agent run attempt {attempt_completed}: {error_msg}", exc_info=True)
-                                yield {"status": "timestamp_error", "attempt": attempt_completed, "error": error_msg}
+                                github_query_agent_logger.error(f"Attempt {attempt_completed} caught Timestamp Error: {error_msg}", exc_info=True)
+                                yield {"type": "error", "status": "timestamp_error", "agent_type": "github_agent", "attempt": attempt_completed, "error": error_msg}
                                 last_error = f"Agent iteration failed: {error_msg}"
-                                # Check if retry is possible (move continue outside inner try)
+                                attempt_failed = True
                                 if attempt < max_attempts - 1:
-                                    error_context = f"\\n\\nINFO: Attempt {attempt_completed} failed due to a likely missing timestamp in the API response. Retrying..."
+                                    error_context = f"\n\nINFO: Attempt {attempt_completed} failed due to a likely missing timestamp in the API response. Retrying..."
                                     current_description += error_context
-                                    yield {"status": "retrying", "attempt": attempt_completed, "reason": "timestamp_error"}
-                                    # No break here, let the outer loop continue
+                                    yield {"type": "status_update", "status": "retrying", "agent_type": "github_agent", "attempt": attempt_completed, "reason": "timestamp_error"}
+                                    continue
                                 else:
                                     github_query_agent_logger.error(f"Timestamp Error on final attempt {max_attempts}: {error_msg}")
-                                    break # Break inner try block
+                                    break
                             else:
-                                # Handle other general errors
-                                github_query_agent_logger.error(f"General error during agent iteration/processing attempt {attempt_completed}: {e}", exc_info=True)
-                                yield {"status": "general_error_run", "attempt": attempt_completed, "error": str(e)}
-                                last_error = f"Agent iteration/processing failed unexpectedly: {str(e)}"
-                                break # Break inner try block
+                                github_query_agent_logger.error(f"Attempt {attempt_completed} caught general error: {e}", exc_info=True)
+                                yield {"type": "error", "status": "general_error_run", "agent_type": "github_agent", "attempt": attempt_completed, "error": str(e)}
+                                last_error = f"Agent iteration failed unexpectedly: {str(e)}"
+                                attempt_failed = True
+                                break
 
-                except Exception as mcp_mgmt_err: # Catch errors specifically from `async with agent.run_mcp_servers()`
+                except Exception as mcp_mgmt_err:
                     github_query_agent_logger.error(f"Fatal error managing MCP server for attempt {attempt_completed}: {mcp_mgmt_err}", exc_info=True)
-                    yield {"status": "fatal_mcp_error", "attempt": attempt_completed, "error": str(mcp_mgmt_err)}
+                    yield {"type": "tool_error", "status": "fatal_mcp_error", "agent_type": "github_agent", "error": f"Fatal MCP management error: {mcp_mgmt_err}", "attempt": attempt_completed}
                     last_error = f"Fatal error managing MCP connection: {str(mcp_mgmt_err)}"
-                    # If MCP mgmt fails, we cannot continue the loop
                     break
 
-                # --- Check if outer loop should break or continue ---
-                if final_result_data: # Success occurred in the inner block
-                    break
-                elif last_error and attempt >= max_attempts - 1: # Failure on the last attempt
-                    break
-                elif last_error: # Failure on a retryable attempt
-                    # The 'retrying' status was already yielded inside the inner except blocks
-                    continue # Proceed to the next iteration of the outer loop
-                # Add a safety break if something unexpected happened
-                elif attempt >= max_attempts - 1:
-                    github_query_agent_logger.warning(f"Reached max attempts ({max_attempts}) without explicit success or failure decision.")
-                    last_error = last_error or "Max attempts reached without explicit success or failure."
+                if not attempt_failed: 
+                    if success_occurred:
+                         github_query_agent_logger.info(f"Query processing completed successfully on attempt {attempt_completed} (at least one tool success).")
+                         break
+                    else:
+                         github_query_agent_logger.warning(f"Attempt {attempt_completed} finished without tool successes or critical errors. Last error: {last_error}")
+                         if attempt >= max_attempts - 1:
+                             last_error = last_error or "Agent finished without calling successful tools."
+                             break
+
+                if attempt >= max_attempts - 1:
+                    github_query_agent_logger.warning(f"Reached max attempts ({max_attempts}) safety break.")
+                    last_error = last_error or "Max attempts reached."
                     break
 
-        except Exception as e: # Catch errors managing MCP connection specifically
-            github_query_agent_logger.error(f"Fatal error during MCP server management or unhandled error in loop: {e}", exc_info=True)
-            yield {"status": "fatal_mcp_error", "error": str(e)}
-            last_error = f"Fatal error managing MCP connection: {str(e)}"
-            # Proceed to final yield block below
+        except Exception as e:
+            github_query_agent_logger.error(f"Fatal error during GitHub query processing: {e}", exc_info=True)
+            yield {"type": "tool_error", "status": "fatal_error", "agent_type": "github_agent", "error": f"Fatal query processing error: {str(e)}"}
+            last_error = f"Fatal query processing error: {str(e)}"
 
-        # --- Yield final result or error *after* the loop ---
-        if final_result_data:
-            github_query_agent_logger.info(f"Yielding final successful result after MCP context exit.")
-            yield final_result_data
-        elif last_error: # If loop broke due to error or max attempts reached with an error, or MCP error
+        if success_occurred:
+             github_query_agent_logger.info(f"GitHub query finished after {attempt_completed} attempts with at least one tool success.")
+             yield {"type": "final_status", "status": "finished_success", "agent_type": "github_agent", "attempts": attempt_completed}
+        elif last_error:
             final_error_msg = f"GitHub query finished after {attempt_completed} attempts. Last error: {last_error}"
             github_query_agent_logger.error(final_error_msg)
-            yield {"status": "error_final", "error": final_error_msg}
-            yield GithubQueryResult(query=description, data=None, error=final_error_msg)
-        else: # Should not happen if logic is correct, but catch if loop finished without success/error
+            yield {"type": "tool_error", "status": "finished_error", "agent_type": "github_agent", "error": final_error_msg, "attempts": attempt_completed}
+        else:
             final_error_msg = f"GitHub query finished after {attempt_completed} attempts without success or explicit error."
             github_query_agent_logger.warning(final_error_msg)
-            yield {"status": "finished_no_result", "attempts": attempt_completed}
-            yield GithubQueryResult(query=description, data=None, error=final_error_msg)
+            yield {"type": "tool_error", "status": "finished_no_result", "agent_type": "github_agent", "error": final_error_msg, "attempts": attempt_completed}

@@ -2,7 +2,7 @@
 
 import type React from "react"
 import { useState, useEffect } from "react"
-import { PlayIcon, ChevronDownIcon, ChevronUpIcon, ExternalLinkIcon, GitCommitIcon, FileDiffIcon, CopyIcon, CheckIcon, Trash2Icon } from "lucide-react"
+import { PlayIcon, ChevronDownIcon, ChevronUpIcon, ExternalLinkIcon, GitCommitIcon, FileDiffIcon, CopyIcon, CheckIcon, Trash2Icon, Download, FolderIcon, FileIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -666,6 +666,177 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
            </div>
          );
       }
+    } else if (toolName === 'get_file_contents' && !toolResult.isError && toolResult.content) {
+      try {
+        let parsedData: any;
+        if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
+          parsedData = JSON.parse(toolResult.content[0].text);
+        } else if (typeof toolResult.content === 'string') {
+          parsedData = JSON.parse(toolResult.content);
+        } else {
+          parsedData = toolResult.content;
+        }
+
+        // Check if the result is an array (directory listing) or an object (single file)
+        if (Array.isArray(parsedData)) {
+          // --- Render Directory Listing --- 
+          const directoryItems = parsedData;
+          if (directoryItems.length === 0) {
+             displayContent = <p className="text-xs text-gray-600">Directory is empty.</p>;
+          } else {
+            displayContent = (
+              <div className="overflow-x-auto border rounded-md">
+                <table className="min-w-full divide-y divide-gray-200 text-xs">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                      <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+                      <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Size</th>
+                      <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Path</th>
+                      <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {directoryItems.map((item: any) => (
+                      <tr key={item.path}>
+                        <td className="px-3 py-1.5 whitespace-nowrap font-medium text-gray-800 flex items-center">
+                           {item.type === 'dir' ? <FolderIcon className="h-3.5 w-3.5 mr-1.5 text-blue-500 flex-shrink-0"/> : <FileIcon className="h-3.5 w-3.5 mr-1.5 text-gray-500 flex-shrink-0"/>}
+                           <span className="truncate" title={item.name}>{item.name}</span>
+                        </td>
+                        <td className="px-3 py-1.5 whitespace-nowrap font-mono text-gray-600">{item.type}</td>
+                        <td className="px-3 py-1.5 whitespace-nowrap text-right text-gray-600">{item.size > 0 ? `${item.size} bytes` : '-'}</td>
+                        <td className="px-3 py-1.5 whitespace-nowrap font-mono text-gray-600 truncate" title={item.path}>{item.path}</td>
+                        <td className="px-3 py-1.5 whitespace-nowrap">
+                          <>
+                          {item.html_url && (
+                            <a href={item.html_url} target="_blank" rel="noopener noreferrer">
+                              <Button variant="ghost" size="sm" className="text-xs h-auto px-1 py-0.5">
+                                <ExternalLinkIcon className="h-3 w-3" />
+                              </Button>
+                            </a>
+                          )}
+                           {item.download_url && (
+                            <a href={item.download_url} target="_blank" rel="noopener noreferrer" download={item.name}>
+                              <Button variant="ghost" size="sm" className="text-xs h-auto px-1 py-0.5">
+                                <Download className="h-3 w-3" />
+                              </Button>
+                            </a>
+                          )}
+                          </>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            );
+          }
+        } else if (typeof parsedData === 'object' && parsedData !== null) {
+          // --- Render Single File Content --- 
+          const fileData = parsedData;
+          if (!fileData.path) { // Basic check for file object structure
+              throw new Error("Expected a file content object with a path.");
+          }
+          
+          const decodedContent = fileData.encoding === 'base64' && fileData.content ? atob(fileData.content) : fileData.content || "(No content)";
+          // TODO: Lift state for show/hide toggle
+          const contentPreview = decodedContent.substring(0, 300); // Show a preview
+          const contentId = `file-content-${cell.id}`;
+
+          displayContent = (
+            <div className="space-y-3 text-xs">
+              {/* Header with name/path/links */}
+              <div className="flex justify-between items-start mb-1">
+                <p className="text-sm font-medium font-mono truncate mr-2 flex-grow" title={fileData.path}>
+                   {fileData.name} ({fileData.path})
+                </p>
+                <div className="flex items-center space-x-1 flex-shrink-0">
+                   {fileData.html_url && (
+                      <a href={fileData.html_url} target="_blank" rel="noopener noreferrer">
+                        <Button variant="outline" size="sm" className="text-xs h-auto px-1.5 py-0.5">
+                          <ExternalLinkIcon className="h-3 w-3 mr-1" /> GitHub
+                        </Button>
+                      </a>
+                   )}
+                   {fileData.download_url && (
+                      <a href={fileData.download_url} target="_blank" rel="noopener noreferrer" download={fileData.name}>
+                        <Button variant="outline" size="sm" className="text-xs h-auto px-1.5 py-0.5">
+                          <Download className="h-3 w-3 mr-1" /> Download
+                        </Button>
+                      </a>
+                   )}
+                </div>
+              </div>
+              {/* Metadata Table */}
+              <div className="overflow-x-auto border rounded-md">
+                <table className="min-w-full divide-y divide-gray-200 text-xs">
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    <tr>
+                      <td className="px-3 py-1.5 font-medium text-gray-500">Path</td>
+                      <td className="px-3 py-1.5 font-mono text-gray-800">{fileData.path}</td>
+                    </tr>
+                     <tr>
+                      <td className="px-3 py-1.5 font-medium text-gray-500">Size</td>
+                      <td className="px-3 py-1.5 text-gray-800">{fileData.size} bytes</td>
+                    </tr>
+                     <tr>
+                      <td className="px-3 py-1.5 font-medium text-gray-500">Encoding</td>
+                      <td className="px-3 py-1.5 text-gray-800">{fileData.encoding || '-'}</td>
+                    </tr>
+                    <tr>
+                      <td className="px-3 py-1.5 font-medium text-gray-500">SHA</td>
+                      <td className="px-3 py-1.5 font-mono text-gray-800">{fileData.sha}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              
+              {/* Content Section */}
+              <div className="mt-3">
+                  <div className="flex justify-between items-center mb-1">
+                      <h5 className="text-xs font-medium">File Content {fileData.encoding === 'base64' ? '(Base64 Decoded)' : ''}</h5>
+                       {/* TODO: Implement state lifting for show/hide toggle */}
+                  </div>
+                   <pre 
+                      className={`text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200 overflow-auto max-h-60`}
+                   >
+                       {`${contentPreview}${decodedContent.length > 300 ? '\n...' : ''}`}
+                   </pre>
+                   <Button 
+                      variant="ghost" 
+                      size="sm" 
+                      className="text-xs h-auto px-1.5 py-0.5 mt-1 text-gray-600 hover:text-gray-900"
+                      onClick={() => copyToClipboard(decodedContent, contentId)}
+                   >
+                      {copiedStates[contentId] ? <CheckIcon className="h-3 w-3 mr-1 text-green-600" /> : <CopyIcon className="h-3 w-3 mr-1" />}
+                      Copy Decoded Content
+                  </Button>
+              </div>
+            </div>
+          );
+        } else {
+           // Handle case where parsedData is neither an array nor a valid file object
+           throw new Error("Unexpected format for get_file_contents result.");
+        }
+
+      } catch (e) {
+        console.error("Error parsing or rendering get_file_contents result:", e);
+        let errorDisplay = JSON.stringify(toolResult.content, null, 2);
+        if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
+           errorDisplay = toolResult.content[0].text;
+        } else if (typeof toolResult.content === 'string') {
+            errorDisplay = toolResult.content;
+         }
+
+        displayContent = (
+           <div className="text-red-700 text-xs">
+             <p className="font-medium mb-1">Error rendering file content:</p>
+             <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
+             <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
+             <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
+           </div>
+         );
+      }
     } else if (toolName === 'get_me' && !toolResult.isError && toolResult.content) {
       try {
         let userData: any;
@@ -731,6 +902,82 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
               <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
             </div>
           );
+      }
+    } else if (toolName === 'list_branches' && !toolResult.isError && toolResult.content) {
+      try {
+        let branchesData: any[];
+        if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
+          branchesData = JSON.parse(toolResult.content[0].text);
+        } else if (typeof toolResult.content === 'string') {
+          branchesData = JSON.parse(toolResult.content);
+        } else if (Array.isArray(toolResult.content)) {
+           branchesData = toolResult.content;
+        } else {
+           throw new Error("Expected an array of branches.");
+        }
+
+        if (!Array.isArray(branchesData)) {
+          throw new Error("Expected an array of branches after parsing.");
+        }
+
+        if (branchesData.length === 0) {
+          displayContent = <p className="text-xs text-gray-600">No branches found for this repository.</p>;
+        } else {
+          displayContent = (
+            <div className="overflow-x-auto border rounded-md">
+              <table className="min-w-full divide-y divide-gray-200 text-xs">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Branch Name</th>
+                    <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Latest Commit</th>
+                    <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Protected</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {branchesData.map((branch: any) => (
+                    <tr key={branch.name}>
+                      <td className="px-3 py-1.5 whitespace-nowrap font-medium text-gray-800">{branch.name}</td>
+                      <td className="px-3 py-1.5 whitespace-nowrap font-mono">
+                        {branch.commit?.url ? (
+                           <a href={branch.commit.url.replace("api.github.com/repos", "github.com").replace("/commits/", "/commit/")} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+                             {branch.commit.sha?.substring(0, 7)}
+                           </a>
+                        ) : (
+                           <span>{branch.commit?.sha?.substring(0, 7) || '-'}</span>
+                        )}
+                      </td>
+                       <td className="px-3 py-1.5 whitespace-nowrap">
+                         {branch.protected ? (
+                            <Badge variant="secondary" className="text-xs px-1.5 py-0.5 bg-orange-100 text-orange-800 border-orange-200">Protected</Badge>
+                          ) : (
+                            <span className="text-gray-600">-</span>
+                          )}
+                       </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        }
+
+      } catch (e) {
+        console.error("Error parsing or rendering list_branches result:", e);
+        let errorDisplay = JSON.stringify(toolResult.content, null, 2);
+         if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
+            errorDisplay = toolResult.content[0].text;
+         } else if (typeof toolResult.content === 'string') {
+            errorDisplay = toolResult.content;
+         }
+
+        displayContent = (
+           <div className="text-red-700 text-xs">
+             <p className="font-medium mb-1">Error rendering branch list:</p>
+             <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
+             <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
+             <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
+           </div>
+         );
       }
     } else {
       // Default case for tools without specific rendering
@@ -810,7 +1057,7 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
        <Card className={`mt-3 border ${cardBorderColor} ${!isResultExpanded ? cardBgColor : ''}`}>
          <CardHeader className={`flex flex-row items-center justify-between p-2 ${!isResultExpanded ? '' : cardBgColor}`}>
            <CardTitle className="text-sm font-semibold">
-             Execution Result {toolName === 'get_commit' && shortSha ? `for ${shortSha}` : ''}
+             Execution Result {shortSha ? `for ${shortSha}` : ''}
            </CardTitle>
            <Button
              variant="ghost"

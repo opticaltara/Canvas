@@ -20,6 +20,7 @@ from pydantic_ai.messages import (
     ModelResponse,
     UserPromptPart,
 )
+from sqlalchemy.orm import Session
 
 from backend.ai.chat_agent import (
     ChatAgentService,
@@ -27,6 +28,7 @@ from backend.ai.chat_agent import (
     to_chat_message,
 )
 from backend.db.chat_db import ChatDatabase
+from backend.db.database import get_db
 from backend.services.notebook_manager import NotebookManager, get_notebook_manager
 from backend.services.connection_manager import ConnectionManager, get_connection_manager
 from backend.services.redis_client import get_redis_client
@@ -159,7 +161,7 @@ async def create_session(
         # Check if agent already exists (e.g., race condition?) - unlikely but safe
         if session_id not in chat_agents_cache:
             chat_logger.info(f"Creating and initializing ChatAgentService for new session {session_id}")
-            agent_instance = ChatAgentService(notebook_manager, connection_manager)
+            agent_instance = ChatAgentService(notebook_manager, connection_manager, redis_client=redis)
             await agent_instance.initialize(notebook_id)
             chat_agents_cache[session_id] = agent_instance
             chat_logger.info(f"Cached ChatAgentService instance for session {session_id}")
@@ -308,7 +310,7 @@ async def get_chat_agent_for_session(
     chat_logger.info(f"Re-initializing agent for session {session_id} (notebook: {notebook_id}) due to cache miss.")
     try:
         notebook_manager, connection_manager = managers
-        agent = ChatAgentService(notebook_manager, connection_manager)
+        agent = ChatAgentService(notebook_manager, connection_manager, redis_client=redis)
         await agent.initialize(notebook_id)
         chat_agents_cache[session_id] = agent # Store the newly initialized agent
         request.app.state.chat_agents = chat_agents_cache # Ensure cache is updated on app state
@@ -324,10 +326,7 @@ async def post_message(
     session_id: str, # Keep session_id for context/logging if needed
     prompt: str = Form(...),
     chat_db: ChatDatabase = Depends(get_chat_db),
-    # Remove managers dependency, handled by get_chat_agent_for_session
-    # redis: redis.Redis = Depends(get_redis_client), # No longer needed directly here
-    # settings: Settings = Depends(get_settings), # No longer needed directly here
-    # Inject the agent instance using the new dependency
+    db: Session = Depends(get_db), # Added db dependency
     chat_agent: ChatAgentService = Depends(get_chat_agent_for_session)
 ) -> StreamingResponse:
     """
@@ -336,14 +335,6 @@ async def post_message(
     """
     start_time = time.time()
     request_id = str(uuid4())
-    
-    # --- Remove notebook_id fetching logic - handled by dependency --- 
-    # redis_key = f"chat_session:{session_id}:notebook_id"
-    # ... (removed logic to fetch notebook_id from redis/db) ...
-    # notebook_id = chat_agent.notebook_id # Agent instance now holds the notebook_id
-    # --- End Removal --- 
-
-    # Get message history from DB (remains the same)
     try:
         history_from_db = await chat_db.get_messages(session_id)
     except Exception as e:
@@ -355,7 +346,7 @@ async def post_message(
     try:
         # Access notebook_id directly from the injected & initialized agent
         notebook_manager = chat_agent.notebook_manager
-        notebook = notebook_manager.get_notebook(UUID(chat_agent.notebook_id)) # Convert to UUID
+        notebook = notebook_manager.get_notebook(db=db, notebook_id=UUID(chat_agent.notebook_id)) # Pass db
         if notebook and notebook.cell_order:
             recent_cell_ids = notebook.cell_order[-MAX_CELL_HISTORY:]
             # Use model_dump() which is standard in Pydantic v2

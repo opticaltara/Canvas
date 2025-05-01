@@ -4,16 +4,17 @@ Chat Agent Tools
 This module defines tools that allow the AI agent to manage notebook cells.
 """
 
-from typing import Dict, List, Optional, Union, Any
+from typing import Dict, List, Optional, Any
 from uuid import UUID
 
 import logging
 from pydantic import BaseModel, Field
 from pydantic_ai.tools import Tool
+from sqlalchemy.orm import Session
 
-from backend.core.cell import CellType, create_cell
-from backend.core.notebook import Notebook
+from backend.core.cell import CellType
 from backend.services.notebook_manager import NotebookManager
+from backend.db.database import get_db
 
 # Initialize logger
 tools_logger = logging.getLogger("ai.chat_tools")
@@ -112,12 +113,11 @@ class NotebookCellTools:
     
     async def create_cell(self, params: CreateCellParams, **kwargs) -> Dict:
         """Create a new cell in a notebook"""
+        db_gen = get_db()
+        db: Session = next(db_gen)
         try:
             notebook_id = UUID(params.notebook_id)
             tools_logger.info(f"Creating cell in notebook: {notebook_id}")
-            
-            # Get the notebook
-            notebook = self.notebook_manager.get_notebook(notebook_id)
             
             # Map cell type string to enum
             cell_type = getattr(CellType, params.cell_type.upper())
@@ -129,16 +129,15 @@ class NotebookCellTools:
             if 'tool_arguments' in kwargs:
                 cell_metadata['tool_arguments'] = kwargs['tool_arguments']
 
-            # Create the cell
-            cell = notebook.create_cell(
+            # Create the cell using the NotebookManager
+            cell = self.notebook_manager.create_cell(
+                db=db,
+                notebook_id=notebook_id,
                 cell_type=cell_type,
                 content=params.content,
                 position=params.position,
-                metadata=cell_metadata
+                metadata=cell_metadata,
             )
-            
-            # Save the notebook
-            self.notebook_manager.save_notebook(notebook_id)
             
             tools_logger.info(f"Created cell {cell.id} in notebook {notebook_id}")
             
@@ -150,21 +149,30 @@ class NotebookCellTools:
                 "position": params.position
             }
         except Exception as e:
-            tools_logger.error(f"Error creating cell: {str(e)}")
+            tools_logger.error(f"Error creating cell: {str(e)}", exc_info=True)
             return {
                 "success": False,
                 "error": str(e)
             }
+        finally:
+            try:
+                next(db_gen) # Ensure session is closed
+            except StopIteration:
+                pass
+            except Exception as close_exc:
+                 tools_logger.error(f"Error closing DB session in create_cell: {close_exc}")
     
     async def update_cell(self, params: UpdateCellParams) -> Dict:
         """Update an existing cell in a notebook"""
+        db_gen = get_db()
+        db: Session = next(db_gen)
         try:
             notebook_id = UUID(params.notebook_id)
             cell_id = UUID(params.cell_id)
             tools_logger.info(f"Updating cell {cell_id} in notebook {notebook_id}")
             
             # Get the notebook and cell
-            notebook = self.notebook_manager.get_notebook(notebook_id)
+            notebook = self.notebook_manager.get_notebook(db=db, notebook_id=notebook_id)
             cell = notebook.get_cell(cell_id)
             
             # Update content if provided
@@ -177,7 +185,7 @@ class NotebookCellTools:
                     cell.metadata[key] = value
             
             # Save the notebook
-            self.notebook_manager.save_notebook(notebook_id)
+            self.notebook_manager.save_notebook(db=db, notebook_id=notebook_id, notebook=notebook)
             
             tools_logger.info(f"Updated cell {cell_id} in notebook {notebook_id}")
             
@@ -187,21 +195,30 @@ class NotebookCellTools:
                 "cell_id": str(cell_id)
             }
         except Exception as e:
-            tools_logger.error(f"Error updating cell: {str(e)}")
+            tools_logger.error(f"Error updating cell: {str(e)}", exc_info=True)
             return {
                 "success": False,
                 "error": str(e)
             }
+        finally:
+            try:
+                next(db_gen) # Ensure session is closed
+            except StopIteration:
+                pass
+            except Exception as close_exc:
+                 tools_logger.error(f"Error closing DB session in update_cell: {close_exc}")
     
     async def execute_cell(self, params: ExecuteCellParams) -> Dict:
         """Queue a cell for execution"""
+        db_gen = get_db()
+        db: Session = next(db_gen)
         try:
             notebook_id = UUID(params.notebook_id)
             cell_id = UUID(params.cell_id)
             tools_logger.info(f"Queueing cell {cell_id} for execution in notebook {notebook_id}")
             
             # Get the notebook and cell
-            notebook = self.notebook_manager.get_notebook(notebook_id)
+            notebook = self.notebook_manager.get_notebook(db=db, notebook_id=notebook_id)
             cell = notebook.get_cell(cell_id)
             
             # Set cell status to queued
@@ -209,7 +226,7 @@ class NotebookCellTools:
             cell.status = CellStatus.QUEUED
             
             # Save the notebook
-            self.notebook_manager.save_notebook(notebook_id)
+            self.notebook_manager.save_notebook(db=db, notebook_id=notebook_id, notebook=notebook)
             
             tools_logger.info(f"Queued cell {cell_id} for execution in notebook {notebook_id}")
             
@@ -220,20 +237,29 @@ class NotebookCellTools:
                 "status": "queued"
             }
         except Exception as e:
-            tools_logger.error(f"Error executing cell: {str(e)}")
+            tools_logger.error(f"Error executing cell: {str(e)}", exc_info=True)
             return {
                 "success": False,
                 "error": str(e)
             }
+        finally:
+            try:
+                next(db_gen) # Ensure session is closed
+            except StopIteration:
+                pass
+            except Exception as close_exc:
+                 tools_logger.error(f"Error closing DB session in execute_cell: {close_exc}")
     
     async def list_cells(self, params: ListCellsParams) -> Dict:
         """List all cells in a notebook"""
+        db_gen = get_db()
+        db: Session = next(db_gen)
         try:
             notebook_id = UUID(params.notebook_id)
             tools_logger.info(f"Listing cells in notebook: {notebook_id}")
             
             # Get the notebook
-            notebook = self.notebook_manager.get_notebook(notebook_id)
+            notebook = self.notebook_manager.get_notebook(db=db, notebook_id=notebook_id)
             
             # Get all cells
             cells = [
@@ -252,21 +278,30 @@ class NotebookCellTools:
                 "cells": cells
             }
         except Exception as e:
-            tools_logger.error(f"Error listing cells: {str(e)}")
+            tools_logger.error(f"Error listing cells: {str(e)}", exc_info=True)
             return {
                 "success": False,
                 "error": str(e)
             }
-    
+        finally:
+            try:
+                next(db_gen) # Ensure session is closed
+            except StopIteration:
+                pass
+            except Exception as close_exc:
+                 tools_logger.error(f"Error closing DB session in list_cells: {close_exc}")
+
     async def get_cell(self, params: GetCellParams) -> Dict:
         """Get a specific cell by ID"""
+        db_gen = get_db()
+        db: Session = next(db_gen)
         try:
             notebook_id = UUID(params.notebook_id)
             cell_id = UUID(params.cell_id)
             tools_logger.info(f"Getting cell {cell_id} from notebook {notebook_id}")
             
             # Get the notebook and cell
-            notebook = self.notebook_manager.get_notebook(notebook_id)
+            notebook = self.notebook_manager.get_notebook(db=db, notebook_id=notebook_id)
             cell = notebook.get_cell(cell_id)
             
             return {
@@ -280,8 +315,15 @@ class NotebookCellTools:
                 "metadata": cell.metadata
             }
         except Exception as e:
-            tools_logger.error(f"Error getting cell: {str(e)}")
+            tools_logger.error(f"Error getting cell: {str(e)}", exc_info=True)
             return {
                 "success": False,
                 "error": str(e)
-            } 
+            }
+        finally:
+            try:
+                next(db_gen) # Ensure session is closed
+            except StopIteration:
+                pass
+            except Exception as close_exc:
+                 tools_logger.error(f"Error closing DB session in get_cell: {close_exc}") 

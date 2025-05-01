@@ -650,27 +650,6 @@ export default function CanvasPage() {
                   <Play className="h-4 w-4 mr-1 text-blue-600" />
                   Run All
                 </Button>
-                <Button variant="outline" size="sm" className="bg-green-50 hover:bg-green-100 border-green-200">
-                  <Save className="h-4 w-4 mr-1 text-green-600" />
-                  Save
-                </Button>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="outline" size="sm">
-                      <MoreHorizontal className="h-4 w-4" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="bg-white border shadow-lg">
-                    <DropdownMenuItem className="cursor-pointer">
-                      <Share className="h-4 w-4 mr-2" />
-                      Share
-                    </DropdownMenuItem>
-                    <DropdownMenuItem className="cursor-pointer">
-                      <Download className="h-4 w-4 mr-2" />
-                      Export
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
               </div>
             </div>
 
