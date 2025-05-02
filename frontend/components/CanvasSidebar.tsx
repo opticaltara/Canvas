@@ -128,13 +128,8 @@ export default function CanvasSidebar() {
     try {
       // Assuming create response structure is similar to list item structure (RawNotebook)
       const newRawNotebook: RawNotebook = await api.notebooks.create({
-        name: newCanvasName, // API likely expects 'name'/'title' for creation
+        title: newCanvasName,
         description: newCanvasDescription,
-        // Send metadata directly if API expects it
-        // metadata: {
-        //   title: newCanvasName,
-        //   description: newCanvasDescription
-        // }
       })
 
       // Format the response to match the Canvas interface

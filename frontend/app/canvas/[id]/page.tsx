@@ -6,8 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
-import { Play, Save, Share, Download, MoreHorizontal } from "lucide-react"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import { Play } from "lucide-react"
 import CellCreationPills from "@/components/canvas/CellCreationPills"
 import AIChatPanel from "@/components/AIChatPanel"
 import AIChatToggle from "@/components/AIChatToggle"
@@ -18,7 +17,6 @@ import { useCanvasStore } from "@/store/canvasStore"
 import { type Cell, type CellType } from "@/store/types"
 import CellFactory from "@/components/cells/CellFactory"
 
-// Local type extending Cell to include transient UI state
 type DisplayCell = Cell & { isNew?: boolean }
 
 export default function CanvasPage() {
@@ -149,7 +147,7 @@ export default function CanvasPage() {
     [toast],
   )
 
-  const { wsStatus, isInvestigationRunning, currentPlan, currentStatus } = useInvestigationEvents({
+  const { wsStatus, isInvestigationRunning, currentStatus } = useInvestigationEvents({
     notebookId,
     onCreateCell: handleCreateCell,
     onUpdateCell: handleUpdateCell,
@@ -389,9 +387,6 @@ export default function CanvasPage() {
         case "markdown":
           defaultContent = "# New markdown cell"
           break
-        case "log":
-          defaultContent = '{level=~"error"} |= ``'
-          break
         case "github":
           defaultContent = "{}"
           break
@@ -524,54 +519,6 @@ export default function CanvasPage() {
         variant: "destructive",
         title: "Error",
         description: "Failed to execute cell. Please try again.",
-      })
-    }
-  }
-
-  const handleSendMessage = async (cellId: string, message: string) => {
-    if (!notebookId) return
-
-    try {
-      const cellIndex = cells.findIndex((cell) => cell.id === cellId)
-      if (cellIndex === -1) return
-
-      const cell = cells[cellIndex]
-
-      const updatedCells = [...cells]
-      const messages = (cell.metadata?.messages as any[]) || []
-      updatedCells[cellIndex] = {
-        ...cell,
-        status: "running",
-        metadata: {
-          ...cell.metadata,
-          messages: [...messages, { role: "user", content: message }],
-        },
-      }
-      setCells(updatedCells)
-
-      const result = await api.cells.sendMessage(notebookId, cellId, message)
-
-      const resultCell: DisplayCell = { ...result }
-      updatedCells[cellIndex] = resultCell
-      setCells(updatedCells)
-    } catch (err: unknown) {
-      console.error("Failed to send message:", err)
-
-      const cellIndex = cells.findIndex((cell) => cell.id === cellId)
-      if (cellIndex !== -1) {
-        const updatedCells = [...cells]
-        updatedCells[cellIndex] = {
-          ...updatedCells[cellIndex],
-          status: "error",
-          error: err instanceof Error ? err.message : "Failed to send message",
-        }
-        setCells(updatedCells)
-      }
-
-      toast({
-        variant: "destructive",
-        title: "Error",
-        description: "Failed to send message. Please try again.",
       })
     }
   }

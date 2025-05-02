@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Set
 
-from sqlalchemy import Column, String, DateTime, ForeignKey, Boolean, JSON, func, Text, Integer, Enum, Float
+from sqlalchemy import Column, String, DateTime, ForeignKey, Boolean, JSON, func, Text, Integer, Enum, Float, UUID
 from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
@@ -90,7 +90,6 @@ class Notebook(Base):
                 "created_at": self.created_at.isoformat() if self.created_at is not None else None,
                 "updated_at": self.updated_at.isoformat() if self.updated_at is not None else None
             },
-            "cells": {cell.id: cell.to_dict() for cell in self.cells},
             "cell_order": [cell.id for cell in sorted(self.cells, key=lambda c: c.position)],
             "dependency_graph": self._build_dependency_graph()
         }
@@ -120,7 +119,7 @@ class Cell(Base):
     content = Column(Text, nullable=False)
     position = Column(Integer, nullable=False, default=0)
     status = Column(String(20), nullable=False, default="idle")  # idle, running, success, error, stale
-    connection_id = Column(Integer, nullable=True)
+    connection_id = Column(String(36), ForeignKey("connections.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     cell_metadata = Column(JSON, default=dict)
@@ -131,6 +130,12 @@ class Cell(Base):
     result_error = Column(Text, nullable=True)
     result_execution_time = Column(Float, nullable=True)
     result_timestamp = Column(DateTime, nullable=True)
+    
+    # Tool call specific fields
+    tool_call_id = Column(String(36), nullable=False)
+    tool_name = Column(String(255), nullable=True)
+    tool_arguments = Column(JSON, nullable=True)
+    tool_output = Column(JSON, nullable=True)
     
     # Relationships
     notebook = relationship("Notebook", back_populates="cells")
@@ -165,7 +170,10 @@ class Cell(Base):
             "dependencies": [dep.id for dep in self.dependencies],
             "dependents": [dep.id for dep in self.dependents],
             "metadata": self.cell_metadata if self.cell_metadata is not None else {},
-            "settings": self.settings if self.settings is not None else {}
+            "settings": self.settings if self.settings is not None else {},
+            "tool_call_id": str(self.tool_call_id),
+            "tool_name": self.tool_name,
+            "tool_arguments": self.tool_arguments
         }
 
 

@@ -4,7 +4,7 @@ import type React from "react"
 import { useState, useEffect } from "react"
 import { PlayIcon, ChevronDownIcon, ChevronUpIcon, ExternalLinkIcon, GitCommitIcon, FileDiffIcon, CopyIcon, CheckIcon, Trash2Icon, Download, FolderIcon, FileIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -15,17 +15,12 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 
 // Import connection store
 import { useConnectionStore } from "@/app/store/connectionStore"
+// Import the updated Cell type from the store
+import type { Cell } from "@/store/types"
 
 interface GitHubCellProps {
-  cell: {
-    id: string
-    type: string
-    content: string
-    result?: any
-    status: "idle" | "running" | "success" | "error"
-    error?: string
-    metadata?: Record<string, any>
-  }
+  // Use the imported Cell type
+  cell: Cell 
   onExecute: (cellId: string, params?: any) => void
   onUpdate: (cellId: string, content: string, metadata?: Record<string, any>) => void
   onDelete: (cellId: string) => void
@@ -37,7 +32,7 @@ interface ToolForm {
   toolArgs: Record<string, any>
 }
 
-const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDelete, isExecuting }) => {
+const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDelete, isExecuting }): React.ReactNode => {
   const [showToolCalls, setShowToolCalls] = useState(false)
   const [showMetadata, setShowMetadata] = useState(false)
   const [toolForms, setToolForms] = useState<ToolForm[]>([{ toolName: "", toolArgs: {} }])
@@ -49,25 +44,26 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
   const toolDefinitions = useConnectionStore((state) => state.toolDefinitions.github);
   const toolLoadingStatus = useConnectionStore((state) => state.toolLoadingStatus.github);
 
-  // Initialize the tool form based on cell metadata when the cell data changes
+  // Initialize the tool form based on cell data when the cell data changes
   useEffect(() => {
-    const metadata = cell.metadata
-    if (metadata?.toolName && metadata?.toolArgs) {
+    // Use tool_name and tool_arguments directly from the cell object
+    if (cell.tool_name && cell.tool_arguments) {
       const initialForm: ToolForm = {
-        toolName: metadata.toolName,
-        toolArgs: { ...metadata.toolArgs }, // Ensure a copy
+        toolName: cell.tool_name,
+        toolArgs: { ...cell.tool_arguments }, // Ensure a copy
       }
       setToolForms([initialForm]) // Set the state with a single form array
       setActiveToolIndex(0)
-      console.log("GitHubCell initialized from metadata:", initialForm)
+      console.log("GitHubCell initialized from cell data:", initialForm)
     } else {
-      // Fallback if metadata is missing (should ideally not happen for agent-generated cells)
-      console.warn("GitHubCell missing toolName/toolArgs in metadata for cell:", cell.id)
-      setToolForms([{ toolName: "get_repository", toolArgs: { owner: "", repo: "" } }]) // Default fallback
+      // Fallback if tool info is missing (should ideally not happen for agent-generated cells)
+      console.warn("GitHubCell missing tool_name/tool_arguments in cell data for cell:", cell.id)
+      // Consider a more generic or empty default state
+      setToolForms([{ toolName: "", toolArgs: {} }]) 
       setActiveToolIndex(0)
     }
-    // Dependency array ensures this runs when the cell's metadata potentially changes
-  }, [cell.metadata?.toolName, cell.metadata?.toolArgs, cell.id])
+    // Dependency array ensures this runs when the cell's tool info potentially changes
+  }, [cell.tool_name, cell.tool_arguments, cell.id]) // Use direct cell properties
 
   // Format date to be more readable
   const formatDate = (dateString: string) => {
@@ -271,12 +267,12 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
   // Render the result data in a formatted way
   const renderResultData = () => {
     const toolResult = cell.result
-    const toolName = toolForms[0]?.toolName
+    const toolName = cell.tool_name
 
     if (!toolResult) return null
 
     let shortSha: string | undefined;
-    if (toolName === 'get_commit' && !toolResult.isError && toolResult.content) {
+    if (toolName === 'get_commit' && !toolResult.error && toolResult.content) {
       try {
         let commitDataObj: any;
         if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
@@ -296,7 +292,7 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
 
     let displayContent: React.ReactNode = null
 
-    if (toolName === 'get_commit' && !toolResult.isError && toolResult.content) {
+    if (toolName === 'get_commit' && !toolResult.error && toolResult.content) {
       try {
         let commitData: any;
         if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
@@ -492,7 +488,7 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
             </div>
          );
       }
-    } else if (toolName === 'list_commits' && !toolResult.isError && toolResult.content) {
+    } else if (toolName === 'list_commits' && !toolResult.error && toolResult.content) {
        try {
          let commitsList: any[];
          if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
@@ -586,7 +582,7 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
            </div>
          );
        }
-    } else if (toolName === 'search_repositories' && !toolResult.isError && toolResult.content) {
+    } else if (toolName === 'search_repositories' && !toolResult.error && toolResult.content) {
       try {
         let searchData: any;
         if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
@@ -666,7 +662,7 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
            </div>
          );
       }
-    } else if (toolName === 'get_file_contents' && !toolResult.isError && toolResult.content) {
+    } else if (toolName === 'get_file_contents' && !toolResult.error && toolResult.content) {
       try {
         let parsedData: any;
         if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
@@ -837,7 +833,7 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
            </div>
          );
       }
-    } else if (toolName === 'get_me' && !toolResult.isError && toolResult.content) {
+    } else if (toolName === 'get_me' && !toolResult.error && toolResult.content) {
       try {
         let userData: any;
         if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
@@ -903,7 +899,7 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
             </div>
           );
       }
-    } else if (toolName === 'list_branches' && !toolResult.isError && toolResult.content) {
+    } else if (toolName === 'list_branches' && !toolResult.error && toolResult.content) {
       try {
         let branchesData: any[];
         if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
@@ -981,18 +977,18 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
       }
     } else {
       // Default case for tools without specific rendering
-      if (toolResult.isError) {
+      if (toolResult.error) {
         // Error display logic
         displayContent = (
           <div className="text-red-700 text-xs">
             <p className="font-medium mb-1">Error:</p>
             <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200 overflow-x-auto">{(()=>{
               try {
-                // Try to parse if it's a string, otherwise stringify directly
-                const errorContent = typeof toolResult.content === 'string' ? JSON.parse(toolResult.content) : toolResult.content;
-                return JSON.stringify(errorContent, null, 2);
+                // Use toolResult.error directly
+                return String(toolResult.error); 
               } catch {
-                return String(toolResult.content); // fallback to string
+                // Fallback if string conversion fails (shouldn't happen for string)
+                return "Could not display error content."; 
               }
             })()}</pre>
           </div>
@@ -1050,8 +1046,8 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
       }
     }
 
-    const cardBorderColor = toolResult.isError ? "border-red-200" : "border-green-200";
-    const cardBgColor = toolResult.isError ? "bg-red-50" : "bg-green-50";
+    const cardBorderColor = toolResult.error ? "border-red-200" : "border-green-200";
+    const cardBgColor = toolResult.error ? "bg-red-50" : "bg-green-50";
 
     return (
        <Card className={`mt-3 border ${cardBorderColor} ${!isResultExpanded ? cardBgColor : ''}`}>
@@ -1089,7 +1085,7 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
 
   // Render metadata (like allRepositories)
   const renderMetadata = () => {
-    if (!cell.result?.metadata) return null
+    if (!cell.metadata) return null
 
     return (
       <div className="mt-3">
@@ -1115,7 +1111,7 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
         {showMetadata && (
           <Card className="border-green-200 bg-white">
             <CardContent className="p-2">
-              {cell.result.metadata.allRepositories && (
+              {cell.metadata.allRepositories && (
                 <div>
                   <h4 className="text-xs font-medium mb-1.5">All Repositories</h4>
                   <div className="overflow-x-auto">
@@ -1134,7 +1130,7 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
                         </tr>
                       </thead>
                       <tbody className="bg-white divide-y divide-gray-200 text-xs">
-                        {cell.result.metadata.allRepositories.map((repo: any, index: number) => (
+                        {cell.metadata.allRepositories.map((repo: any, index: number) => (
                           <tr key={index} className={index % 2 === 0 ? "bg-white" : "bg-gray-50"}>
                             <td className="px-2 py-1 whitespace-nowrap">{repo.name}</td>
                             <td className="px-2 py-1 whitespace-nowrap">{formatDate(repo.pushed_at)}</td>
@@ -1149,7 +1145,7 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
                 </div>
               )}
 
-              {Object.entries(cell.result.metadata)
+              {Object.entries(cell.metadata)
                 .filter(([key]) => key !== "allRepositories")
                 .map(([key, value]) => (
                   <div key={key} className="mt-2">
@@ -1170,7 +1166,18 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
   const renderToolFormTabs = () => {
     // Only render if toolForms has been initialized
     if (!toolForms || toolForms.length === 0 || !toolForms[0].toolName) {
-       return <div className="h-10"></div>; // Placeholder or loading state
+      // Use cell.tool_name if available and forms not yet ready
+      const toolName = cell.tool_name;
+      if (toolName) {
+         return (
+           <div className="flex items-center mb-2 border-b pb-1.5">
+             <span className="px-3 py-1.5 text-sm font-medium text-green-700">
+                Tool: {toolName}
+             </span>
+           </div>
+         );
+      }
+      return <div className="h-10"></div>; // Placeholder or loading state
     }
     // Since there's only one tool per cell now, we just display its name as a non-clickable title
     return (
@@ -1245,16 +1252,31 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
             Executing tool...
           </div>
         )}
-
-        {cell.status === "error" && cell.error && (
-          <div className="bg-red-50 border border-red-200 rounded p-2 mb-3 text-red-700">
-            <div className="font-medium text-xs">Execution Error:</div>
-            <div className="text-xs mt-0.5">{cell.error}</div>
+        {/* Add queued status indicator */}
+        {cell.status === "queued" && (
+          <div className="flex items-center text-xs text-blue-600 mb-3">
+             <div className="h-3 w-3 bg-blue-600 rounded-full mr-1.5 animate-pulse"></div>
+             Queued for execution...
+          </div>
+        )}
+        {/* Add stale status indicator */}
+        {cell.status === "stale" && (
+          <div className="flex items-center text-xs text-gray-600 mb-3">
+             <div className="h-3 w-3 border border-gray-600 rounded-full mr-1.5"></div>
+             Stale (needs re-run)...
           </div>
         )}
 
-        {/* Results section - now shows the result of the single tool execution */}
-        {(cell.status === "success" || cell.status === "error") && cell.result && (
+        {/* Update error check to use result.error */}
+        {cell.status === "error" && cell.result?.error && (
+          <div className="bg-red-50 border border-red-200 rounded p-2 mb-3 text-red-700">
+            <div className="font-medium text-xs">Execution Error:</div>
+            <div className="text-xs mt-0.5">{cell.result.error}</div>
+          </div>
+        )}
+
+        {/* Results section - now shows the result of the single tool execution */} 
+        {(cell.status === "success" || (cell.status === "error" && cell.result?.content)) && cell.result && (
           <div>
             {renderResultData()}
             {renderMetadata()}

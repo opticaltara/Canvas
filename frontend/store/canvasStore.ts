@@ -24,7 +24,7 @@ interface NotebookState {
   executeCell: (cellId: string) => Promise<void>
   updateCell: (cellId: string, content: string, metadata?: Record<string, any>) => Promise<void>
   deleteCell: (cellId: string) => Promise<void>
-  createCell: (type: "markdown" | "sql" | "code" | "grafana", initialContent?: string) => Promise<Cell | null>
+  createCell: (type: "markdown" | "github" | "summarization", initialContent?: string) => Promise<Cell | null>
 
   // WebSocket actions
   updateWsStatus: (status: WebSocketStatus) => void
@@ -134,7 +134,7 @@ export const useCanvasStore = create<NotebookState>()(
         },
 
         // Create a new cell
-        createCell: async (type, initialContent) => {
+        createCell: async (type: "markdown" | "github" | "summarization", initialContent?: string) => {
           const { activeNotebookId } = get()
           if (!activeNotebookId) return null
 
@@ -146,14 +146,11 @@ export const useCanvasStore = create<NotebookState>()(
                 case "markdown":
                   defaultContent = "# New Markdown Cell\n\nEnter your markdown content here."
                   break
-                case "sql":
-                  defaultContent = "SELECT * FROM your_table LIMIT 10;"
+                case "github":
+                  defaultContent = "GitHub Tool Cell - Configure in UI"
                   break
-                case "code":
-                  defaultContent = '# Python code\nprint("Hello, world!")'
-                  break
-                case "grafana":
-                  defaultContent = '{\n  "dashboard": "your-dashboard-uid",\n  "from": "now-6h",\n  "to": "now"\n}'
+                case "summarization":
+                  defaultContent = "Summarization results will appear here."
                   break
               }
             }
@@ -161,7 +158,6 @@ export const useCanvasStore = create<NotebookState>()(
             const newCell = await api.cells.create(activeNotebookId, {
               type,
               content: defaultContent,
-              status: "idle",
             })
 
             set((state) => ({

@@ -10,57 +10,24 @@ from pydantic import BaseModel
 
 class QueryResult(BaseModel):
     """
-    Base class for all query results
+    Base class for query results
     
     Attributes:
-        data: The query result data
-        query: The executed query
+        data: The primary result data
+        query: The original query string
         error: Optional error message if query failed
         metadata: Additional metadata about the query result
     """
-    data: Any
+    data: Any = None
     query: str
     error: Optional[str] = None
-    metadata: Dict[str, Any] = {}
-
-
-class LogQueryResult(QueryResult):
-    """
-    Specialized query result for log queries
-    
-    Attributes:
-        data: List of log entries
-        query: The executed log query
-        error: Optional error message if query failed
-        metadata: Additional metadata about the log query result
-    """
-    data: List[Dict[str, Any]]
-
-
-class MetricQueryResult(QueryResult):
-    """
-    Specialized query result for metric queries
-    
-    Attributes:
-        data: List of metric data points
-        query: The executed metric query
-        error: Optional error message if query failed
-        metadata: Additional metadata about the metric query result
-    """
-    data: List[Dict[str, Any]]
+    metadata: Optional[Dict[str, Any]] = None
 
 
 class MarkdownQueryResult(QueryResult):
-    """
-    Specialized query result for markdown content
-    
-    Attributes:
-        data: The markdown content as a string
-        query: The original query that generated the markdown
-        error: Optional error message if generation failed
-        metadata: Additional metadata about the markdown content
-    """
-    data: str
+    """Result containing markdown content."""
+    query: str = "markdown generation"
+    data: str = "" # Default empty string
 
 
 class ToolCallRecord(BaseModel):
@@ -73,29 +40,17 @@ class ToolCallRecord(BaseModel):
 
 class GithubQueryResult(QueryResult):
     """
-    Specialized query result for GitHub queries
-    
-    Attributes:
-        data: Data returned from the GitHub query (can be diverse)
-        query: The executed GitHub operation description
-        error: Optional error message if query failed
-        metadata: Additional metadata about the GitHub query result
-        tool_calls: Sequence of successful tool calls (with results) made within the agent attempt
-                  that produced this result. Each item is a ToolCallRecord.
+    Result from a GitHub agent tool execution.
+    Stores the original tool call info and the result.
     """
-    data: Any  # GitHub queries can return various structures 
-    tool_calls: Optional[List[ToolCallRecord]] = None 
+    query: str = "github tool execution" # Placeholder query
+    data: Any = None # Tool results can be varied
+    tool_call_id: Optional[str] = None
+    tool_name: Optional[str] = None
+    tool_args: Optional[Dict[str, Any]] = None
 
 
 class SummarizationQueryResult(QueryResult):
-    """
-    Specialized query result for text summarization.
-    
-    Attributes:
-        data: The generated summary as a Markdown string.
-        query: The original request or description leading to the summarization.
-        error: Optional error message if summarization failed.
-        metadata: Additional metadata about the summarization process (optional).
-    """
-    data: str # Markdown summary
-    # Inherits query, error, metadata from QueryResult
+    """Result containing summarized text."""
+    query: str = "summarization request" # Placeholder query
+    data: str = "" # Default empty string

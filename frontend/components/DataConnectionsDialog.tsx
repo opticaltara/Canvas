@@ -27,17 +27,18 @@ import { useToast } from "@/hooks/use-toast"
 interface DataConnectionsDialogProps {
   isOpen: boolean
   onClose: () => void
+  initialPage?: "list" | "add"
 }
 
-const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, onClose }) => {
-  const [page, setPage] = useState<"list" | "add">("list")
+const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, onClose, initialPage = "list" }) => {
+  const [page, setPage] = useState<"list" | "add">(initialPage)
   const [newConnection, setNewConnection] = useState<{
     name: string
     type: ConnectionType
     config: Record<string, any>
   }>({
     name: "",
-    type: "grafana",
+    type: "github",
     config: {},
   })
   const [testResult, setTestResult] = useState<{ valid: boolean; message: string } | null>(null)
@@ -65,6 +66,13 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
     }
   }, [isOpen, loadConnections])
 
+  // Update page state if initialPage prop changes while dialog is open
+  useEffect(() => {
+    if (isOpen) {
+      setPage(initialPage);
+    }
+  }, [initialPage, isOpen]);
+
   // Reset state when dialog closes
   useEffect(() => {
     if (!isOpen) {
@@ -76,7 +84,7 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
   const resetForm = () => {
     setNewConnection({
       name: "",
-      type: "grafana",
+      type: "github",
       config: {},
     })
     setTestResult(null)
@@ -272,10 +280,12 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
     return (
       <div className="space-y-4">
         <div className="flex items-center">
-          <Button variant="ghost" size="sm" onClick={() => setPage("list")} className="mr-2">
-            <ArrowLeft className="h-4 w-4 mr-1" />
-            Back
-          </Button>
+          {initialPage === "list" && (
+            <Button variant="ghost" size="sm" onClick={() => setPage("list")} className="mr-2">
+              <ArrowLeft className="h-4 w-4 mr-1" />
+              Back
+            </Button>
+          )}
           <h2 className="text-xl font-semibold">Add New Connection</h2>
         </div>
 
@@ -416,7 +426,7 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="bg-white max-w-3xl max-h-[80vh] overflow-y-auto">
+      <DialogContent className="bg-white max-w-3xl">
         {page === "list" ? renderConnectionsList() : renderAddConnectionForm()}
       </DialogContent>
     </Dialog>

@@ -37,9 +37,6 @@ class Notebook(BaseModel):
     cell_order: List[UUID] = Field(default_factory=list)
     dependency_graph: DependencyGraph = Field(default_factory=DependencyGraph)
     
-    # Store records of tool calls made within this notebook
-    tool_call_records: Dict[ToolCallID, ToolCallRecord] = Field(default_factory=dict)
-    
     class Config:
         arbitrary_types_allowed = True
     
@@ -261,7 +258,7 @@ class Notebook(BaseModel):
         start_time = time.time()
         
         cell = self.get_cell(cell_id)
-        cell.metadata.update(metadata)
+        cell.cell_metadata.update(metadata)
         cell.updated_at = datetime.now(timezone.utc)
         
         # Update notebook metadata

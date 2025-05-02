@@ -2,20 +2,19 @@
 Notebook Manager Service
 """
 
-import asyncio
 import logging
-import os
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Set, Union
+from typing import Any, Callable, Dict, List, Optional, Set
 from uuid import UUID, uuid4
 
 from sqlalchemy.orm import Session
 
 from backend.config import get_settings
-from backend.core.notebook import Notebook, NotebookMetadata
+from backend.core.notebook import Notebook, NotebookMetadata, Cell, CellType, CellStatus, DependencyGraph
 from backend.core.cell import Cell, CellType, CellStatus, CellResult
+from backend.core.types import ToolCallID
 from backend.db.repositories import NotebookRepository
-from backend.db.database import get_db
+
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -138,33 +137,6 @@ class NotebookManager:
             # Instantiate repository locally
             repository = NotebookRepository(db)
 
-            # 1. Save Tool Call Records
-            if notebook.tool_call_records:
-                # Assuming repository has a method like bulk_upsert_tool_call_records
-                # This method needs to be implemented in NotebookRepository
-                logger.debug(f"[{correlation_id}] Saving {len(notebook.tool_call_records)} tool call records...")
-                # repository.bulk_upsert_tool_call_records(list(notebook.tool_call_records.values())) 
-                # Placeholder log until repository method is implemented:
-                logger.info(f"[{correlation_id}] Placeholder: Would save {len(notebook.tool_call_records)} tool call records.")
-            else:
-                logger.debug(f"[{correlation_id}] No tool call records to save.")
-
-            # 2. Save Cell Links (tool_call_ids)
-            cell_updates: Dict[str, List[UUID]] = {}
-            for cell in notebook.cells.values():
-                if cell.tool_call_ids: # Only update if there are links
-                     cell_updates[str(cell.id)] = cell.tool_call_ids
-            
-            if cell_updates:
-                # Assuming repository has a method like bulk_update_cell_tool_call_ids
-                # This method needs to be implemented in NotebookRepository
-                logger.debug(f"[{correlation_id}] Saving tool call links for {len(cell_updates)} cells...")
-                # repository.bulk_update_cell_tool_call_ids(cell_updates)
-                # Placeholder log until repository method is implemented:
-                logger.info(f"[{correlation_id}] Placeholder: Would update tool links for cells: {list(cell_updates.keys())}")
-            else:
-                 logger.debug(f"[{correlation_id}] No cell tool links to update.")
-
             # 3. Save Cell Order
             if notebook.cell_order:
                 # Assuming repository has a method like update_cell_order
@@ -202,8 +174,17 @@ class NotebookManager:
         logger.info(f"Successfully deleted notebook {notebook_id}")
     
     def create_cell(self, db: DbSession, notebook_id: UUID, cell_type: CellType, content: str, 
-                    position: Optional[int] = None, connection_id: Optional[str] = None,
-                    metadata: Optional[Dict] = None, settings: Optional[Dict] = None) -> Cell:
+                    tool_call_id: ToolCallID,
+                    tool_name: Optional[str] = None,
+                    tool_arguments: Optional[Dict[str, Any]] = None,
+                    position: Optional[int] = None, 
+                    connection_id: Optional[str] = None,
+                    metadata: Optional[Dict] = None, 
+                    settings: Optional[Dict] = None,
+                    dependencies: Optional[List[UUID]] = None,
+                    result: Optional[CellResult] = None,
+                    status: Optional[CellStatus] = None
+                    ) -> Cell:
         """Create a new cell in a notebook"""
         # Instantiate repository locally
         repository = NotebookRepository(db)
@@ -224,14 +205,42 @@ class NotebookManager:
             position=position,
             connection_id=connection_id,
             metadata=metadata,
-            settings=settings
+            settings=settings,
+            # Pass new fields to repository (will require repo update)
+            tool_call_id=str(tool_call_id), # Convert UUID to string here
+            tool_name=tool_name, # TODO: Uncomment when repository updated
+            tool_arguments=tool_arguments, # TODO: Uncomment when repository updated
+            # Initial result/status if provided
+            result_content=result.content if result else None, # TODO: Uncomment when repository updated
+            result_error=result.error if result else None, # TODO: Uncomment when repository updated
+            result_execution_time=result.execution_time if result else None, # TODO: Uncomment when repository updated
+            status=status.value if status else None # TODO: Uncomment when repository updated
         )
         
         if not db_cell:
             raise KeyError(f"Failed to create cell in notebook {notebook_id}")
         
+        # Add dependencies using the repository
+        if dependencies:
+            cell_id_str = str(db_cell.id)
+            for dep_id in dependencies:
+                try:
+                    # Assuming add_dependency handles string UUIDs
+                    repository.add_dependency(dependent_id=cell_id_str, dependency_id=str(dep_id))
+                except Exception as dep_err:
+                    logger.error(f"Failed to add dependency {dep_id} to cell {cell_id_str}: {dep_err}", exc_info=True)
+                    # Continue creating cell, but log error
+
+        # Fetch the cell again to include dependencies (if repo doesn't return them)
+        # Or modify _db_cell_to_model to accept the initial dependencies list
+        db_cell_with_deps = repository.get_cell(str(db_cell.id))
+        if not db_cell_with_deps:
+            logger.error(f"Failed to re-fetch cell {db_cell.id} after creation and adding dependencies.")
+            # Fallback to original db_cell if re-fetch fails
+            db_cell_with_deps = db_cell 
+ 
         # Convert to model
-        cell = self._db_cell_to_model(db_cell)
+        cell = self._db_cell_to_model(db_cell_with_deps)
         
         logger.info(f"Created cell {cell.id} in notebook {notebook_id}")
         return cell
@@ -388,13 +397,17 @@ class NotebookManager:
     # They operate on data already fetched from the DB
     def _db_notebook_to_model(self, db_notebook) -> Notebook:
         notebook_data = db_notebook.to_dict()
-        cells = {
-             UUID(cell_id): self._db_cell_to_model(cell_obj) 
-             for cell_id, cell_obj in db_notebook.cells.items()
-        } if hasattr(db_notebook, 'cells') and isinstance(db_notebook.cells, dict) else {
-             UUID(cell.id): self._db_cell_to_model(cell) 
-             for cell in getattr(db_notebook, 'cells', []) # Handle relationship list case
-        }
+        
+        # Initialize with an empty cells dictionary
+        # The frontend will fetch cell details via the /cells endpoint
+        cells = {}
+
+        # Retrieve cell order directly from the notebook_data (which gets it from sorted cells)
+        cell_order_ids = notebook_data.get("cell_order", [])
+        
+        # Convert dependency graph lists to sets
+        dependents_set = {UUID(k): set(UUID(d) for d in v) for k, v in notebook_data["dependency_graph"]["dependents"].items()}
+        dependencies_set = {UUID(k): set(UUID(d) for d in v) for k, v in notebook_data["dependency_graph"]["dependencies"].items()}
         
         return Notebook(
             id=UUID(notebook_data["id"]),
@@ -406,9 +419,13 @@ class NotebookManager:
                 updated_at=datetime.fromisoformat(notebook_data["metadata"]["updated_at"]) if notebook_data["metadata"]["updated_at"] else datetime.now(timezone.utc),
                 tags=notebook_data["metadata"]["tags"]
             ),
-             cells=cells,
-             cell_order=[UUID(cell_id) for cell_id in notebook_data["cell_order"]],
-             # tool_call_records might need loading here if not handled by relationship/to_dict
+             cells=cells, # Pass the empty dictionary
+             cell_order=[UUID(cell_id) for cell_id in cell_order_ids],
+             # Ensure dependency graph is also correctly converted
+             dependency_graph=DependencyGraph(
+                 dependents=dependents_set, # Use the set version
+                 dependencies=dependencies_set # Use the set version
+             )
         )
 
     def _db_cell_to_model(self, db_cell) -> Cell:
@@ -433,7 +450,11 @@ class NotebookManager:
             updated_at=datetime.fromisoformat(cell_dict["updated_at"]) if cell_dict["updated_at"] else datetime.now(timezone.utc),
             connection_id=cell_dict["connection_id"],
             metadata=cell_dict["metadata"],
-            settings=cell_dict["settings"]
+            settings=cell_dict["settings"],
+            # Add new tool fields from dict (assuming they exist in db_cell.to_dict() output)
+            tool_call_id=cell_dict.get("tool_call_id"), 
+            tool_name=cell_dict.get("tool_name"),
+            tool_arguments=cell_dict.get("tool_arguments")
         )
         
         # Add dependencies and dependents

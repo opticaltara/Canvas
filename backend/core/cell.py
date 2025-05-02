@@ -14,7 +14,7 @@ Key components:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 import logging
 import time
@@ -55,14 +55,10 @@ class CellType(str, Enum):
     
     Attributes:
         MARKDOWN: Cell containing markdown text
-        LOG: Cell for log analysis (e.g., Loki)
-        METRIC: Cell for metric queries (e.g., PromQL)
         GITHUB: Cell containing a GitHub query or operation result
         SUMMARIZATION: Cell for summarization results
     """
     MARKDOWN = "markdown"
-    LOG = "log"
-    METRIC = "metric"
     GITHUB = "github"
     SUMMARIZATION = "summarization"
 
@@ -80,7 +76,7 @@ class CellResult(BaseModel):
     content: Any
     error: Optional[str] = None
     execution_time: float = 0.0
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class Cell(BaseModel):
@@ -97,8 +93,10 @@ class Cell(BaseModel):
         updated_at: When the cell was last updated
         dependencies: Set of cell IDs this cell depends on
         dependents: Set of cell IDs that depend on this cell
-        tool_call_ids: List of IDs for tool calls associated with this cell
-        metadata: Additional cell metadata
+        tool_call_id: Optional ID for the specific tool call this cell represents (if applicable)
+        tool_name: Name of the tool called (if applicable)
+        tool_arguments: Arguments passed to the tool (if applicable)
+        cell_metadata: Additional cell metadata
         connection_id: ID of the connection to use (0 or 1)
     """
     id: UUID = Field(default_factory=uuid4)
@@ -106,19 +104,21 @@ class Cell(BaseModel):
     content: str
     result: Optional[CellResult] = None
     status: CellStatus = CellStatus.IDLE
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
-    connection_id: Optional[int] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    connection_id: Optional[str] = Field(default=None, description="ID of the associated connection, if any")
     
     # Dependency handling
     dependencies: Set[UUID] = Field(default_factory=set)
     dependents: Set[UUID] = Field(default_factory=set)
     
-    # Tool calls associated with this cell
-    tool_call_ids: List[ToolCallID] = Field(default_factory=list)
+    # Tool call info (if this cell represents a tool call)
+    tool_call_id: ToolCallID = Field(default_factory=uuid4)
+    tool_name: Optional[str] = None
+    tool_arguments: Optional[Dict[str, Any]] = None
     
     # Metadata
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    cell_metadata: Dict[str, Any] = Field(default_factory=dict)
     
     # Settings for cell execution
     settings: Dict[str, Any] = Field(default_factory=dict)
@@ -136,15 +136,9 @@ class Cell(BaseModel):
     
     @field_validator('connection_id')
     def validate_connection_id(cls, v):
-        if v is not None and v not in [0, 1]:
-            cell_logger.error(
-                "Invalid connection_id",
-                extra={
-                    'connection_id': v,
-                    'error': 'connection_id must be either 0 or 1'
-                }
-            )
-            raise ValueError('connection_id must be either 0 or 1')
+        # Since connection_id is now a UUID string, this validator is no longer applicable
+        # We might add validation later to ensure it's a valid UUID format if needed.
+        # For now, just return the value.
         return v
     
     def mark_stale(self) -> None:
@@ -152,7 +146,7 @@ class Cell(BaseModel):
         start_time = time.time()
         if self.status != CellStatus.STALE:
             self.status = CellStatus.STALE
-            self.updated_at = datetime.utcnow()
+            self.updated_at = datetime.now(timezone.utc)
             process_time = time.time() - start_time
             cell_logger.info(
                 "Cell marked as stale",
@@ -172,7 +166,7 @@ class Cell(BaseModel):
         """
         start_time = time.time()
         self.content = content
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(timezone.utc)
         self.mark_stale()
         process_time = time.time() - start_time
         cell_logger.info(
@@ -199,10 +193,10 @@ class Cell(BaseModel):
             content=result,
             error=error,
             execution_time=execution_time,
-            timestamp=datetime.utcnow()
+            timestamp=datetime.now(timezone.utc)
         )
         self.status = CellStatus.ERROR if error else CellStatus.SUCCESS
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(timezone.utc)
         
         process_time = time.time() - start_time
         cell_logger.info(
@@ -384,13 +378,10 @@ class MarkdownCell(Cell):
 class GitHubCell(Cell):
     """
     A cell containing a GitHub query/action intent.
-    Stores the tool name and arguments needed for execution.
+    Tool details are now stored in the base Cell fields.
     """
     type: CellType = CellType.GITHUB
     source: str = "github"
-    # Store the specific tool and its arguments for execution
-    tool_name: Optional[str] = None
-    tool_arguments: Optional[Dict[str, Any]] = None
     
     def __init__(self, **data):
         super().__init__(**data)
@@ -399,88 +390,6 @@ class GitHubCell(Cell):
             extra={
                 'cell_id': str(self.id),
                 'source': self.source
-            }
-        )
-
-
-class LogCell(Cell):
-    """
-    A cell for log analysis queries
-    
-    This cell type is used to query log data from sources like Loki.
-    
-    Attributes:
-        source: The log source (e.g., "loki", "grafana")
-        time_range: Optional time range for the query
-    """
-    type: CellType = CellType.LOG
-    source: str = "loki"  # Default to Loki, could be other log sources
-    time_range: Optional[Dict[str, str]] = None
-    
-    def __init__(self, **data):
-        super().__init__(**data)
-        cell_logger.info(
-            "Log query cell initialized",
-            extra={
-                'cell_id': str(self.id),
-                'source': self.source,
-                'has_time_range': self.time_range is not None
-            }
-        )
-    
-    def set_time_range(self, start: str, end: str) -> None:
-        """Set the time range for the log query"""
-        start_time = time.time()
-        self.time_range = {"start": start, "end": end}
-        process_time = time.time() - start_time
-        cell_logger.info(
-            "Log query time range set",
-            extra={
-                'cell_id': str(self.id),
-                'start_time': start,
-                'end_time': end,
-                'processing_time_ms': round(process_time * 1000, 2)
-            }
-        )
-
-
-class MetricCell(Cell):
-    """
-    A cell for metric queries (e.g., PromQL)
-    
-    This cell type is used to query time series metrics from sources like Prometheus.
-    
-    Attributes:
-        source: The metric source (e.g., "prometheus", "grafana")
-        time_range: Optional time range for the query
-    """
-    type: CellType = CellType.METRIC
-    source: str = "prometheus"
-    time_range: Optional[Dict[str, str]] = None
-    
-    def __init__(self, **data):
-        super().__init__(**data)
-        cell_logger.info(
-            "Metric query cell initialized",
-            extra={
-                'cell_id': str(self.id),
-                'source': self.source,
-                'has_time_range': self.time_range is not None
-            }
-        )
-    
-    def set_time_range(self, start: str, end: str) -> None:
-        """Set the time range for the metric query"""
-        start_time = time.time()
-        self.time_range = {"start": start, "end": end}
-        process_time = time.time() - start_time
-        cell_logger.info(
-            "Metric query time range set",
-            extra={
-                'cell_id': str(self.id),
-                'start_time': start,
-                'end_time': end,
-                'processing_time_ms': round(process_time * 1000, 2)
             }
         )
 
@@ -522,8 +431,6 @@ def create_cell(cell_type: CellType, content: str, **kwargs) -> Cell:
         # Map cell types to their classes
         cell_classes = {
             CellType.MARKDOWN: MarkdownCell,
-            CellType.LOG: LogCell,
-            CellType.METRIC: MetricCell,
             CellType.GITHUB: GitHubCell,
             CellType.SUMMARIZATION: SummarizationCell
         }
@@ -534,14 +441,8 @@ def create_cell(cell_type: CellType, content: str, **kwargs) -> Cell:
             
         cell_class = cell_classes[cell_type]
         
-        # Prepare arguments, extracting GitHub specific ones if needed
+        # Prepare arguments
         constructor_args = {"content": content, **kwargs}
-        if cell_type == CellType.GITHUB:
-            # Clean potential None values passed if agent didn't find tool calls
-            if constructor_args.get('tool_name') is None:
-                constructor_args.pop('tool_name', None)
-            if constructor_args.get('tool_arguments') is None:
-                constructor_args.pop('tool_arguments', None)
                 
         cell = cell_class(**constructor_args)
         

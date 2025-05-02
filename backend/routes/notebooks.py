@@ -11,9 +11,12 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from backend.core.cell import CellType, CellStatus
+from backend.core.types import ToolCallID
 from backend.services.notebook_manager import NotebookManager, get_notebook_manager
 from backend.db.database import get_db
 from backend.websockets import WebSocketManager, get_ws_manager
+from backend.services.connection_manager import ConnectionManager, get_connection_manager
+from backend.db.repositories import NotebookRepository
 
 # Initialize logger
 route_logger = logging.getLogger("api.routes.notebooks")
@@ -55,6 +58,7 @@ class CellCreate(BaseModel):
     position: Optional[int] = None
     metadata: Optional[Dict] = None
     settings: Optional[Dict] = None
+    connection_id: Optional[str] = None
 
 
 class CellUpdate(BaseModel):
@@ -221,7 +225,9 @@ async def delete_notebook(
 async def create_cell(
     notebook_id: UUID,
     cell_data: CellCreate,
+    tool_call_id: ToolCallID,
     notebook_manager: NotebookManager = Depends(get_notebook_manager),
+    connection_manager: ConnectionManager = Depends(get_connection_manager),
     db: Session = Depends(get_db)
 ) -> Dict:
     """
@@ -234,14 +240,33 @@ async def create_cell(
     Returns:
         The created cell data
     """
-    route_logger.info(f"Creating new cell in notebook: {notebook_id}")
+    route_logger.info(f"Creating new cell in notebook: {notebook_id} with type {cell_data.cell_type}")
+    
+    connection_id_to_use: Optional[str] = cell_data.connection_id
+    
+    if cell_data.cell_type == CellType.GITHUB:
+        if connection_id_to_use is None:
+            route_logger.info(f"GitHub cell type requires connection_id, fetching default.")
+            try:
+                default_connection = await connection_manager.get_default_connection('github')
+                if default_connection:
+                    connection_id_to_use = default_connection.id
+                    route_logger.info(f"Using default GitHub connection: {connection_id_to_use}")
+                else:
+                    route_logger.warning("No default GitHub connection found. Cell will be created without one.")
+            except Exception as e:
+                route_logger.error(f"Error fetching default GitHub connection: {e}", exc_info=True)
+                pass 
+    
     try:
         cell = notebook_manager.create_cell(
             db=db,
             notebook_id=notebook_id,
             cell_type=cell_data.cell_type,
             content=cell_data.content,
+            tool_call_id=tool_call_id,
             position=cell_data.position,
+            connection_id=connection_id_to_use,
             metadata=cell_data.metadata,
             settings=cell_data.settings
         )
@@ -267,7 +292,8 @@ async def create_cell(
 @router.get("/{notebook_id}/cells", response_model=List[Dict])
 async def list_cells(
     notebook_id: UUID,
-    notebook_manager: NotebookManager = Depends(get_notebook_manager),
+    # Remove notebook_manager dependency as we'll use the repository directly
+    # notebook_manager: NotebookManager = Depends(get_notebook_manager),
     db: Session = Depends(get_db)
 ) -> List[Dict]:
     """
@@ -281,13 +307,22 @@ async def list_cells(
     """
     route_logger.info(f"Listing cells for notebook: {notebook_id}")
     try:
-        notebook = notebook_manager.get_notebook(db, notebook_id)
-        cells = [notebook.cells[cell_id].model_dump() for cell_id in notebook.cell_order]
-        route_logger.info(f"Found {len(cells)} cells in notebook {notebook_id}")
-        return cells
-    except KeyError:
-        route_logger.error(f"Notebook not found: {notebook_id}")
-        raise HTTPException(status_code=404, detail=f"Notebook {notebook_id} not found")
+        # Instantiate repository directly
+        repository = NotebookRepository(db)
+        
+        # Use the new repository method to get cells
+        db_cells = repository.list_cells_by_notebook(str(notebook_id))
+        
+        # Convert db cell objects to dictionaries
+        # Assuming Cell model has a to_dict() method
+        cells_data = [cell.to_dict() for cell in db_cells]
+        
+        route_logger.info(f"Found {len(cells_data)} cells in notebook {notebook_id}")
+        return cells_data
+    # Update the exception handling if necessary (KeyError might not be raised here anymore)
+    # except KeyError:
+    #     route_logger.error(f"Notebook not found: {notebook_id}")
+    #     raise HTTPException(status_code=404, detail=f"Notebook {notebook_id} not found")
     except Exception as e:
         route_logger.error(f"Error listing cells for notebook {notebook_id}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to list cells")

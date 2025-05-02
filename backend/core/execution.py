@@ -10,14 +10,15 @@ from pydantic import BaseModel, Field
 from backend.core.cell import Cell, CellStatus, CellType, GitHubCell
 from backend.core.notebook import Notebook
 from backend.core.dependency import ToolCallID
-from backend.services.connection_manager import get_github_stdio_params
+from backend.services.connection_manager import get_github_stdio_params, ConnectionManager, get_connection_manager
 from backend.core.cell import GitHubCell
 from mcp.client.stdio import stdio_client
 from mcp import ClientSession
 from mcp.shared.exceptions import McpError
 import logging
 
-from backend.core.types import ToolCallRecord
+# Import StdioServerParameters
+from mcp import StdioServerParameters
 
 # Initialize loggers
 execution_logger = logging.getLogger("execution")
@@ -25,191 +26,6 @@ cell_executor_logger = logging.getLogger("cell_executor")
 
 
 # --- Tool Call Representation ---
-
-def register_tool_dependencies(
-    tool_call_record: ToolCallRecord, 
-    notebook: Notebook, 
-    step_id_to_record_id: Dict[str, UUID]
-) -> None:
-    """
-    Inspects a tool call record's parameters for the special '__ref__' structure 
-    indicating a dependency on a previous step's output, and registers the 
-    corresponding dependencies in the notebook's dependency graph using ToolCallIDs.
-
-    Args:
-        tool_call_record: The ToolCallRecord whose parameters should be inspected.
-        notebook: The notebook instance containing the dependency graph.
-        step_id_to_record_id: Mapping from the planner's step_id to the ToolCallRecord UUID.
-    """
-    if not tool_call_record.parameters:
-        return
-
-    dependency_graph = notebook.dependency_graph
-    dependent_tool_id = tool_call_record.id
-
-    def find_and_register_refs(value: Any):
-        """Recursive helper to find __ref__ dicts and register dependencies."""
-        if isinstance(value, dict):
-            if '__ref__' in value:
-                ref_data = value['__ref__']
-                if isinstance(ref_data, dict) and 'step_id' in ref_data and 'output_name' in ref_data:
-                    source_step_id = ref_data['step_id']
-                    output_name = ref_data['output_name']
-                    
-                    # Look up the actual ToolCallID using the step_id
-                    if source_step_id in step_id_to_record_id:
-                        source_tool_id = step_id_to_record_id[source_step_id]
-                        
-                        # Ensure the source tool record exists (optional, for robustness)
-                        if source_tool_id not in notebook.tool_call_records:
-                            execution_logger.warning(
-                                f"Source tool call record {source_tool_id} (from step {source_step_id}) not found when registering dependency for {dependent_tool_id}",
-                                extra={'notebook_id': str(notebook.id), 'dependent_tool_id': str(dependent_tool_id), 'source_step_id': source_step_id, 'source_tool_id': str(source_tool_id)}
-                            )
-                            # Continue checking other parts of the structure even if one source is missing
-                        else:
-                            # Register the dependency if not already registered (avoid duplicates from nested calls)
-                            if source_tool_id not in dependency_graph.get_tool_dependencies(dependent_tool_id):
-                                dependency_graph.add_tool_dependency(
-                                    dependent_id=dependent_tool_id,
-                                    dependency_id=source_tool_id
-                                )
-                                execution_logger.info(
-                                    f"Registered tool dependency: {dependent_tool_id} depends on {source_tool_id} (step: {source_step_id}, output: {output_name})",
-                                    extra={'notebook_id': str(notebook.id), 'dependent_tool_id': str(dependent_tool_id), 'source_tool_id': str(source_tool_id), 'source_step_id': source_step_id, 'output_name': output_name}
-                                )
-                    else:
-                        execution_logger.warning(
-                            f"Step ID '{source_step_id}' referenced by tool {dependent_tool_id} not found in step_id_to_record_id map.",
-                             extra={'notebook_id': str(notebook.id), 'dependent_tool_id': str(dependent_tool_id), 'source_step_id': source_step_id}
-                        )
-            else: # Recurse into dict values if it's not a ref dict itself
-                for k, v in value.items():
-                    find_and_register_refs(v)
-        elif isinstance(value, list):
-            for item in value:
-                find_and_register_refs(item)
-
-    # Iterate through the top-level parameters
-    for param_name, param_value in tool_call_record.parameters.items():
-        # TODO: Handle potential nested references (e.g., in lists or dicts within params)
-        # Check for the specific reference structure
-        find_and_register_refs(param_value)
-        # The old code below is now handled by the recursive helper
-        # if isinstance(param_value, dict) and '__ref__' in param_value:
-        #     ref_data = param_value['__ref__']
-        #     ... rest of the previous logic ...
-
-
-def propagate_tool_results(
-    completed_record: ToolCallRecord, 
-    notebook: Notebook, 
-    step_id_to_record_id: Dict[str, UUID] # Added map, though not strictly needed here yet
-):
-    """
-    Finds tool calls dependent on the completed tool call, updates their parameters
-    by replacing the '__ref__' structure with the actual result, and marks the 
-    associated cells as stale.
-
-    Args:
-        completed_record: The ToolCallRecord that has successfully completed.
-        notebook: The notebook instance containing the state.
-        step_id_to_record_id: Mapping from planner step_id to ToolCallRecord UUID (passed for consistency, may be used later).
-    """
-    if completed_record.status != "success" or not completed_record.named_outputs:
-        # Only propagate successful results with outputs
-        return
-
-    dependency_graph = notebook.dependency_graph
-    dependents = dependency_graph.get_tool_dependents(completed_record.id)
-
-    execution_logger.info(
-        f"Propagating results from tool {completed_record.id} to {len(dependents)} dependents.",
-        extra={'notebook_id': str(notebook.id), 'source_tool_id': str(completed_record.id), 'dependent_count': len(dependents)}
-    )
-
-    cells_to_mark_stale: Set[UUID] = set()
-
-    for dependent_id in dependents:
-        if dependent_id not in notebook.tool_call_records:
-            execution_logger.warning(
-                f"Dependent tool call record {dependent_id} not found during propagation from {completed_record.id}",
-                extra={'notebook_id': str(notebook.id), 'source_tool_id': str(completed_record.id), 'dependent_tool_id': str(dependent_id)}
-            )
-            continue
-        
-        dependent_record = notebook.tool_call_records[dependent_id]
-        needs_update = False
-
-        for param_name, param_value in list(dependent_record.parameters.items()): # Iterate over copy
-            # Check for the reference structure pointing to the completed record
-            if isinstance(param_value, dict) and '__ref__' in param_value:
-                 ref_data = param_value['__ref__']
-                 if isinstance(ref_data, dict) and 'step_id' in ref_data and 'output_name' in ref_data:
-                    source_step_id = ref_data['step_id']
-                    # Check if this reference points to the completed step's ID via the map
-                    if source_step_id in step_id_to_record_id and step_id_to_record_id[source_step_id] == completed_record.id:
-                        output_name = ref_data['output_name']
-                        if output_name in completed_record.named_outputs:
-                            actual_value = completed_record.named_outputs[output_name]
-                            # Replace the reference dict with the actual value
-                            dependent_record.parameters[param_name] = actual_value
-                            needs_update = True
-                            execution_logger.info(
-                                f"Updated parameter '{param_name}' in dependent tool {dependent_id} with output '{output_name}' from {completed_record.id} (step: {source_step_id})",
-                                extra={
-                                    'notebook_id': str(notebook.id), 
-                                    'source_tool_id': str(completed_record.id),
-                                    'source_step_id': source_step_id,
-                                    'dependent_tool_id': str(dependent_id),
-                                    'parameter_name': param_name, 
-                                    'output_name': output_name
-                                }
-                            )
-                        else:
-                            execution_logger.warning(
-                                f"Output '{output_name}' not found in completed tool {completed_record.id} (step: {source_step_id}) for dependent {dependent_id}",
-                                extra={
-                                    'notebook_id': str(notebook.id),
-                                    'source_tool_id': str(completed_record.id),
-                                    'source_step_id': source_step_id,
-                                    'dependent_tool_id': str(dependent_id),
-                                    'output_name': output_name
-                                }
-                            )
-                            # Decide how to handle missing output: error, leave reference, set to None? Mark stale anyway.
-                            needs_update = True # Mark stale even if output name is missing
-        
-        if needs_update:
-            # Mark the *cell* containing the dependent tool call as stale
-            # The execution engine should then re-evaluate the cell, which might re-run the tool call
-            if dependent_record.parent_cell_id in notebook.cells:
-                cells_to_mark_stale.add(dependent_record.parent_cell_id)
-            else:
-                 execution_logger.warning(
-                    f"Parent cell {dependent_record.parent_cell_id} for tool {dependent_id} not found in notebook.",
-                    extra={'notebook_id': str(notebook.id), 'tool_id': str(dependent_id), 'cell_id': str(dependent_record.parent_cell_id)}
-                 )
-
-    # Mark affected cells as stale (and potentially their dependents)
-    stale_cells = set()
-    for cell_id in cells_to_mark_stale:
-        stale_cells.update(notebook.mark_dependents_stale(cell_id)) # Use existing cell-level stale propagation
-        # Also mark the cell itself stale if it wasn't already caught by dependents chain
-        if cell_id in notebook.cells:
-            cell = notebook.cells[cell_id]
-            if cell.status != CellStatus.STALE:
-                 cell.mark_stale()
-                 stale_cells.add(cell_id)
-
-    if stale_cells:
-        execution_logger.info(
-            f"Marked {len(stale_cells)} cells stale due to tool propagation from {completed_record.id}.",
-            extra={'notebook_id': str(notebook.id), 'source_tool_id': str(completed_record.id), 'stale_cell_count': len(stale_cells)}
-        )
-        # Here, you would typically notify the frontend or trigger the execution engine
-        # to re-run the stale cells based on the dependency graph order.
-        # e.g., await notebook_manager.schedule_execution(notebook.id, list(stale_cells))
 
 
 # --- Existing Execution Context and Classes ---
@@ -399,8 +215,9 @@ class CellExecutor:
     Executes cells and manages their execution state
     Different cell types will have different execution strategies
     """
-    def __init__(self, notebook_manager):
+    def __init__(self, notebook_manager, connection_manager: Optional[ConnectionManager] = None):
         self.notebook_manager = notebook_manager
+        self.connection_manager = connection_manager or get_connection_manager() # Use injected or singleton
         self.logger = cell_executor_logger
     
     async def execute_cell(self, notebook_id: UUID, cell_id: UUID, correlation_id: Optional[str] = None) -> Any:
@@ -474,7 +291,7 @@ class CellExecutor:
             
             # Execute the cell based on its type
             execution_start = time.time()
-            result = await self._execute_by_type(cell, context)
+            result = await self._execute_by_type(cell, context, correlation_id)
             execution_time = time.time() - execution_start
             
             self.logger.info(
@@ -527,77 +344,194 @@ class CellExecutor:
     
     async def execute_notebook(self, notebook_id: UUID) -> None:
         """
-        Execute all cells in a notebook in dependency order
+        Execute all runnable cells in a notebook, respecting dependencies.
         
         Args:
             notebook_id: ID of the notebook to execute
         """
-        notebook = self.notebook_manager.get_notebook(notebook_id)
-        execution_order = notebook.get_execution_order()
-        
-        for cell_id in execution_order:
-            await self.execute_cell(notebook_id, cell_id)
+        correlation_id = str(uuid4())
+        self.logger.info(f"Starting execution for notebook {notebook_id}", extra={'correlation_id': correlation_id})
+
+        try:
+            notebook = self.notebook_manager.get_notebook(notebook_id)
+            if not notebook:
+                self.logger.error(f"Notebook {notebook_id} not found for execution.", extra={'correlation_id': correlation_id})
+                return
+
+            # Get topologically sorted order if possible, fallback to notebook order
+            try:
+                execution_order = notebook.get_execution_order()
+                self.logger.info(f"Using dependency graph execution order for notebook {notebook_id}.", extra={'correlation_id': correlation_id})
+            except Exception as e:
+                self.logger.warning(f"Failed to get dependency graph order for notebook {notebook_id}: {e}. Falling back to cell_order.", extra={'correlation_id': correlation_id})
+                execution_order = notebook.cell_order
+
+            completed_cells: Set[UUID] = set()
+            failed_cells: Set[UUID] = set()
+            runnable_cells = set(execution_order)
+
+            execution_cycles = 0
+            max_cycles = len(runnable_cells) + 1 # Safety break
+
+            while runnable_cells and execution_cycles < max_cycles:
+                execution_cycles += 1
+                executed_in_cycle = False
+                cells_to_run_this_cycle = list(runnable_cells) # Copy to iterate while modifying set
+
+                for cell_id in cells_to_run_this_cycle:
+                    if cell_id in completed_cells or cell_id in failed_cells:
+                        runnable_cells.discard(cell_id) # Already processed
+                        continue
+
+                    cell = notebook.get_cell(cell_id) # Assume get_cell fetches the latest
+                    if not cell:
+                        self.logger.warning(f"Cell {cell_id} not found during notebook execution cycle.", extra={'correlation_id': correlation_id})
+                        runnable_cells.discard(cell_id)
+                        failed_cells.add(cell_id) # Mark as failed if not found
+                        continue
+
+                    # Check dependencies
+                    dependencies = cell.dependencies
+                    all_deps_met = True
+                    dependency_failed = False
+                    for dep_id in dependencies:
+                        if dep_id not in completed_cells:
+                            all_deps_met = False
+                            if dep_id in failed_cells:
+                                dependency_failed = True
+                            break # Stop checking dependencies for this cell
+                    
+                    if dependency_failed:
+                        self.logger.warning(f"Skipping cell {cell_id} because dependency failed.", extra={'correlation_id': correlation_id})
+                        runnable_cells.discard(cell_id)
+                        failed_cells.add(cell_id)
+                        continue # Skip to next cell in this cycle
+
+                    if all_deps_met:
+                        self.logger.info(f"Executing cell {cell_id} (Cycle {execution_cycles})", extra={'correlation_id': correlation_id})
+                        try:
+                            await self.execute_cell(notebook_id, cell_id, correlation_id)
+                            # Re-fetch cell to check status after execution
+                            updated_cell = notebook.get_cell(cell_id) 
+                            if updated_cell.status == CellStatus.SUCCESS:
+                                completed_cells.add(cell_id)
+                                self.logger.info(f"Cell {cell_id} completed successfully.", extra={'correlation_id': correlation_id})
+                            else: # Includes ERROR, potentially STALE if execution was interrupted
+                                failed_cells.add(cell_id)
+                                self.logger.warning(f"Cell {cell_id} did not complete successfully (Status: {updated_cell.status.value}).", extra={'correlation_id': correlation_id})
+                        except Exception as exec_err:
+                            self.logger.error(f"Error during isolated execution of cell {cell_id}: {exec_err}", exc_info=True, extra={'correlation_id': correlation_id})
+                            failed_cells.add(cell_id)
+                        
+                        runnable_cells.discard(cell_id)
+                        executed_in_cycle = True
+                        # Break inner loop to re-evaluate readiness after one execution
+                        # This ensures sequential execution respecting dependencies within the cycle manager
+                        break 
+                
+                if not executed_in_cycle and runnable_cells:
+                    # If no cells were executed in a cycle but some are still runnable, implies a deadlock or issue
+                    self.logger.warning(f"Notebook {notebook_id} execution stalled. Runnable but no progress: {runnable_cells}", extra={'correlation_id': correlation_id})
+                    break # Avoid infinite loop
+
+            if execution_cycles >= max_cycles:
+                self.logger.error(f"Notebook {notebook_id} execution exceeded max cycles. Aborting.", extra={'correlation_id': correlation_id})
+
+            remaining_cells = set(execution_order) - completed_cells - failed_cells
+            if remaining_cells:
+                self.logger.warning(f"Notebook {notebook_id} execution finished, but some cells did not run: {remaining_cells}", extra={'correlation_id': correlation_id})
+            elif failed_cells:
+                self.logger.warning(f"Notebook {notebook_id} execution finished with failed cells: {failed_cells}", extra={'correlation_id': correlation_id})
+            else:
+                self.logger.info(f"Notebook {notebook_id} execution finished successfully.", extra={'correlation_id': correlation_id})
+
+        except Exception as outer_err:
+            self.logger.error(f"Error during notebook execution process for {notebook_id}: {outer_err}", exc_info=True, extra={'correlation_id': correlation_id})
     
-    async def _execute_by_type(self, cell: Cell, context: ExecutionContext) -> Any:
+    async def _execute_by_type(self, cell: Cell, context: ExecutionContext, correlation_id: Optional[str] = None) -> Any:
         """
         Execute a cell based on its type
         
         Args:
             cell: The cell to execute
             context: The execution context
+            correlation_id: Optional correlation ID for logging
             
         Returns:
             The result of the execution
         """
+        # TODO: Inject or retrieve MCP clients based on cell.source or type
+        # mcp_clients = context.mcp_clients # Assuming clients are passed in context
+        
         if cell.type == CellType.MARKDOWN:
-            return cell.content
+            return cell.content # Markdown just displays content
         
-        elif cell.type == CellType.GITHUB:
-            if not isinstance(cell, GitHubCell):
-                 self.logger.error(f"Cell {cell.id} has type GITHUB but is not a GitHubCell instance.")
-                 raise TypeError("Incorrect cell type instance for GITHUB execution.")
-                 
-            github_cell: GitHubCell = cell # Type hint for clarity
-            tool_name = github_cell.tool_name
-            tool_args = github_cell.tool_arguments
-
-            if not tool_name or tool_args is None: # Check for None specifically for args dict
-                self.logger.warning(f"GitHub cell {github_cell.id} missing tool_name or tool_arguments for execution. Returning current content.")
-                # Maybe return an error or the potentially outdated content?
-                return github_cell.content # Fallback to content if execution info missing
-                
-            self.logger.info(f"Executing GitHub cell {github_cell.id}: tool='{tool_name}', args={tool_args}")
-            stdio_params = await get_github_stdio_params()
-            
-            if not stdio_params:
-                error_msg = "Failed to get GitHub MCP stdio parameters for execution."
-                self.logger.error(error_msg, extra={'cell_id': github_cell.id})
-                raise ConnectionError(error_msg)
-                
-            mcp_result = None
-            try:
-                async with stdio_client(stdio_params) as (read, write):
-                    # Optional: Add sampling callback if needed
-                    async with ClientSession(read, write) as session:
-                        await session.initialize() 
-                        # Ensure arguments are passed correctly
-                        mcp_result = await session.call_tool(tool_name, arguments=tool_args)
-                        self.logger.info(f"GitHub MCP call successful for cell {github_cell.id}. Result type: {type(mcp_result)}")
-                return mcp_result # Return the direct result from MCP
-            except McpError as e:
-                error_msg = f"MCP Error executing GitHub cell {github_cell.id}: {e}"
-                self.logger.error(error_msg, exc_info=True, extra={'cell_id': github_cell.id, 'tool_name': tool_name})
-                raise # Re-raise McpError to be caught by the main execute_cell handler
-            except Exception as e:
-                error_msg = f"Unexpected Error executing GitHub cell {github_cell.id}: {e}"
-                self.logger.error(error_msg, exc_info=True, extra={'cell_id': github_cell.id, 'tool_name': tool_name})
-                raise # Re-raise other errors
-            
         elif cell.type == CellType.SUMMARIZATION:
+            # Currently, summarization cells just hold content/results generated by the agent.
+            # If they needed active execution (e.g., calling a summarization API), 
+            # that logic would go here, likely using an MCP client.
             return cell.content
         
+        # Check if this cell represents a tool call
+        elif cell.tool_name and cell.tool_arguments is not None:
+            tool_name = cell.tool_name
+            tool_args = cell.tool_arguments
+            # Determine which MCP client to use based on cell type or source
+            # For now, hardcoding for GitHub as it's the only tool type left
+            connection_id = cell.connection_id # Get connection ID from cell
+
+            if cell.type == CellType.GITHUB:
+                self.logger.info(f"Executing GitHub tool via MCP: cell={cell.id}, tool='{tool_name}', args={tool_args}, connection_id={connection_id}", extra={'correlation_id': correlation_id})
+                
+                if not connection_id:
+                    error_msg = f"GitHub cell {cell.id} is missing a connection_id."
+                    self.logger.error(error_msg, extra={'correlation_id': correlation_id, 'cell_id': cell.id})
+                    raise ValueError(error_msg)
+
+                # Fetch connection details using ConnectionManager
+                connection_config = await self.connection_manager.get_connection(str(connection_id))
+                if not connection_config or connection_config.type != 'github':
+                    error_msg = f"Failed to get valid GitHub connection details for ID {connection_id}."
+                    self.logger.error(error_msg, extra={'correlation_id': correlation_id, 'cell_id': cell.id, 'connection_id': connection_id})
+                    raise ConnectionError(error_msg)
+
+                # Prepare StdioServerParameters from connection config
+                cmd = connection_config.config.get('command')
+                args = connection_config.config.get('args')
+                env = connection_config.config.get('env') # Get env vars which might include PAT
+
+                if not cmd or not args:
+                    error_msg = f"GitHub connection {connection_id} is missing command or args in config."
+                    self.logger.error(error_msg, extra={'correlation_id': correlation_id, 'cell_id': cell.id, 'connection_id': connection_id})
+                    raise ConnectionError(error_msg)
+
+                stdio_params = StdioServerParameters(command=cmd, args=args, env=env)
+
+                # Execute using stdio_client context manager
+                mcp_result = None
+                try:
+                    async with stdio_client(stdio_params) as (read, write):
+                        async with ClientSession(read, write) as session:
+                            await session.initialize()
+                            mcp_result = await session.call_tool(tool_name, arguments=tool_args)
+                            self.logger.info(f"GitHub MCP call successful for cell {cell.id}. Result type: {type(mcp_result)}", extra={'correlation_id': correlation_id})
+                    return mcp_result
+                except McpError as e:
+                    error_msg = f"MCP Error executing tool '{tool_name}' for cell {cell.id}: {e}"
+                    self.logger.error(error_msg, exc_info=True, extra={'correlation_id': correlation_id, 'cell_id': cell.id, 'tool_name': tool_name})
+                    raise # Re-raise to be caught by execute_cell
+                except Exception as e:
+                    error_msg = f"Unexpected Error executing tool '{tool_name}' for cell {cell.id}: {e}"
+                    self.logger.error(error_msg, exc_info=True, extra={'correlation_id': correlation_id, 'cell_id': cell.id, 'tool_name': tool_name})
+                    raise # Re-raise
+            else:
+                # Handle other potential tool sources if added later
+                raise NotImplementedError(f"Execution via MCP not implemented for cell type/source: {cell.type}")
+        
+        # If not Markdown, Summarization, or a recognized tool call cell
         else:
-            raise ValueError(f"Unknown cell type: {cell.type}")
+            self.logger.warning(f"Cell {cell.id} of type {cell.type} has no execution logic defined and is not a tool call. Returning content.", extra={'cell_id': cell.id})
+            return cell.content # Default fallback
     
     def _get_dependency_results(self, notebook: Notebook, cell_id: UUID) -> Dict[str, Any]:
         """

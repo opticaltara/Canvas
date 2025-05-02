@@ -3,8 +3,8 @@
 import { useState, useEffect, useCallback } from "react"
 import { useWebSocket } from "./useWebSocket"
 import { useToast } from "@/hooks/use-toast"
-import { useCanvasStore } from "@/store/canvas" // Import useCanvasStore
-import { type CellStatus, type CellType } from "@/store/types"; // Import CellStatus & CellType
+import { useCanvasStore } from "@/store/canvasStore" // Import useCanvasStore
+import { type CellStatus} from "@/store/types"; // Import CellStatus & CellType
 
 // Define a simple QueryResult type matching backend structure
 export interface QueryResult {

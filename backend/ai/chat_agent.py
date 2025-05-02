@@ -9,12 +9,12 @@ and manage notebook cells.
 import logging
 import time
 import json
-from typing import Dict, List, Optional, Any, Tuple, AsyncGenerator
+from typing import Dict, List, Optional, Any, Tuple, AsyncGenerator, Union
 from datetime import datetime, timezone
 from pathlib import Path
-import asyncio
 import redis.asyncio as redis
 from redis.asyncio.client import Redis as AsyncRedis
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
@@ -33,6 +33,25 @@ from backend.ai.chat_tools import NotebookCellTools
 from backend.services.notebook_manager import NotebookManager
 from backend.ai.agent import AIAgent
 from backend.services.connection_manager import ConnectionManager, get_connection_manager
+from backend.ai.events import (
+    EventType, 
+    AgentType, 
+    StatusType, 
+    ClarificationNeededEvent,
+    PlanCreatedEvent,
+    PlanCellCreatedEvent,
+    StepStartedEvent,
+    StepCompletedEvent,
+    StepErrorEvent,
+    GitHubToolCellCreatedEvent,
+    GitHubToolErrorEvent,
+    SummaryStartedEvent,
+    SummaryUpdateEvent,
+    SummaryCellCreatedEvent,
+    SummaryCellErrorEvent,
+    InvestigationCompleteEvent,
+    StatusUpdateEvent
+)
 
 # Initialize logger
 chat_agent_logger = logging.getLogger("ai.chat_agent")
@@ -57,31 +76,43 @@ class CellResponsePart(TextPart):
         self.result = result
 
     def model_dump(self) -> Dict[str, Any]:
+        # Helper to recursively convert non-serializable types
+        def _serialize_value(value):
+            if isinstance(value, UUID):
+                return str(value)
+            elif isinstance(value, datetime):
+                 # Example: Add handling for datetime if needed
+                 return value.isoformat()
+            elif isinstance(value, dict):
+                # Recursively process dictionaries
+                return {k: _serialize_value(v) for k, v in value.items()}
+            elif isinstance(value, list):
+                # Recursively process lists
+                return [_serialize_value(item) for item in value]
+            elif isinstance(value, BaseModel):
+                 # Handle nested Pydantic models by dumping and then serializing
+                 return _serialize_value(value.model_dump())
+            # Add other type checks as necessary
+            try:
+                # Attempt to serialize other types, fail gracefully if needed
+                json.dumps(value) 
+                return value
+            except TypeError:
+                # Fallback for unserializable types
+                chat_agent_logger.warning(f"Unserializable type {type(value)} encountered in model_dump, converting to string.")
+                return str(value)
+
+        # Apply the recursive serializer to relevant fields
         dump = {
             "type": "cell_response",
-            "cell_id": self.cell_id,
-            "cell_params": self.cell_params,
-            "status_type": self.status_type,
-            "agent_type": self.agent_type
+            "cell_id": _serialize_value(self.cell_id),
+            "cell_params": _serialize_value(self.cell_params), 
+            "status_type": _serialize_value(self.status_type), # Apply defensively
+            "agent_type": _serialize_value(self.agent_type)    # Apply defensively
         }
         if self.result:
-            serializable_result = {}
-            for key, value in self.result.items():
-                if isinstance(value, BaseModel):
-                    # Handle nested Pydantic models (like QueryResult data)
-                    serializable_result[key] = value.model_dump()
-                elif isinstance(value, list) and value: 
-                    # Check if it's a list and potentially contains Pydantic models
-                    if all(isinstance(item, BaseModel) for item in value):
-                        # Handle lists of Pydantic models (e.g., tool_calls)
-                        serializable_result[key] = [item.model_dump() for item in value]
-                    else:
-                        # Assume list contains other JSON-serializable types
-                        serializable_result[key] = value 
-                else:
-                    # Assume other types are JSON serializable
-                    serializable_result[key] = value
-            dump["result"] = serializable_result
+            # Apply to the result dictionary as well
+            dump["result"] = _serialize_value(self.result)
             
         return dump
 
@@ -92,10 +123,19 @@ class StatusResponsePart(TextPart):
         self.agent_type = agent_type
 
     def model_dump(self) -> Dict[str, Any]:
+        # Similar helper for StatusResponsePart if needed, or reuse/import
+        def _serialize_value(value):
+            if isinstance(value, UUID):
+                return str(value)
+            elif isinstance(value, datetime):
+                 return value.isoformat()
+            # Simpler version for status: only needs basic types + UUID
+            return value 
+
         return {
             "type": "status_response",
-            "content": self.content,
-            "agent_type": self.agent_type
+            "content": _serialize_value(self.content), # Apply defensively
+            "agent_type": _serialize_value(self.agent_type)
         }
 
 class ChatMessage(BaseModel):
@@ -296,7 +336,9 @@ class ChatAgentService:
             message_history: Previous messages in the session
             
         Yields:
-            Tuples of (status_type, response) as updates occur
+            Tuples of (event_type_str, response) as updates occur, where response
+            contains appropriate CellResponsePart or StatusResponsePart.
+            The first element of the tuple corresponds to the EventType enum value.
         """
         # Ensure agent is initialized before handling messages
         if not self.notebook_id or not self.chat_agent or not self.ai_agent or not self.cell_tools:
@@ -330,18 +372,6 @@ class ChatAgentService:
             else:
                  chat_agent_logger.warning(f"Redis client not available in ChatAgentService for session {session_id}. Cannot check skip flag.")
 
-            # --- Original History Check (Optional Fallback - can be removed if Redis is reliable) --- 
-            # If Redis didn't tell us to skip, we can still check history as a fallback
-            # Remove this block if you want to rely purely on the Redis flag.
-            if not should_skip_clarification:
-                if message_history and len(message_history) > 1:
-                    last_model_message = message_history[-2]
-                    if (isinstance(last_model_message, ModelResponse) and
-                        last_model_message.parts and
-                        isinstance(last_model_message.parts[0], StatusResponsePart) and
-                        last_model_message.parts[0].agent_type == 'chat_agent'):
-                        chat_agent_logger.info(f"DB History indicates last message was clarification, setting skip flag (Redis flag was missing/expired). Session: {session_id}")
-                        should_skip_clarification = True
             # --- End Optional History Check --- 
 
             # ---> Run Clarification Agent only if NOT skipping <--- 
@@ -390,14 +420,18 @@ class ChatAgentService:
                              chat_agent_logger.warning(f"Redis error setting skip flag for session {session_id}: {redis_err}")
                     # --- End SET Redis Flag ---
                     
-                    clarification_response = ModelResponse(
-                        parts=[StatusResponsePart(
-                            content=clarification_output.clarification_message,
-                            agent_type="chat_agent" # Mark as chat_agent response
-                        )],
-                        timestamp=datetime.now(timezone.utc)
+                    # Create ClarificationNeededEvent object
+                    clarification_event = ClarificationNeededEvent(
+                        message=clarification_output.clarification_message
                     )
-                    yield "clarification", clarification_response
+                    # Wrap in ModelResponse using StatusResponsePart for transport
+                    response_part = StatusResponsePart(
+                        content=clarification_event.message,
+                        agent_type=clarification_event.agent_type.value
+                    )
+                    response = ModelResponse(parts=[response_part], timestamp=datetime.now(timezone.utc))
+                    # Yield EventType string and the response object
+                    yield clarification_event.type.value, response
                     return # Exit after asking for clarification
 
             # If clarification wasn't needed OR was skipped (by Redis or History check), proceed to investigation
@@ -406,70 +440,138 @@ class ChatAgentService:
             else:
                  log_msg = f"Proceeding to investigation for session {session_id} (Clarification not needed)."
             chat_agent_logger.info(log_msg)
-            
-            # ---> Investigation block starts here <---
-            # Make sure to pass the correct prompt (prompt_to_use includes context)
-            # Ensure message_history includes the user's latest reply which might be the clarification
-            async for status_dict in self.ai_agent.investigate(
+        
+        
+            async for event in self.ai_agent.investigate(
                 prompt, # Pass the potentially context-enhanced prompt
                 session_id,
                 notebook_id=self.notebook_id,
                 message_history=message_history, # Pass history including the user's latest message
                 cell_tools=self.cell_tools
             ):
-                # Extract event type from the dict itself
-                event_type = status_dict.get('type', 'unknown_event') # Use 'type' key
-                chat_agent_logger.info(f"Yielding status update for session {session_id}. Type: {event_type}")
-                chat_agent_logger.info(f"Received status dictionary for {event_type}: {status_dict}")
+                # Now expect event model instances directly
+                event_type_enum = event.type
+                event_type_str = event_type_enum.value
+                agent_type_attr = getattr(event, 'agent_type', None)
+                agent_type_str = agent_type_attr.value if agent_type_attr else AgentType.UNKNOWN.value
+                chat_agent_logger.info(f"Yielding event update for session {session_id}. Type: {event_type_str}")
+                chat_agent_logger.debug(f"Received event object: {event!r}")
+
+                response_part: Union[CellResponsePart, StatusResponsePart]
                 
-                # Determine if it's a cell event based on the type key
-                is_cell_event = (
-                    event_type.startswith("step_") or 
-                    event_type == "plan_cell_created" or 
-                    event_type == "summary_cell_created" or
-                    event_type == "github_tool_cell_created"
+                match event:
+                    case PlanCellCreatedEvent(cell_id=cid, cell_params=cp, status=st):
+                        chat_agent_logger.info(f"Creating CellResponsePart for {event_type_str}")
+                        response_part = CellResponsePart(
+                            cell_id=str(cid) if cid else "",
+                            cell_params=cp or {},
+                            status_type=st.value, 
+                            agent_type=agent_type_str,
+                            result=None 
+                        )
+                    case StepCompletedEvent(cell_id=cid, cell_params=cp, status=st, result=r):
+                        chat_agent_logger.info(f"Creating CellResponsePart for {event_type_str}")
+                        result_dict = r.model_dump() if isinstance(r, BaseModel) else {"content": str(r)}
+                        response_part = CellResponsePart(
+                            cell_id=str(cid) if cid else "",
+                            cell_params=cp or {},
+                            status_type=st.value,
+                            agent_type=agent_type_str,
+                            result=result_dict
+                        )
+                    case StepErrorEvent(cell_id=cid, cell_params=cp, status=st, result=r, error=err):
+                        chat_agent_logger.info(f"Creating CellResponsePart for {event_type_str}")
+                        
+                        if r is not None:
+                            result_dict = r.model_dump() if isinstance(r, BaseModel) else {"content": str(r)}
+                        else:
+                            result_dict = {}
+ 
+                        if err is not None:
+                            if isinstance(result_dict, dict): 
+                                result_dict['error'] = err
+                            else:
+                                result_dict = {"original_result": result_dict, "error": err}
+ 
+                        response_part = CellResponsePart(
+                            cell_id=str(cid) if cid else "",
+                            cell_params=cp or {},
+                            status_type=st.value,
+                            agent_type=agent_type_str,
+                            result=result_dict
+                        )
+                    case GitHubToolCellCreatedEvent(cell_id=cid, cell_params=cp, status=st, result=r, tool_name=tn):
+                        chat_agent_logger.info(f"Creating CellResponsePart for {event_type_str}")
+                        result_dict = {"content": r, "tool_name": tn}
+                        response_part = CellResponsePart(
+                            cell_id=str(cid) if cid else "",
+                            cell_params=cp or {},
+                            status_type=st.value,
+                            agent_type=agent_type_str,
+                            result=result_dict
+                        )
+                    case SummaryCellCreatedEvent(cell_id=cid, cell_params=cp, status=st, error=err):
+                        chat_agent_logger.info(f"Creating CellResponsePart for {event_type_str}")
+                        result_dict = {"error": err} if err else None
+                        response_part = CellResponsePart(
+                            cell_id=str(cid) if cid else "",
+                            cell_params=cp or {},
+                            status_type=st.value,
+                            agent_type=agent_type_str,
+                            result=result_dict
+                        )
+                    case SummaryCellErrorEvent(status=st, error=err): # No cell created here
+                        chat_agent_logger.info(f"Creating StatusResponsePart for {event_type_str}")
+                        message = f"Error creating summary cell: {err}"
+                        response_part = StatusResponsePart(content=message, agent_type=agent_type_str)
+                    
+                    # --- Status/Progress Events --- 
+                    case PlanCreatedEvent(thinking=t, status=st): 
+                        chat_agent_logger.info(f"Creating StatusResponsePart for {event_type_str}")
+                        message = f"Plan created. Thinking: {t}" if t else "Investigation plan created."
+                        response_part = StatusResponsePart(content=message, agent_type=agent_type_str)
+                    case StepStartedEvent(step_id=sid, status=st):
+                        chat_agent_logger.info(f"Creating StatusResponsePart for {event_type_str}")
+                        message = f"Status: {st.value} (Step: {sid})" 
+                        response_part = StatusResponsePart(content=message, agent_type=agent_type_str)
+                    case GitHubToolErrorEvent(original_plan_step_id=sid, tool_name=tn, error=err, status=st):
+                        chat_agent_logger.info(f"Creating StatusResponsePart for {event_type_str}")
+                        message = f"GitHub Tool Error (Step: {sid}, Tool: {tn}): {err}" 
+                        response_part = StatusResponsePart(content=message, agent_type=agent_type_str)
+                    case SummaryStartedEvent(status=st):
+                        chat_agent_logger.info(f"Creating StatusResponsePart for {event_type_str}")
+                        message = "Starting final summarization..."
+                        response_part = StatusResponsePart(content=message, agent_type=agent_type_str)
+                    case SummaryUpdateEvent(update_info=ui, status=st): 
+                        chat_agent_logger.info(f"Creating StatusResponsePart for {event_type_str}")
+                        if isinstance(ui, dict):
+                            message = ui.get('message', ui.get('error', json.dumps(ui)))
+                        else:
+                            message = str(ui) # Fallback if not dict
+                        response_part = StatusResponsePart(content=message, agent_type=agent_type_str)
+                    case InvestigationCompleteEvent(status=st):
+                        chat_agent_logger.info(f"Creating StatusResponsePart for {event_type_str}")
+                        message = "Investigation completed."
+                        response_part = StatusResponsePart(content=message, agent_type=agent_type_str)
+                    case StatusUpdateEvent(message=msg, status=st, step_id=sid, attempt=att, max_attempts=ma): # Generic status update
+                        chat_agent_logger.info(f"Creating StatusResponsePart for {event_type_str}")
+                        content = msg or f"Status: {st.value}"
+                        if sid: content += f" (Step: {sid})"
+                        if att: content += f" (Attempt: {att}/{ma})"
+                        response_part = StatusResponsePart(content=content, agent_type=agent_type_str)
+                    
+                    case _:
+                        chat_agent_logger.warning(f"Unhandled event type: {type(event)}. Creating generic StatusResponsePart.")
+                        status_val = getattr(event, 'status', None)
+                        message = f"Status: {status_val.value if status_val else 'Unknown Status'}" 
+                        response_part = StatusResponsePart(content=message, agent_type=agent_type_str)
+                
+                response = ModelResponse(
+                    parts=[response_part],
+                    timestamp=datetime.now(timezone.utc)
                 )
                 
-                # Use status_dict instead of status
-                if is_cell_event and 'cell_params' in status_dict:
-                    chat_agent_logger.info(f"Creating CellResponsePart for {event_type}")
-                    # Format as CellResponsePart if it's a cell event and has params
-                    response = ModelResponse(
-                        parts=[CellResponsePart(
-                            cell_id=status_dict.get('cell_id', ''),
-                            cell_params=status_dict.get('cell_params', {}),
-                            # Use status from dict if available, else event_type
-                            status_type=status_dict.get('status', event_type), 
-                            agent_type=status_dict.get('agent_type', 'unknown'),
-                            result=status_dict.get('result', None)
-                        )],
-                        timestamp=datetime.now(timezone.utc)
-                    )
-                else:
-                    chat_agent_logger.info(f"Creating StatusResponsePart for {event_type} (is_cell_event={is_cell_event}, has_cell_params={'cell_params' in status_dict})")
-                    # Otherwise, format as StatusResponsePart
-                    update_info = status_dict.get('update_info')
-                    # Default content from status_dict['status'] or the event_type itself
-                    content_message = f"Status: {status_dict.get('status', event_type)}"
-                    
-                    # Try getting more specific message from update_info or top level
-                    if isinstance(update_info, dict):
-                        content_message = update_info.get('message', update_info.get('error', content_message))
-                    elif isinstance(status_dict.get("message"), str):
-                        content_message = status_dict["message"]
-                    elif isinstance(status_dict.get("error"), str):
-                        content_message = status_dict["error"]
-                    
-                    response = ModelResponse(
-                        parts=[StatusResponsePart(
-                            content=content_message,
-                            agent_type=status_dict.get('agent_type', 'unknown')
-                        )],
-                        timestamp=datetime.now(timezone.utc)
-                    )
-                
-                # Yield the original event type string and the response object
-                yield event_type, response
+                yield event_type_str, response
             
             response_time = time.time() - start_time
             chat_agent_logger.info(

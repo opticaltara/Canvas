@@ -24,7 +24,7 @@ export const notebooks = {
     return response.data
   },
 
-  create: async (data: { name: string; description?: string }): Promise<Notebook> => {
+  create: async (data: { title: string; description?: string }): Promise<Notebook> => {
     const response = await axios.post(`${API_BASE_URL}/notebooks`, data)
     return response.data
   },

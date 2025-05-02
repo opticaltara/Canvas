@@ -5,6 +5,7 @@ Repository module for database operations
 import logging
 from typing import Dict, List, Optional, Any, TypeVar, Union
 from datetime import datetime, timezone
+from uuid import UUID
 
 from sqlalchemy import select, delete, update, and_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +15,7 @@ from contextlib import contextmanager
 
 from backend.db.models import Connection, DefaultConnection, Notebook, Cell, CellDependency
 from backend.core.cell import CellStatus
+from backend.core.types import ToolCallID
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -265,7 +267,10 @@ class NotebookRepository:
         logger.info("Attempting to create notebook: Title='%s', Description='%s', CreatedBy='%s', Tags=%s",
                     title, description, created_by, tags, extra={'correlation_id': 'N/A'})
         try:
+            from uuid import uuid4
+
             notebook = Notebook(
+                id=str(uuid4()),
                 title=title,
                 description=description,
                 created_by=created_by,
@@ -308,8 +313,19 @@ class NotebookRepository:
             logger.error("Error fetching all notebooks: %s", str(e), extra={'correlation_id': 'N/A'}, exc_info=True)
             raise
     
+    def list_cells_by_notebook(self, notebook_id: str) -> List[Cell]:
+        """Get all cells for a specific notebook, ordered by position."""
+        logger.info(f"Fetching cells for notebook ID: {notebook_id}", extra={'correlation_id': 'N/A'})
+        try:
+            cells = self.db.query(Cell).filter(Cell.notebook_id == notebook_id).order_by(Cell.position).all()
+            logger.info(f"Retrieved {len(cells)} cells for notebook {notebook_id}", extra={'correlation_id': 'N/A'})
+            return cells
+        except SQLAlchemyError as e:
+            logger.error(f"Error fetching cells for notebook {notebook_id}: {str(e)}", extra={'correlation_id': 'N/A'}, exc_info=True)
+            raise
+    
     def update_notebook(self, notebook_id: str, **kwargs) -> Optional[Notebook]:
-        """Update notebook attributes"""
+        """Update a notebook by ID"""
         logger.info("Attempting to update notebook: ID='%s', Updates=%s", notebook_id, kwargs, extra={'correlation_id': 'N/A'})
         try:
             notebook = self.get_notebook(notebook_id) # Use get_notebook which logs
@@ -384,25 +400,46 @@ class NotebookRepository:
             raise
     
     def create_cell(self, notebook_id: str, cell_type: str, content: str,
-                    position: int, connection_id: Optional[str] = None,
-                    metadata: Optional[Dict] = None, settings: Optional[Dict] = None) -> Optional[Cell]:
+                    position: int, 
+                    tool_call_id: str,
+                    connection_id: Optional[str] = None,
+                    metadata: Optional[Dict] = None, 
+                    settings: Optional[Dict] = None,
+                    tool_name: Optional[str] = None,
+                    tool_arguments: Optional[Dict[str, Any]] = None,
+                    result_content: Optional[Any] = None,
+                    result_error: Optional[str] = None,
+                    result_execution_time: Optional[float] = None,
+                    status: Optional[str] = None,
+                    ) -> Optional[Cell]:
         """Create a new cell in a notebook"""
-        logger.info("Attempting to create cell in notebook %s: Type='%s', Position=%d, ConnectionID='%s', Metadata=%s, Settings=%s",
-                    notebook_id, cell_type, position, connection_id, metadata, settings, extra={'correlation_id': 'N/A'})
+        logger.info("Attempting to create cell in notebook %s: Type='%s', Position=%d, ConnectionID='%s', Metadata=%s, Settings=%s, ToolName='%s'",
+                    notebook_id, cell_type, position, connection_id, metadata, settings, tool_name, extra={'correlation_id': 'N/A'})
         try:
             # Check if notebook exists first (get_notebook logs this)
             notebook = self.get_notebook(notebook_id)
             if not notebook:
                 return None
 
+            from uuid import uuid4
+
             cell = Cell(
+                id=str(uuid4()),
                 notebook_id=notebook_id,
                 type=cell_type,
                 content=content,
                 position=position,
                 connection_id=connection_id,
-                metadata=metadata or {},
-                settings=settings or {}
+                cell_metadata=metadata or {},
+                settings=settings or {},
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                tool_arguments=tool_arguments,
+                result_content=result_content,
+                result_error=result_error,
+                result_execution_time=result_execution_time,
+                result_timestamp=datetime.now(timezone.utc) if result_content is not None or result_error is not None else None,
+                status=status or "idle"
             )
             
             with self._transaction():
