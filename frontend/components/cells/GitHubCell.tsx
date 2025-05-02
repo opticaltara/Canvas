@@ -33,6 +33,17 @@ interface ToolForm {
 }
 
 const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDelete, isExecuting }): React.ReactNode => {
+  // Log the cell prop received by the component
+  console.log(`[GitHubCell ${cell.id}] Render with cell prop:`, JSON.stringify({ 
+    id: cell.id, 
+    type: cell.type, 
+    status: cell.status, 
+    tool_name: cell.tool_name, 
+    has_result: !!cell.result,
+    result_content_type: typeof cell.result?.content,
+    result_error: cell.result?.error,
+  }));
+
   const [showToolCalls, setShowToolCalls] = useState(false)
   const [showMetadata, setShowMetadata] = useState(false)
   const [toolForms, setToolForms] = useState<ToolForm[]>([{ toolName: "", toolArgs: {} }])
@@ -130,20 +141,47 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
   }
 
   // --- Modified: Render tool form inputs dynamically based on JSON Schema --- 
-  const renderToolFormInputs = (toolForm: ToolForm, toolIndex: number) => {
+  const renderToolFormInputs = (toolForm: ToolForm) => {
     const { toolName, toolArgs } = toolForm
 
-    // Find the tool definition from the store
-    const toolInfo = toolDefinitions?.find(def => def.name === toolName);
+    // Use the store hook to get the latest status and definitions
+    const githubToolLoadingStatus = useConnectionStore(state => state.toolLoadingStatus.github);
+    const githubToolDefinitions = useConnectionStore(state => state.toolDefinitions.github);
 
-    // Handle loading state
-    if (toolLoadingStatus === 'loading') {
-      return <div className="text-xs text-gray-500">Loading tool parameters...</div>;
+    // Debug Logs (keep for now)
+    console.log(`[GitHubCell] Rendering inputs for: ${toolName}`);
+    console.log(`[GitHubCell] GitHub Tool loading status from store:`, githubToolLoadingStatus);
+    console.log(`[GitHubCell] Available GitHub tool definitions from store:`, githubToolDefinitions);
+
+    // Find the tool definition from the store
+    const toolInfo = githubToolDefinitions?.find(def => def.name === toolName);
+    console.log(`[GitHubCell] Found toolInfo:`, toolInfo);
+
+    // Handle loading state MORE ROBUSTLY
+    // Case 1: Status is undefined or 'idle' (fetching hasn't started or finished yet)
+    if (githubToolLoadingStatus === undefined || githubToolLoadingStatus === 'idle') {
+        // Optionally trigger fetch if idle/undefined? Might be handled elsewhere.
+        // For now, just show a generic loading message or potentially nothing if definitions
+        // are expected to load shortly. Let's show loading.
+        return <div className="text-xs text-gray-500">Initializing tool definitions...</div>;
     }
-    // Handle error state or missing definition
-    if (toolLoadingStatus === 'error' || !toolInfo) {
-      return <div className="text-xs text-red-500">Error loading parameters for tool: {toolName}</div>;
+    // Case 2: Explicitly loading
+    if (githubToolLoadingStatus === 'loading') {
+        return <div className="text-xs text-gray-500">Loading tool parameters...</div>;
     }
+    // Case 3: Explicit error state from the store
+    if (githubToolLoadingStatus === 'error') {
+        return <div className="text-xs text-red-500\">Error loading tool definitions from store.</div>;
+    }
+    // Case 4: Status is 'success', but the specific tool isn't found
+    if (githubToolLoadingStatus === 'success' && !toolInfo) {
+        return <div className="text-xs text-red-500\">Tool definition not found for: {toolName}</div>;
+    }
+    // Case 5: Tool definition not available for other reasons (shouldn't happen if logic above is correct)
+     if (!toolInfo) {
+        return <div className="text-xs text-red-500\">Tool definition unavailable for: {toolName}. Status: {githubToolLoadingStatus}</div>; // Fallback error
+    }
+
 
     const schema = toolInfo.inputSchema;
     const properties = schema?.properties as Record<string, any> | undefined;
@@ -155,7 +193,7 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
     
     // Helper function to render individual input fields
     const renderField = (paramName: string, paramSchema: any) => {
-        const fieldId = `${paramName}-${toolIndex}`;
+        const fieldId = `${paramName}-${activeToolIndex}`;
         const label = paramSchema.title || paramName; // Use title for label
         const isRequired = requiredFields.has(paramName);
         const description = paramSchema.description;
@@ -174,7 +212,7 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
              inputElement = (
                 <Select
                   value={currentValue}
-                  onValueChange={(value) => handleToolArgChange(toolIndex, paramName, value)}
+                  onValueChange={(value) => handleToolArgChange(activeToolIndex, paramName, value)}
                   required={isRequired}
                 >
                   <SelectTrigger id={fieldId} className="mt-1 h-8 text-xs">
@@ -193,7 +231,7 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
                  <Textarea
                     id={fieldId}
                     value={currentValue}
-                    onChange={(e) => handleToolArgChange(toolIndex, paramName, e.target.value)}
+                    onChange={(e) => handleToolArgChange(activeToolIndex, paramName, e.target.value)}
                     placeholder={placeholder}
                     required={isRequired}
                     className="mt-1 h-16 text-xs"
@@ -206,7 +244,7 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
                     id={fieldId}
                     type="number"
                     value={currentValue}
-                    onChange={(e) => handleToolArgChange(toolIndex, paramName, e.target.value === '' ? '' : Number(e.target.value))}
+                    onChange={(e) => handleToolArgChange(activeToolIndex, paramName, e.target.value === '' ? '' : Number(e.target.value))}
                     placeholder={placeholder}
                     required={isRequired}
                     min={paramSchema.minimum}
@@ -223,7 +261,7 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
                      type="checkbox"
                      id={fieldId}
                      checked={!!currentValue}
-                     onChange={(e) => handleToolArgChange(toolIndex, paramName, e.target.checked)}
+                     onChange={(e) => handleToolArgChange(activeToolIndex, paramName, e.target.checked)}
                      className="h-4 w-4 text-green-600 border-gray-300 rounded focus:ring-green-500"
                     />
                     {/* Optional: label next to checkbox if needed */}
@@ -235,7 +273,7 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
                   id={fieldId}
                   type="text"
                   value={currentValue}
-                  onChange={(e) => handleToolArgChange(toolIndex, paramName, e.target.value)}
+                  onChange={(e) => handleToolArgChange(activeToolIndex, paramName, e.target.value)}
                   placeholder={placeholder}
                   required={isRequired}
                   className="mt-1 h-8 text-xs"
@@ -269,781 +307,816 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
     const toolResult = cell.result
     const toolName = cell.tool_name
 
-    if (!toolResult) return null
+    // Log the data being passed to renderResultData
+    console.log(`[GitHubCell ${cell.id}] renderResultData called. toolName: ${toolName}, has toolResult: ${!!toolResult}`);
+    if (toolResult) {
+      console.log(`[GitHubCell ${cell.id}] toolResult details:`, JSON.stringify({
+        has_content: !!toolResult.content,
+        content_type: typeof toolResult.content,
+        has_error: !!toolResult.error,
+        error_content: toolResult.error,
+      }));
+    }
+
+    if (!toolResult) {
+      console.log(`[GitHubCell ${cell.id}] renderResultData: No toolResult found, returning null.`);
+      return null;
+    }
+
+    // Helper function to safely get the JSON text content
+    const getJsonTextContent = (result: any): string | null => {
+        if (result?.content?.content && Array.isArray(result.content.content) && result.content.content[0]?.text) {
+            return result.content.content[0].text;
+        }
+        // Fallback for potentially different structure (though less likely based on API example)
+        if (typeof result?.content === 'string') {
+            return result.content;
+        }
+        if (Array.isArray(result?.content) && result.content[0]?.text) {
+             // Legacy or alternative structure check
+             console.warn("Accessing result content via potentially legacy path: result.content[0].text");
+             return result.content[0].text;
+        }
+        return null;
+    };
+
+    // Helper function to get raw content if parsing fails or not needed
+    const getRawContentForError = (result: any): any => {
+         const jsonText = getJsonTextContent(result);
+         if (jsonText) return jsonText; // Return the string if found
+
+         // Fallback to less nested structures if the primary one fails
+         if (result?.content?.content) return result.content.content;
+         if (result?.content) return result.content;
+         return "Unable to extract raw content."; // Default fallback
+    };
 
     let shortSha: string | undefined;
     if (toolName === 'get_commit' && !toolResult.error && toolResult.content) {
-      try {
-        let commitDataObj: any;
-        if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
-          commitDataObj = JSON.parse(toolResult.content[0].text);
-        } else if (typeof toolResult.content === 'string') {
-          commitDataObj = JSON.parse(toolResult.content);
-        } else {
-          commitDataObj = toolResult.content;
+        try {
+            // Use helper to get JSON text
+            const jsonText = getJsonTextContent(toolResult);
+            if (jsonText) {
+                const commitDataObj = JSON.parse(jsonText);
+                if (commitDataObj?.sha) {
+                    shortSha = commitDataObj.sha.substring(0, 7);
+                }
+            } else {
+                 // Try parsing direct content if helper failed (unlikely based on API)
+                 const commitDataObj = toolResult.content; // Assuming direct object
+                 if (commitDataObj?.sha) {
+                     shortSha = commitDataObj.sha.substring(0, 7);
+                 }
+            }
+        } catch (e) {
+             console.error("Error parsing SHA from get_commit result:", e);
+            // Handle parsing error, shortSha remains undefined
         }
-        if (commitDataObj?.sha) {
-           shortSha = commitDataObj.sha.substring(0, 7);
-        }
-      } catch {
-        // Handle parsing error, shortSha remains undefined
-      }
     }
 
     let displayContent: React.ReactNode = null
 
     if (toolName === 'get_commit' && !toolResult.error && toolResult.content) {
-      try {
-        let commitData: any;
-        if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
-          commitData = JSON.parse(toolResult.content[0].text);
-        } else if (typeof toolResult.content === 'string') {
-           commitData = JSON.parse(toolResult.content);
-        } else {
-           commitData = toolResult.content;
-        }
-        
-        const currentShortSha = commitData.sha.substring(0, 7);
-        const commitId = `commit-${cell.id}`;
+        try {
+            let commitData: any;
+            // Use helper to get JSON text
+            const jsonText = getJsonTextContent(toolResult);
+            if (jsonText) {
+                 commitData = JSON.parse(jsonText);
+            } else {
+                 // Fallback: Assume toolResult.content is the data directly
+                 console.warn("Parsing get_commit result from potentially direct content structure.");
+                 commitData = toolResult.content;
+                 // Basic validation if it's an object
+                 if (typeof commitData !== 'object' || commitData === null || !commitData.sha) {
+                     throw new Error("Direct content is not a valid commit object.");
+                 }
+            }
 
-        displayContent = (
-          <div className="space-y-3 text-xs">
-            <div className="flex justify-between items-start">
-              <div>
-                <h4 className="text-base font-semibold mb-1">{commitData.commit?.message?.split('\n')[0] || 'No commit message'}</h4>
-                <div className="text-xs text-gray-600 flex items-center space-x-2 flex-wrap">
-                   {commitData.commit?.author && (
-                     <TooltipProvider delayDuration={100}>
-                       <Tooltip>
-                         <TooltipTrigger asChild>
-                           <img src={commitData.author?.avatar_url} alt={commitData.commit.author.name || 'Author'} className="h-4 w-4 rounded-full inline-block mr-1"/>
-                         </TooltipTrigger>
-                         <TooltipContent>
-                           <p>{commitData.commit.author.name || 'N/A'} ({commitData.commit.author.email || 'N/A'})</p>
-                         </TooltipContent>
-                       </Tooltip>
-                     </TooltipProvider>
-                   )}
-                   {commitData.commit?.author?.date && <span>authored on {formatDate(commitData.commit.author.date)}</span>}
-                   {commitData.author?.login && (
-                     <a href={commitData.author.html_url} target="_blank" rel="noopener noreferrer" className="hover:underline text-blue-600">
-                       ({commitData.author.login})
-                     </a>
-                   )}
-                   {commitData.commit?.committer && commitData.author?.login !== commitData.committer?.login && (
-                     <>
-                       <span className="hidden md:inline">|</span>
-                       <TooltipProvider delayDuration={100}>
-                         <Tooltip>
-                           <TooltipTrigger asChild>
-                             <img src={commitData.committer?.avatar_url} alt={commitData.commit.committer.name || 'Committer'} className="h-4 w-4 rounded-full inline-block mr-1"/>
-                           </TooltipTrigger>
-                           <TooltipContent>
-                             <p>{commitData.commit.committer.name || 'N/A'} ({commitData.commit.committer.email || 'N/A'})</p>
-                           </TooltipContent>
-                         </Tooltip>
-                       </TooltipProvider>
-                       {commitData.commit.committer.date && <span>committed on {formatDate(commitData.commit.committer.date)}</span>}
-                       {commitData.committer?.login && (
-                         <a href={commitData.committer.html_url} target="_blank" rel="noopener noreferrer" className="hover:underline text-blue-600">
-                           ({commitData.committer.login})
-                         </a>
-                       )}
-                     </>
-                   )}
-                </div>
-                 {commitData.commit?.message?.includes('\n') && (
-                   <pre className="mt-1.5 text-xs whitespace-pre-wrap font-sans bg-gray-50 p-1.5 rounded border">
-                     {commitData.commit.message.substring(commitData.commit.message.indexOf('\n') + 1)}
-                   </pre>
-                )}
-              </div>
-              <div className="flex items-center space-x-1 flex-shrink-0 ml-3">
-                 <TooltipProvider delayDuration={100}>
-                   <Tooltip>
-                     <TooltipTrigger asChild>
-                       <Button variant="outline" size="sm" onClick={() => copyToClipboard(commitData.sha, commitId)} className="font-mono text-xs h-auto px-1.5 py-0.5">
-                         <GitCommitIcon className="h-3 w-3 mr-1" /> {currentShortSha}
-                         {copiedStates[commitId] ? <CheckIcon className="h-3 w-3 ml-1 text-green-600" /> : <CopyIcon className="h-3 w-3 ml-1" />}
-                       </Button>
-                     </TooltipTrigger>
-                     <TooltipContent><p>Copy full SHA: {commitData.sha}</p></TooltipContent>
-                   </Tooltip>
-                 </TooltipProvider>
-                <a href={commitData.html_url} target="_blank" rel="noopener noreferrer">
-                  <Button variant="outline" size="sm" className="text-xs h-auto px-1.5 py-0.5">
-                    <ExternalLinkIcon className="h-3 w-3 mr-1" /> GitHub
-                  </Button>
-                </a>
-              </div>
-            </div>
+            const currentShortSha = commitData.sha.substring(0, 7);
+            const commitId = `commit-${cell.id}`;
 
-            <div className="flex justify-between items-center text-xs text-gray-700 flex-wrap gap-y-1">
-               <div className="flex items-center space-x-1 flex-wrap gap-y-1">
-                  {commitData.stats && (
-                     <>
-                        <Badge variant="outline" className="border-green-300 text-green-700 whitespace-nowrap px-1.5 py-0.5 text-xs">+{commitData.stats.additions} additions</Badge>
-                        <Badge variant="outline" className="border-red-300 text-red-700 whitespace-nowrap px-1.5 py-0.5 text-xs">-{commitData.stats.deletions} deletions</Badge>
-                        <Badge variant="secondary" className="whitespace-nowrap px-1.5 py-0.5 text-xs">{commitData.files?.length || 0} changed files</Badge>
-                     </>
-                  )}
-               </div>
-               {commitData.parents && commitData.parents.length > 0 && (
-                 <div className="flex items-center space-x-1 flex-wrap gap-x-1">
-                     <span>Parents:</span>
-                     {commitData.parents.map((parent: any) => (
-                        <a key={parent.sha} href={parent.html_url} target="_blank" rel="noopener noreferrer" className="font-mono text-blue-600 hover:underline">
-                           {parent.sha.substring(0, 7)}
-                        </a>
-                     ))}
-                  </div>
-               )}
-            </div>
-
-            {commitData.files && commitData.files.length > 0 && (
-              <div>
-                <h5 className="text-xs font-medium mb-1.5">{commitData.files.length} changed files:</h5>
-                <Accordion type="single" collapsible className="w-full border rounded-md">
-                  {commitData.files.map((file: any, index: number) => {
-                    const fileId = `file-${cell.id}-${index}`;
-                    if (!file) return null;
-                    return (
-                      <AccordionItem value={`item-${index}`} key={file.sha || index}>
-                        <AccordionTrigger className="text-xs px-2 py-1.5 hover:bg-gray-50">
-                           <div className="flex flex-col md:flex-row justify-between items-start md:items-center w-full gap-1">
-                              <div className="flex items-center space-x-1.5 truncate mr-4 flex-shrink min-w-0">
-                                 <Badge
-                                    variant={file.status === 'removed' ? 'destructive' : 'outline'}
-                                    className={
-                                      `text-xs px-1 py-0 leading-tight flex-shrink-0 
-                                       ${file.status === 'added' ? 'border-green-300 text-green-700 bg-green-50' : ''}
-                                       ${file.status === 'modified' ? 'border-blue-300 text-blue-700 bg-blue-50' : ''}
-                                       ${file.status === 'removed' ? 'border-red-300' : ''}
-                                       ${file.status === 'renamed' ? 'border-yellow-300 text-yellow-700 bg-yellow-50' : ''}
-                                       ${!['added', 'modified', 'removed', 'renamed'].includes(file.status) ? 'border-gray-300 text-gray-700 bg-gray-50' : ''}
-                                       `}
-                                 >
-                                   {file.status}
-                                 </Badge>
-                                 <span className="font-mono truncate text-xs" title={file.filename}>{file.filename}</span>
-                              </div>
-                              <div className="flex items-center space-x-1.5 flex-shrink-0 pl-6 md:pl-0">
-                                 <span className="text-green-600 text-xs">+{file.additions}</span>
-                                 <span className="text-red-600 text-xs">-{file.deletions}</span>
-                                 <TooltipProvider delayDuration={100}>
-                                    <Tooltip>
-                                       <TooltipTrigger asChild>
-                                          <Button
-                                            variant="ghost"
-                                            size="icon"
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              copyToClipboard(file.patch || 'No patch available', fileId)
-                                            }}
-                                            className="ml-1 h-5 w-5"
-                                          >
-                                             {copiedStates[fileId] ? <CheckIcon className="h-3 w-3 text-green-600" /> : <CopyIcon className="h-3 w-3" />}
-                                          </Button>
-                                       </TooltipTrigger>
-                                       <TooltipContent><p>Copy patch</p></TooltipContent>
-                                    </Tooltip>
-                                  </TooltipProvider>
-                                 {file.blob_url && (
-                                   <a href={file.blob_url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
-                                      <Button variant="ghost" size="icon" className="ml-1 h-5 w-5">
-                                        <ExternalLinkIcon className="h-3 w-3" />
-                                      </Button>
-                                    </a>
-                                 )}
-                              </div>
-                           </div>
-                        </AccordionTrigger>
-                        <AccordionContent className="px-0 pb-0">
-                           {file.patch ? (
-                              <pre className="text-xs p-2 bg-gray-50 border-t overflow-x-auto max-h-60 font-mono">{file.patch}</pre>
-                           ) : (
-                              <div className="text-xs p-2 text-gray-500 italic border-t">Patch not available.</div>
-                           )}
-                        </AccordionContent>
-                      </AccordionItem>
-                    )
-                   })}
-                </Accordion>
-              </div>
-            )}
-          </div>
-        )
-      } catch (e) {
-         console.error("Error parsing or rendering get_commit result:", e)
-         let errorDisplay = JSON.stringify(toolResult.content, null, 2);
-         if (toolResult.content?.message) {
-            errorDisplay = toolResult.content.message;
-         }
-         displayContent = (
-            <div className="text-red-700 text-xs">
-               <p className="font-medium mb-1">Error rendering commit details:</p>
-               <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
-               <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
-               <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
-            </div>
-         );
-      }
-    } else if (toolName === 'list_commits' && !toolResult.error && toolResult.content) {
-       try {
-         let commitsList: any[];
-         if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
-           commitsList = JSON.parse(toolResult.content[0].text);
-         } else if (typeof toolResult.content === 'string') {
-           commitsList = JSON.parse(toolResult.content);
-         } else {
-           commitsList = toolResult.content;
-         }
-
-         if (!Array.isArray(commitsList)) {
-            throw new Error("Expected an array of commits.");
-         }
-
-         if (commitsList.length === 0) {
-           displayContent = <p className="text-xs text-gray-600">No commits found for the specified criteria.</p>;
-         } else {
-           displayContent = (
-             <div className="space-y-3">
-               {commitsList.map((commit: any, index: number) => {
-                 const commitId = `commit-${cell.id}-${index}`;
-                 const shortSha = commit.sha?.substring(0, 7) || 'N/A';
-                 const commitMessage = commit.commit?.message?.split('\n')[0] || 'No commit message';
-                 const author = commit.author;
-                 const committer = commit.committer; // Could be different from author
-                 const authorDate = commit.commit?.author?.date;
-
-                 return (
-                   <div key={commit.sha || index} className="border-b border-gray-200 pb-2.5 last:border-b-0 last:pb-0">
-                     <div className="flex justify-between items-start mb-1">
-                        <p className="text-sm font-medium truncate mr-2 flex-grow" title={commit.commit?.message || ''}>
-                           {commitMessage}
-                        </p>
-                        <div className="flex items-center space-x-1 flex-shrink-0">
-                          <TooltipProvider delayDuration={100}>
-                             <Tooltip>
-                               <TooltipTrigger asChild>
-                                 <Button variant="outline" size="sm" onClick={() => copyToClipboard(commit.sha, commitId)} className="font-mono text-xs h-auto px-1.5 py-0.5">
-                                   <GitCommitIcon className="h-3 w-3 mr-1" /> {shortSha}
-                                   {copiedStates[commitId] ? <CheckIcon className="h-3 w-3 ml-1 text-green-600" /> : <CopyIcon className="h-3 w-3 ml-1" />}
-                                 </Button>
-                               </TooltipTrigger>
-                               <TooltipContent><p>Copy full SHA: {commit.sha}</p></TooltipContent>
-                             </Tooltip>
-                           </TooltipProvider>
-                          <a href={commit.html_url} target="_blank" rel="noopener noreferrer">
-                            <Button variant="outline" size="sm" className="text-xs h-auto px-1.5 py-0.5">
-                              <ExternalLinkIcon className="h-3 w-3 mr-1" /> GitHub
-                            </Button>
-                          </a>
-                        </div>
-                     </div>
-                     <div className="text-xs text-gray-600 flex items-center space-x-1 flex-wrap">
-                         {author && (
-                           <TooltipProvider delayDuration={100}>
-                             <Tooltip>
-                               <TooltipTrigger asChild>
-                                 <img src={author.avatar_url} alt={commit.commit?.author?.name || author.login || 'Author'} className="h-4 w-4 rounded-full inline-block"/>
-                               </TooltipTrigger>
-                               <TooltipContent>
-                                 <p>{commit.commit?.author?.name || 'N/A'} ({commit.commit?.author?.email || 'N/A'})</p>
-                                 {author.login && <p>GitHub: {author.login}</p>}
-                               </TooltipContent>
-                             </Tooltip>
-                           </TooltipProvider>
-                         )}
-                        <span>{commit.commit?.author?.name || author?.login || 'Unknown author'}</span>
-                        <span>authored on {formatDate(authorDate)}</span>
-                     </div>
-                   </div>
-                 );
-               })}
-             </div>
-           );
-         }
-       } catch (e) {
-         console.error("Error parsing or rendering list_commits result:", e);
-         let errorDisplay = JSON.stringify(toolResult.content, null, 2);
-         if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
-            errorDisplay = toolResult.content[0].text;
-         } else if (typeof toolResult.content === 'string') {
-            errorDisplay = toolResult.content;
-         }
-
-         displayContent = (
-           <div className="text-red-700 text-xs">
-             <p className="font-medium mb-1">Error rendering commit list:</p>
-             <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
-             <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
-             <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
-           </div>
-         );
-       }
-    } else if (toolName === 'search_repositories' && !toolResult.error && toolResult.content) {
-      try {
-        let searchData: any;
-        if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
-          searchData = JSON.parse(toolResult.content[0].text);
-        } else if (typeof toolResult.content === 'string') {
-          searchData = JSON.parse(toolResult.content);
-        } else {
-          searchData = toolResult.content;
-        }
-
-        const totalCount = searchData.total_count;
-        const items = searchData.items;
-
-        if (!Array.isArray(items)) {
-          throw new Error("Expected an array of repository items.");
-        }
-
-        displayContent = (
-          <div className="text-xs">
-            {typeof totalCount === 'number' && (
-              <p className="mb-2 text-gray-700">
-                Found <span className="font-semibold">{totalCount}</span> repositories. {items.length < totalCount && `(Showing first ${items.length})`}
-              </p>
-            )}
-            {items.length === 0 ? (
-              <p className="text-gray-600">No repositories found matching your query.</p>
-            ) : (
-              <div className="overflow-x-auto border rounded-md">
-                <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-                      <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Description</th>
-                      <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Language</th>
-                      <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Stars</th>
-                      <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Forks</th>
-                      <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Updated</th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
-                    {items.map((repo: any) => (
-                      <tr key={repo.id}>
-                        <td className="px-3 py-1.5 whitespace-nowrap">
-                          <a href={repo.html_url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline font-medium">
-                            {repo.full_name}
-                          </a>
-                        </td>
-                        <td className="px-3 py-1.5 text-gray-700 max-w-xs truncate" title={repo.description}>{repo.description || '-'}</td>
-                        <td className="px-3 py-1.5 whitespace-nowrap text-gray-700">{repo.language || '-'}</td>
-                        <td className="px-3 py-1.5 whitespace-nowrap text-gray-700">{repo.stargazers_count}</td>
-                        <td className="px-3 py-1.5 whitespace-nowrap text-gray-700">{repo.forks_count}</td>
-                        <td className="px-3 py-1.5 whitespace-nowrap text-gray-700">{formatDate(repo.updated_at)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        );
-
-      } catch (e) {
-        console.error("Error parsing or rendering search_repositories result:", e);
-        let errorDisplay = JSON.stringify(toolResult.content, null, 2);
-        if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
-           errorDisplay = toolResult.content[0].text;
-         } else if (typeof toolResult.content === 'string') {
-            errorDisplay = toolResult.content;
-         }
-
-        displayContent = (
-           <div className="text-red-700 text-xs">
-             <p className="font-medium mb-1">Error rendering repository search results:</p>
-             <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
-             <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
-             <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
-           </div>
-         );
-      }
-    } else if (toolName === 'get_file_contents' && !toolResult.error && toolResult.content) {
-      try {
-        let parsedData: any;
-        if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
-          parsedData = JSON.parse(toolResult.content[0].text);
-        } else if (typeof toolResult.content === 'string') {
-          parsedData = JSON.parse(toolResult.content);
-        } else {
-          parsedData = toolResult.content;
-        }
-
-        // Check if the result is an array (directory listing) or an object (single file)
-        if (Array.isArray(parsedData)) {
-          // --- Render Directory Listing --- 
-          const directoryItems = parsedData;
-          if (directoryItems.length === 0) {
-             displayContent = <p className="text-xs text-gray-600">Directory is empty.</p>;
-          } else {
             displayContent = (
-              <div className="overflow-x-auto border rounded-md">
-                <table className="min-w-full divide-y divide-gray-200 text-xs">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-                      <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
-                      <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Size</th>
-                      <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Path</th>
-                      <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
-                    {directoryItems.map((item: any) => (
-                      <tr key={item.path}>
-                        <td className="px-3 py-1.5 whitespace-nowrap font-medium text-gray-800 flex items-center">
-                           {item.type === 'dir' ? <FolderIcon className="h-3.5 w-3.5 mr-1.5 text-blue-500 flex-shrink-0"/> : <FileIcon className="h-3.5 w-3.5 mr-1.5 text-gray-500 flex-shrink-0"/>}
-                           <span className="truncate" title={item.name}>{item.name}</span>
-                        </td>
-                        <td className="px-3 py-1.5 whitespace-nowrap font-mono text-gray-600">{item.type}</td>
-                        <td className="px-3 py-1.5 whitespace-nowrap text-right text-gray-600">{item.size > 0 ? `${item.size} bytes` : '-'}</td>
-                        <td className="px-3 py-1.5 whitespace-nowrap font-mono text-gray-600 truncate" title={item.path}>{item.path}</td>
-                        <td className="px-3 py-1.5 whitespace-nowrap">
-                          <>
-                          {item.html_url && (
-                            <a href={item.html_url} target="_blank" rel="noopener noreferrer">
-                              <Button variant="ghost" size="sm" className="text-xs h-auto px-1 py-0.5">
-                                <ExternalLinkIcon className="h-3 w-3" />
-                              </Button>
+                <div className="space-y-3 text-xs">
+                    <div className="flex justify-between items-start">
+                        <div>
+                            <h4 className="text-base font-semibold mb-1">{commitData.commit?.message?.split('\\n')[0] || 'No commit message'}</h4>
+                            <div className="text-xs text-gray-600 flex items-center space-x-2 flex-wrap">
+                                {commitData.commit?.author && (
+                                    <TooltipProvider delayDuration={100}>
+                                        <Tooltip>
+                                            <TooltipTrigger asChild>
+                                                <img src={commitData.author?.avatar_url} alt={commitData.commit.author.name || 'Author'} className="h-4 w-4 rounded-full inline-block mr-1"/>
+                                            </TooltipTrigger>
+                                            <TooltipContent>
+                                                <p>{commitData.commit.author.name || 'N/A'} ({commitData.commit.author.email || 'N/A'})</p>
+                                            </TooltipContent>
+                                        </Tooltip>
+                                    </TooltipProvider>
+                                )}
+                                {commitData.commit?.author?.date && <span>authored on {formatDate(commitData.commit.author.date)}</span>}
+                                {commitData.author?.login && (
+                                    <a href={commitData.author.html_url} target="_blank" rel="noopener noreferrer" className="hover:underline text-blue-600">
+                                        ({commitData.author.login})
+                                    </a>
+                                )}
+                                {commitData.commit?.committer && commitData.author?.login !== commitData.committer?.login && (
+                                    <>
+                                        <span className="hidden md:inline">|</span>
+                                        <TooltipProvider delayDuration={100}>
+                                            <Tooltip>
+                                                <TooltipTrigger asChild>
+                                                    <img src={commitData.committer?.avatar_url} alt={commitData.commit.committer.name || 'Committer'} className="h-4 w-4 rounded-full inline-block mr-1"/>
+                                                </TooltipTrigger>
+                                                <TooltipContent>
+                                                    <p>{commitData.commit.committer.name || 'N/A'} ({commitData.commit.committer.email || 'N/A'})</p>
+                                                </TooltipContent>
+                                            </Tooltip>
+                                        </TooltipProvider>
+                                        {commitData.commit.committer.date && <span>committed on {formatDate(commitData.commit.committer.date)}</span>}
+                                        {commitData.committer?.login && (
+                                            <a href={commitData.committer.html_url} target="_blank" rel="noopener noreferrer" className="hover:underline text-blue-600">
+                                                ({commitData.committer.login})
+                                            </a>
+                                        )}
+                                    </>
+                                )}
+                            </div>
+                            {commitData.commit?.message?.includes('\\n') && (
+                                <pre className="mt-1.5 text-xs whitespace-pre-wrap font-sans bg-gray-50 p-1.5 rounded border">
+                                    {commitData.commit.message.substring(commitData.commit.message.indexOf('\\n') + 1)}
+                                </pre>
+                            )}
+                        </div>
+                        <div className="flex items-center space-x-1 flex-shrink-0 ml-3">
+                            <TooltipProvider delayDuration={100}>
+                                <Tooltip>
+                                    <TooltipTrigger asChild>
+                                        <Button variant="outline" size="sm" onClick={() => copyToClipboard(commitData.sha, commitId)} className="font-mono text-xs h-auto px-1.5 py-0.5">
+                                            <GitCommitIcon className="h-3 w-3 mr-1" /> {currentShortSha}
+                                            {copiedStates[commitId] ? <CheckIcon className="h-3 w-3 ml-1 text-green-600" /> : <CopyIcon className="h-3 w-3 ml-1" />}
+                                        </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent><p>Copy full SHA: {commitData.sha}</p></TooltipContent>
+                                </Tooltip>
+                            </TooltipProvider>
+                            <a href={commitData.html_url} target="_blank" rel="noopener noreferrer">
+                                <Button variant="outline" size="sm" className="text-xs h-auto px-1.5 py-0.5">
+                                    <ExternalLinkIcon className="h-3 w-3 mr-1" /> GitHub
+                                </Button>
                             </a>
-                          )}
-                           {item.download_url && (
-                            <a href={item.download_url} target="_blank" rel="noopener noreferrer" download={item.name}>
-                              <Button variant="ghost" size="sm" className="text-xs h-auto px-1 py-0.5">
-                                <Download className="h-3 w-3" />
-                              </Button>
-                            </a>
-                          )}
-                          </>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            );
-          }
-        } else if (typeof parsedData === 'object' && parsedData !== null) {
-          // --- Render Single File Content --- 
-          const fileData = parsedData;
-          if (!fileData.path) { // Basic check for file object structure
-              throw new Error("Expected a file content object with a path.");
-          }
-          
-          const decodedContent = fileData.encoding === 'base64' && fileData.content ? atob(fileData.content) : fileData.content || "(No content)";
-          // TODO: Lift state for show/hide toggle
-          const contentPreview = decodedContent.substring(0, 300); // Show a preview
-          const contentId = `file-content-${cell.id}`;
+                        </div>
+                    </div>
 
-          displayContent = (
-            <div className="space-y-3 text-xs">
-              {/* Header with name/path/links */}
-              <div className="flex justify-between items-start mb-1">
-                <p className="text-sm font-medium font-mono truncate mr-2 flex-grow" title={fileData.path}>
-                   {fileData.name} ({fileData.path})
-                </p>
-                <div className="flex items-center space-x-1 flex-shrink-0">
-                   {fileData.html_url && (
-                      <a href={fileData.html_url} target="_blank" rel="noopener noreferrer">
-                        <Button variant="outline" size="sm" className="text-xs h-auto px-1.5 py-0.5">
-                          <ExternalLinkIcon className="h-3 w-3 mr-1" /> GitHub
-                        </Button>
-                      </a>
-                   )}
-                   {fileData.download_url && (
-                      <a href={fileData.download_url} target="_blank" rel="noopener noreferrer" download={fileData.name}>
-                        <Button variant="outline" size="sm" className="text-xs h-auto px-1.5 py-0.5">
-                          <Download className="h-3 w-3 mr-1" /> Download
-                        </Button>
-                      </a>
-                   )}
-                </div>
-              </div>
-              {/* Metadata Table */}
-              <div className="overflow-x-auto border rounded-md">
-                <table className="min-w-full divide-y divide-gray-200 text-xs">
-                  <tbody className="bg-white divide-y divide-gray-200">
-                    <tr>
-                      <td className="px-3 py-1.5 font-medium text-gray-500">Path</td>
-                      <td className="px-3 py-1.5 font-mono text-gray-800">{fileData.path}</td>
-                    </tr>
-                     <tr>
-                      <td className="px-3 py-1.5 font-medium text-gray-500">Size</td>
-                      <td className="px-3 py-1.5 text-gray-800">{fileData.size} bytes</td>
-                    </tr>
-                     <tr>
-                      <td className="px-3 py-1.5 font-medium text-gray-500">Encoding</td>
-                      <td className="px-3 py-1.5 text-gray-800">{fileData.encoding || '-'}</td>
-                    </tr>
-                    <tr>
-                      <td className="px-3 py-1.5 font-medium text-gray-500">SHA</td>
-                      <td className="px-3 py-1.5 font-mono text-gray-800">{fileData.sha}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-              
-              {/* Content Section */}
-              <div className="mt-3">
-                  <div className="flex justify-between items-center mb-1">
-                      <h5 className="text-xs font-medium">File Content {fileData.encoding === 'base64' ? '(Base64 Decoded)' : ''}</h5>
-                       {/* TODO: Implement state lifting for show/hide toggle */}
-                  </div>
-                   <pre 
-                      className={`text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200 overflow-auto max-h-60`}
-                   >
-                       {`${contentPreview}${decodedContent.length > 300 ? '\n...' : ''}`}
-                   </pre>
-                   <Button 
-                      variant="ghost" 
-                      size="sm" 
-                      className="text-xs h-auto px-1.5 py-0.5 mt-1 text-gray-600 hover:text-gray-900"
-                      onClick={() => copyToClipboard(decodedContent, contentId)}
-                   >
-                      {copiedStates[contentId] ? <CheckIcon className="h-3 w-3 mr-1 text-green-600" /> : <CopyIcon className="h-3 w-3 mr-1" />}
-                      Copy Decoded Content
-                  </Button>
-              </div>
-            </div>
-          );
-        } else {
-           // Handle case where parsedData is neither an array nor a valid file object
-           throw new Error("Unexpected format for get_file_contents result.");
-        }
-
-      } catch (e) {
-        console.error("Error parsing or rendering get_file_contents result:", e);
-        let errorDisplay = JSON.stringify(toolResult.content, null, 2);
-        if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
-           errorDisplay = toolResult.content[0].text;
-        } else if (typeof toolResult.content === 'string') {
-            errorDisplay = toolResult.content;
-         }
-
-        displayContent = (
-           <div className="text-red-700 text-xs">
-             <p className="font-medium mb-1">Error rendering file content:</p>
-             <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
-             <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
-             <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
-           </div>
-         );
-      }
-    } else if (toolName === 'get_me' && !toolResult.error && toolResult.content) {
-      try {
-        let userData: any;
-        if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
-          userData = JSON.parse(toolResult.content[0].text);
-        } else if (typeof toolResult.content === 'string') {
-          userData = JSON.parse(toolResult.content);
-        } else {
-          userData = toolResult.content;
-        }
-
-        if (typeof userData !== 'object' || userData === null) {
-          throw new Error("Expected a user object.");
-        }
-
-        displayContent = (
-          <div className="flex items-start space-x-3 text-xs">
-            {userData.avatar_url && (
-              <img src={userData.avatar_url} alt={`${userData.login} avatar`} className="h-12 w-12 rounded-full border" />
-            )}
-            <div className="flex-grow">
-              <div className="flex items-baseline space-x-1.5">
-                 <h4 className="text-base font-semibold">{userData.name || userData.login}</h4>
-                 {userData.login && (
-                   <a href={userData.html_url} target="_blank" rel="noopener noreferrer" className="text-gray-500 hover:text-blue-600 hover:underline">
-                     (@{userData.login})
-                   </a>
-                 )}
-              </div>
-              {userData.bio && <p className="mt-0.5 text-gray-700 text-xs">{userData.bio}</p>}
-              <div className="mt-1.5 flex items-center space-x-3 text-gray-600 text-xs">
-                <span>
-                  <span className="font-medium">{userData.public_repos ?? '-'}</span> Public Repos
-                </span>
-                <span>
-                  <span className="font-medium">{userData.followers ?? '-'}</span> Followers
-                </span>
-                <span>
-                  <span className="font-medium">{userData.following ?? '-'}</span> Following
-                </span>
-              </div>
-              <p className="mt-1 text-gray-500 text-xs">
-                 GitHub member since {formatDate(userData.created_at)}
-              </p>
-            </div>
-          </div>
-        );
-
-      } catch (e) {
-        console.error("Error parsing or rendering get_me result:", e);
-        let errorDisplay = JSON.stringify(toolResult.content, null, 2);
-         if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
-            errorDisplay = toolResult.content[0].text;
-          } else if (typeof toolResult.content === 'string') {
-             errorDisplay = toolResult.content;
-          }
-
-        displayContent = (
-            <div className="text-red-700 text-xs">
-              <p className="font-medium mb-1">Error rendering user profile:</p>
-              <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
-              <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
-              <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
-            </div>
-          );
-      }
-    } else if (toolName === 'list_branches' && !toolResult.error && toolResult.content) {
-      try {
-        let branchesData: any[];
-        if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
-          branchesData = JSON.parse(toolResult.content[0].text);
-        } else if (typeof toolResult.content === 'string') {
-          branchesData = JSON.parse(toolResult.content);
-        } else if (Array.isArray(toolResult.content)) {
-           branchesData = toolResult.content;
-        } else {
-           throw new Error("Expected an array of branches.");
-        }
-
-        if (!Array.isArray(branchesData)) {
-          throw new Error("Expected an array of branches after parsing.");
-        }
-
-        if (branchesData.length === 0) {
-          displayContent = <p className="text-xs text-gray-600">No branches found for this repository.</p>;
-        } else {
-          displayContent = (
-            <div className="overflow-x-auto border rounded-md">
-              <table className="min-w-full divide-y divide-gray-200 text-xs">
-                <thead className="bg-gray-50">
-                  <tr>
-                    <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Branch Name</th>
-                    <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Latest Commit</th>
-                    <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Protected</th>
-                  </tr>
-                </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
-                  {branchesData.map((branch: any) => (
-                    <tr key={branch.name}>
-                      <td className="px-3 py-1.5 whitespace-nowrap font-medium text-gray-800">{branch.name}</td>
-                      <td className="px-3 py-1.5 whitespace-nowrap font-mono">
-                        {branch.commit?.url ? (
-                           <a href={branch.commit.url.replace("api.github.com/repos", "github.com").replace("/commits/", "/commit/")} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
-                             {branch.commit.sha?.substring(0, 7)}
-                           </a>
-                        ) : (
-                           <span>{branch.commit?.sha?.substring(0, 7) || '-'}</span>
+                    <div className="flex justify-between items-center text-xs text-gray-700 flex-wrap gap-y-1">
+                        <div className="flex items-center space-x-1 flex-wrap gap-y-1">
+                            {commitData.stats && (
+                                <>
+                                    <Badge variant="outline" className="border-green-300 text-green-700 whitespace-nowrap px-1.5 py-0.5 text-xs">+{commitData.stats.additions} additions</Badge>
+                                    <Badge variant="outline" className="border-red-300 text-red-700 whitespace-nowrap px-1.5 py-0.5 text-xs">-{commitData.stats.deletions} deletions</Badge>
+                                    <Badge variant="secondary" className="whitespace-nowrap px-1.5 py-0.5 text-xs">{commitData.files?.length || 0} changed files</Badge>
+                                </>
+                            )}
+                        </div>
+                        {commitData.parents && commitData.parents.length > 0 && (
+                            <div className="flex items-center space-x-1 flex-wrap gap-x-1">
+                                <span>Parents:</span>
+                                {commitData.parents.map((parent: any) => (
+                                    <a key={parent.sha} href={parent.html_url} target="_blank" rel="noopener noreferrer" className="font-mono text-blue-600 hover:underline">
+                                        {parent.sha.substring(0, 7)}
+                                    </a>
+                                ))}
+                            </div>
                         )}
-                      </td>
-                       <td className="px-3 py-1.5 whitespace-nowrap">
-                         {branch.protected ? (
-                            <Badge variant="secondary" className="text-xs px-1.5 py-0.5 bg-orange-100 text-orange-800 border-orange-200">Protected</Badge>
-                          ) : (
-                            <span className="text-gray-600">-</span>
-                          )}
-                       </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          );
+                    </div>
+
+                    {commitData.files && commitData.files.length > 0 && (
+                        <div>
+                            <h5 className="text-xs font-medium mb-1.5">{commitData.files.length} changed files:</h5>
+                            <Accordion type="single" collapsible className="w-full border rounded-md">
+                                {commitData.files.map((file: any, index: number) => {
+                                    const fileId = `file-${cell.id}-${index}`;
+                                    if (!file) return null;
+                                    return (
+                                        <AccordionItem value={`item-${index}`} key={file.sha || index}>
+                                            <AccordionTrigger className="text-xs px-2 py-1.5 hover:bg-gray-50">
+                                                <div className="flex flex-col md:flex-row justify-between items-start md:items-center w-full gap-1">
+                                                    <div className="flex items-center space-x-1.5 truncate mr-4 flex-shrink min-w-0">
+                                                        <Badge
+                                                            variant={file.status === 'removed' ? 'destructive' : 'outline'}
+                                                            className={
+                                                                `text-xs px-1 py-0 leading-tight flex-shrink-0
+                                                                ${file.status === 'added' ? 'border-green-300 text-green-700 bg-green-50' : ''}
+                                                                ${file.status === 'modified' ? 'border-blue-300 text-blue-700 bg-blue-50' : ''}
+                                                                ${file.status === 'removed' ? 'border-red-300' : ''}
+                                                                ${file.status === 'renamed' ? 'border-yellow-300 text-yellow-700 bg-yellow-50' : ''}
+                                                                ${!['added', 'modified', 'removed', 'renamed'].includes(file.status) ? 'border-gray-300 text-gray-700 bg-gray-50' : ''}
+                                                                `}
+                                                        >
+                                                            {file.status}
+                                                        </Badge>
+                                                        <span className="font-mono truncate text-xs" title={file.filename}>{file.filename}</span>
+                                                    </div>
+                                                    <div className="flex items-center space-x-1.5 flex-shrink-0 pl-6 md:pl-0">
+                                                        <span className="text-green-600 text-xs">+{file.additions}</span>
+                                                        <span className="text-red-600 text-xs">-{file.deletions}</span>
+                                                        <TooltipProvider delayDuration={100}>
+                                                            <Tooltip>
+                                                                <TooltipTrigger asChild>
+                                                                    <Button
+                                                                        variant="ghost"
+                                                                        size="icon"
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            copyToClipboard(file.patch || 'No patch available', fileId)
+                                                                        }}
+                                                                        className="ml-1 h-5 w-5"
+                                                                    >
+                                                                        {copiedStates[fileId] ? <CheckIcon className="h-3 w-3 text-green-600" /> : <CopyIcon className="h-3 w-3" />}
+                                                                    </Button>
+                                                                </TooltipTrigger>
+                                                                <TooltipContent><p>Copy patch</p></TooltipContent>
+                                                            </Tooltip>
+                                                        </TooltipProvider>
+                                                        {file.blob_url && (
+                                                            <a href={file.blob_url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
+                                                                <Button variant="ghost" size="icon" className="ml-1 h-5 w-5">
+                                                                    <ExternalLinkIcon className="h-3 w-3" />
+                                                                </Button>
+                                                            </a>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            </AccordionTrigger>
+                                            <AccordionContent className="px-0 pb-0">
+                                                {file.patch ? (
+                                                    <pre className="text-xs p-2 bg-gray-50 border-t overflow-x-auto max-h-60 font-mono">{file.patch}</pre>
+                                                ) : (
+                                                    <div className="text-xs p-2 text-gray-500 italic border-t">Patch not available.</div>
+                                                )}
+                                            </AccordionContent>
+                                        </AccordionItem>
+                                    )
+                                })}
+                            </Accordion>
+                        </div>
+                    )}
+                </div>
+            )
+        } catch (e) {
+            console.error("Error parsing or rendering get_commit result:", e)
+            // Use helper to get raw content for error display
+            const errorDisplay = getRawContentForError(toolResult);
+            displayContent = (
+                <div className="text-red-700 text-xs">
+                    <p className="font-medium mb-1">Error rendering commit details:</p>
+                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
+                    <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
+                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
+                </div>
+            );
         }
+    } else if (toolName === 'list_commits' && !toolResult.error && toolResult.content) {
+        try {
+            let commitsList: any[];
+            // Use helper to get JSON text
+            const jsonText = getJsonTextContent(toolResult);
+            if (jsonText) {
+               commitsList = JSON.parse(jsonText);
+            } else {
+               // Fallback: Assume toolResult.content is the data directly
+               console.warn("Parsing list_commits result from potentially direct content structure.");
+               commitsList = toolResult.content;
+            }
 
-      } catch (e) {
-        console.error("Error parsing or rendering list_branches result:", e);
-        let errorDisplay = JSON.stringify(toolResult.content, null, 2);
-         if (Array.isArray(toolResult.content) && toolResult.content[0]?.text) {
-            errorDisplay = toolResult.content[0].text;
-         } else if (typeof toolResult.content === 'string') {
-            errorDisplay = toolResult.content;
-         }
+            if (!Array.isArray(commitsList)) {
+                throw new Error("Expected an array of commits.");
+            }
 
-        displayContent = (
-           <div className="text-red-700 text-xs">
-             <p className="font-medium mb-1">Error rendering branch list:</p>
-             <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
-             <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
-             <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
-           </div>
-         );
-      }
+            if (commitsList.length === 0) {
+                displayContent = <p className="text-xs text-gray-600">No commits found for the specified criteria.</p>;
+            } else {
+                displayContent = (
+                    <div className="space-y-3">
+                        {commitsList.map((commit: any, index: number) => {
+                            const commitId = `commit-${cell.id}-${index}`;
+                            const shortSha = commit.sha?.substring(0, 7) || 'N/A';
+                            const commitMessage = commit.commit?.message?.split('\\n')[0] || 'No commit message';
+                            const author = commit.author;
+                            const committer = commit.committer; // Could be different from author
+                            const authorDate = commit.commit?.author?.date;
+
+                            return (
+                                <div key={commit.sha || index} className="border-b border-gray-200 pb-2.5 last:border-b-0 last:pb-0">
+                                    <div className="flex justify-between items-start mb-1">
+                                        <p className="text-sm font-medium truncate mr-2 flex-grow" title={commit.commit?.message || ''}>
+                                            {commitMessage}
+                                        </p>
+                                        <div className="flex items-center space-x-1 flex-shrink-0">
+                                            <TooltipProvider delayDuration={100}>
+                                                <Tooltip>
+                                                    <TooltipTrigger asChild>
+                                                        <Button variant="outline" size="sm" onClick={() => copyToClipboard(commit.sha, commitId)} className="font-mono text-xs h-auto px-1.5 py-0.5">
+                                                            <GitCommitIcon className="h-3 w-3 mr-1" /> {shortSha}
+                                                            {copiedStates[commitId] ? <CheckIcon className="h-3 w-3 ml-1 text-green-600" /> : <CopyIcon className="h-3 w-3 ml-1" />}
+                                                        </Button>
+                                                    </TooltipTrigger>
+                                                    <TooltipContent><p>Copy full SHA: {commit.sha}</p></TooltipContent>
+                                                </Tooltip>
+                                            </TooltipProvider>
+                                            <a href={commit.html_url} target="_blank" rel="noopener noreferrer">
+                                                <Button variant="outline" size="sm" className="text-xs h-auto px-1.5 py-0.5">
+                                                    <ExternalLinkIcon className="h-3 w-3 mr-1" /> GitHub
+                                                </Button>
+                                            </a>
+                                        </div>
+                                    </div>
+                                    <div className="text-xs text-gray-600 flex items-center space-x-1 flex-wrap">
+                                        {author && (
+                                            <TooltipProvider delayDuration={100}>
+                                                <Tooltip>
+                                                    <TooltipTrigger asChild>
+                                                        <img src={author.avatar_url} alt={commit.commit?.author?.name || author.login || 'Author'} className="h-4 w-4 rounded-full inline-block"/>
+                                                    </TooltipTrigger>
+                                                    <TooltipContent>
+                                                        <p>{commit.commit?.author?.name || 'N/A'} ({commit.commit?.author?.email || 'N/A'})</p>
+                                                        {author.login && <p>GitHub: {author.login}</p>}
+                                                    </TooltipContent>
+                                                </Tooltip>
+                                            </TooltipProvider>
+                                        )}
+                                        <span>{commit.commit?.author?.name || author?.login || 'Unknown author'}</span>
+                                        <span>authored on {formatDate(authorDate)}</span>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                );
+            }
+        } catch (e) {
+            console.error("Error parsing or rendering list_commits result:", e);
+            // Use helper to get raw content for error display
+            const errorDisplay = getRawContentForError(toolResult);
+
+            displayContent = (
+                <div className="text-red-700 text-xs">
+                    <p className="font-medium mb-1">Error rendering commit list:</p>
+                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
+                    <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
+                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
+                </div>
+            );
+        }
+    } else if (toolName === 'search_repositories' && !toolResult.error && toolResult.content) {
+        try {
+            let searchData: any;
+            // Use helper to get JSON text
+            const jsonText = getJsonTextContent(toolResult);
+            if (jsonText) {
+                 searchData = JSON.parse(jsonText);
+            } else {
+                 // Fallback: Assume toolResult.content is the data directly
+                 console.warn("Parsing search_repositories result from potentially direct content structure.");
+                 searchData = toolResult.content;
+            }
+
+            const totalCount = searchData.total_count;
+            const items = searchData.items;
+
+            if (!Array.isArray(items)) {
+                throw new Error("Expected an array of repository items.");
+            }
+
+            displayContent = (
+                <div className="text-xs">
+                    {typeof totalCount === 'number' && (
+                        <p className="mb-2 text-gray-700">
+                            Found <span className="font-semibold">{totalCount}</span> repositories. {items.length < totalCount && `(Showing first ${items.length})`}
+                        </p>
+                    )}
+                    {items.length === 0 ? (
+                        <p className="text-gray-600">No repositories found matching your query.</p>
+                    ) : (
+                        <div className="overflow-x-auto border rounded-md">
+                            <table className="min-w-full divide-y divide-gray-200">
+                                <thead className="bg-gray-50">
+                                    <tr>
+                                        <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                                        <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Description</th>
+                                        <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Language</th>
+                                        <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Stars</th>
+                                        <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Forks</th>
+                                        <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Updated</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="bg-white divide-y divide-gray-200">
+                                    {items.map((repo: any) => (
+                                        <tr key={repo.id}>
+                                            <td className="px-3 py-1.5 whitespace-nowrap">
+                                                <a href={repo.html_url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline font-medium">
+                                                    {repo.full_name}
+                                                </a>
+                                            </td>
+                                            <td className="px-3 py-1.5 text-gray-700 max-w-xs truncate" title={repo.description}>{repo.description || '-'}</td>
+                                            <td className="px-3 py-1.5 whitespace-nowrap text-gray-700">{repo.language || '-'}</td>
+                                            <td className="px-3 py-1.5 whitespace-nowrap text-gray-700">{repo.stargazers_count}</td>
+                                            <td className="px-3 py-1.5 whitespace-nowrap text-gray-700">{repo.forks_count}</td>
+                                            <td className="px-3 py-1.5 whitespace-nowrap text-gray-700">{formatDate(repo.updated_at)}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+                </div>
+            );
+
+        } catch (e) {
+            console.error("Error parsing or rendering search_repositories result:", e);
+            // Use helper to get raw content for error display
+            const errorDisplay = getRawContentForError(toolResult);
+
+            displayContent = (
+                <div className="text-red-700 text-xs">
+                    <p className="font-medium mb-1">Error rendering repository search results:</p>
+                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
+                    <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
+                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
+                </div>
+            );
+        }
+    } else if (toolName === 'get_file_contents' && !toolResult.error && toolResult.content) {
+        try {
+            let parsedData: any;
+             // Use helper to get JSON text
+            const jsonText = getJsonTextContent(toolResult);
+            if (jsonText) {
+                 parsedData = JSON.parse(jsonText);
+            } else {
+                 // Fallback: Assume toolResult.content is the data directly
+                 console.warn("Parsing get_file_contents result from potentially direct content structure.");
+                 parsedData = toolResult.content;
+            }
+
+            // Check if the result is an array (directory listing) or an object (single file)
+            if (Array.isArray(parsedData)) {
+                // --- Render Directory Listing ---
+                const directoryItems = parsedData;
+                if (directoryItems.length === 0) {
+                    displayContent = <p className="text-xs text-gray-600">Directory is empty.</p>;
+                } else {
+                    displayContent = (
+                        <div className="overflow-x-auto border rounded-md">
+                            <table className="min-w-full divide-y divide-gray-200 text-xs">
+                                <thead className="bg-gray-50">
+                                    <tr>
+                                        <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                                        <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+                                        <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Size</th>
+                                        <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Path</th>
+                                        <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="bg-white divide-y divide-gray-200">
+                                    {directoryItems.map((item: any) => (
+                                        <tr key={item.path}>
+                                            <td className="px-3 py-1.5 whitespace-nowrap font-medium text-gray-800 flex items-center">
+                                                {item.type === 'dir' ? <FolderIcon className="h-3.5 w-3.5 mr-1.5 text-blue-500 flex-shrink-0"/> : <FileIcon className="h-3.5 w-3.5 mr-1.5 text-gray-500 flex-shrink-0"/>}
+                                                <span className="truncate" title={item.name}>{item.name}</span>
+                                            </td>
+                                            <td className="px-3 py-1.5 whitespace-nowrap font-mono text-gray-600">{item.type}</td>
+                                            <td className="px-3 py-1.5 whitespace-nowrap text-right text-gray-600">{item.size > 0 ? `${item.size} bytes` : '-'}</td>
+                                            <td className="px-3 py-1.5 whitespace-nowrap font-mono text-gray-600 truncate" title={item.path}>{item.path}</td>
+                                            <td className="px-3 py-1.5 whitespace-nowrap">
+                                                <>
+                                                {item.html_url && (
+                                                    <a href={item.html_url} target="_blank" rel="noopener noreferrer">
+                                                        <Button variant="ghost" size="sm" className="text-xs h-auto px-1 py-0.5">
+                                                            <ExternalLinkIcon className="h-3 w-3" />
+                                                        </Button>
+                                                    </a>
+                                                )}
+                                                {item.download_url && (
+                                                    <a href={item.download_url} target="_blank" rel="noopener noreferrer" download={item.name}>
+                                                        <Button variant="ghost" size="sm" className="text-xs h-auto px-1 py-0.5">
+                                                            <Download className="h-3 w-3" />
+                                                        </Button>
+                                                    </a>
+                                                )}
+                                                </>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    );
+                }
+            } else if (typeof parsedData === 'object' && parsedData !== null) {
+                // --- Render Single File Content ---
+                const fileData = parsedData;
+                if (!fileData.path) { // Basic check for file object structure
+                    throw new Error("Expected a file content object with a path.");
+                }
+                
+                const decodedContent = fileData.encoding === 'base64' && fileData.content ? atob(fileData.content) : fileData.content || "(No content)";
+                // TODO: Lift state for show/hide toggle
+                const contentPreview = decodedContent.substring(0, 300); // Show a preview
+                const contentId = `file-content-${cell.id}`;
+
+                displayContent = (
+                    <div className="space-y-3 text-xs">
+                        {/* Header with name/path/links */}
+                        <div className="flex justify-between items-start mb-1">
+                            <p className="text-sm font-medium font-mono truncate mr-2 flex-grow" title={fileData.path}>
+                                {fileData.name} ({fileData.path})
+                            </p>
+                            <div className="flex items-center space-x-1 flex-shrink-0">
+                                {fileData.html_url && (
+                                    <a href={fileData.html_url} target="_blank" rel="noopener noreferrer">
+                                        <Button variant="outline" size="sm" className="text-xs h-auto px-1.5 py-0.5">
+                                            <ExternalLinkIcon className="h-3 w-3 mr-1" /> GitHub
+                                        </Button>
+                                    </a>
+                                )}
+                                {fileData.download_url && (
+                                    <a href={fileData.download_url} target="_blank" rel="noopener noreferrer" download={fileData.name}>
+                                        <Button variant="outline" size="sm" className="text-xs h-auto px-1.5 py-0.5">
+                                            <Download className="h-3 w-3 mr-1" /> Download
+                                        </Button>
+                                    </a>
+                                )}
+                            </div>
+                        </div>
+                        {/* Metadata Table */}
+                        <div className="overflow-x-auto border rounded-md">
+                            <table className="min-w-full divide-y divide-gray-200 text-xs">
+                                <tbody className="bg-white divide-y divide-gray-200">
+                                    <tr>
+                                        <td className="px-3 py-1.5 font-medium text-gray-500">Path</td>
+                                        <td className="px-3 py-1.5 font-mono text-gray-800">{fileData.path}</td>
+                                    </tr>
+                                    <tr>
+                                        <td className="px-3 py-1.5 font-medium text-gray-500">Size</td>
+                                        <td className="px-3 py-1.5 text-gray-800">{fileData.size} bytes</td>
+                                    </tr>
+                                    <tr>
+                                        <td className="px-3 py-1.5 font-medium text-gray-500">Encoding</td>
+                                        <td className="px-3 py-1.5 text-gray-800">{fileData.encoding || '-'}</td>
+                                    </tr>
+                                    <tr>
+                                        <td className="px-3 py-1.5 font-medium text-gray-500">SHA</td>
+                                        <td className="px-3 py-1.5 font-mono text-gray-800">{fileData.sha}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        
+                        {/* Content Section */}
+                        <div className="mt-3">
+                            <div className="flex justify-between items-center mb-1">
+                                <h5 className="text-xs font-medium">File Content {fileData.encoding === 'base64' ? '(Base64 Decoded)' : ''}</h5>
+                                {/* TODO: Implement state lifting for show/hide toggle */}
+                            </div>
+                            <pre
+                                className={`text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200 overflow-auto max-h-60`}
+                            >
+                                {`${contentPreview}${decodedContent.length > 300 ? '\\n...' : ''}`}
+                            </pre>
+                            <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-xs h-auto px-1.5 py-0.5 mt-1 text-gray-600 hover:text-gray-900"
+                                onClick={() => copyToClipboard(decodedContent, contentId)}
+                            >
+                                {copiedStates[contentId] ? <CheckIcon className="h-3 w-3 mr-1 text-green-600" /> : <CopyIcon className="h-3 w-3 mr-1" />}
+                                Copy Decoded Content
+                            </Button>
+                        </div>
+                    </div>
+                );
+            } else {
+                // Handle case where parsedData is neither an array nor a valid file object
+                throw new Error("Unexpected format for get_file_contents result.");
+            }
+
+        } catch (e) {
+            console.error("Error parsing or rendering get_file_contents result:", e);
+             // Use helper to get raw content for error display
+             const errorDisplay = getRawContentForError(toolResult);
+
+            displayContent = (
+                <div className="text-red-700 text-xs">
+                    <p className="font-medium mb-1">Error rendering file content:</p>
+                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
+                    <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
+                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
+                </div>
+            );
+        }
+    } else if (toolName === 'get_me' && !toolResult.error && toolResult.content) {
+        try {
+            let userData: any;
+             // Use helper to get JSON text
+             const jsonText = getJsonTextContent(toolResult);
+             if (jsonText) {
+                 userData = JSON.parse(jsonText);
+             } else {
+                  // Fallback: Assume toolResult.content is the data directly
+                 console.warn("Parsing get_me result from potentially direct content structure.");
+                 userData = toolResult.content;
+             }
+
+
+            if (typeof userData !== 'object' || userData === null) {
+                throw new Error("Expected a user object.");
+            }
+
+            displayContent = (
+                <div className="flex items-start space-x-3 text-xs">
+                    {userData.avatar_url && (
+                        <img src={userData.avatar_url} alt={`${userData.login} avatar`} className="h-12 w-12 rounded-full border" />
+                    )}
+                    <div className="flex-grow">
+                        <div className="flex items-baseline space-x-1.5">
+                            <h4 className="text-base font-semibold">{userData.name || userData.login}</h4>
+                            {userData.login && (
+                                <a href={userData.html_url} target="_blank" rel="noopener noreferrer" className="text-gray-500 hover:text-blue-600 hover:underline">
+                                    (@{userData.login})
+                                </a>
+                            )}
+                        </div>
+                        {userData.bio && <p className="mt-0.5 text-gray-700 text-xs">{userData.bio}</p>}
+                        <div className="mt-1.5 flex items-center space-x-3 text-gray-600 text-xs">
+                            <span>
+                                <span className="font-medium">{userData.public_repos ?? '-'}</span> Public Repos
+                            </span>
+                            <span>
+                                <span className="font-medium">{userData.followers ?? '-'}</span> Followers
+                            </span>
+                            <span>
+                                <span className="font-medium">{userData.following ?? '-'}</span> Following
+                            </span>
+                        </div>
+                        <p className="mt-1 text-gray-500 text-xs">
+                            GitHub member since {formatDate(userData.created_at)}
+                        </p>
+                    </div>
+                </div>
+            );
+
+        } catch (e) {
+            console.error("Error parsing or rendering get_me result:", e);
+             // Use helper to get raw content for error display
+             const errorDisplay = getRawContentForError(toolResult);
+
+            displayContent = (
+                <div className="text-red-700 text-xs">
+                    <p className="font-medium mb-1">Error rendering user profile:</p>
+                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
+                    <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
+                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
+                </div>
+            );
+        }
+    } else if (toolName === 'list_branches' && !toolResult.error && toolResult.content) {
+        try {
+            let branchesData: any[];
+            // Use helper to get JSON text
+            const jsonText = getJsonTextContent(toolResult);
+            if (jsonText) {
+                branchesData = JSON.parse(jsonText);
+            } else if (Array.isArray(toolResult.content)) {
+                // Fallback: Assume toolResult.content is the array directly
+                console.warn("Parsing list_branches result from potentially direct content structure (array).");
+                branchesData = toolResult.content;
+            } else {
+                throw new Error("Expected an array of branches or a JSON string representing it.");
+            }
+
+
+            if (!Array.isArray(branchesData)) {
+                throw new Error("Expected an array of branches after parsing.");
+            }
+
+            if (branchesData.length === 0) {
+                displayContent = <p className="text-xs text-gray-600">No branches found for this repository.</p>;
+            } else {
+                displayContent = (
+                    <div className="overflow-x-auto border rounded-md">
+                        <table className="min-w-full divide-y divide-gray-200 text-xs">
+                            <thead className="bg-gray-50">
+                                <tr>
+                                    <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Branch Name</th>
+                                    <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Latest Commit</th>
+                                    <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Protected</th>
+                                </tr>
+                            </thead>
+                            <tbody className="bg-white divide-y divide-gray-200">
+                                {branchesData.map((branch: any) => (
+                                    <tr key={branch.name}>
+                                        <td className="px-3 py-1.5 whitespace-nowrap font-medium text-gray-800">{branch.name}</td>
+                                        <td className="px-3 py-1.5 whitespace-nowrap font-mono">
+                                            {branch.commit?.url ? (
+                                                <a href={branch.commit.url.replace("api.github.com/repos", "github.com").replace("/commits/", "/commit/")} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+                                                    {branch.commit.sha?.substring(0, 7)}
+                                                </a>
+                                            ) : (
+                                                <span>{branch.commit?.sha?.substring(0, 7) || '-'}</span>
+                                            )}
+                                        </td>
+                                        <td className="px-3 py-1.5 whitespace-nowrap">
+                                            {branch.protected ? (
+                                                <Badge variant="secondary" className="text-xs px-1.5 py-0.5 bg-orange-100 text-orange-800 border-orange-200">Protected</Badge>
+                                            ) : (
+                                                <span className="text-gray-600">-</span>
+                                            )}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                );
+            }
+
+        } catch (e) {
+            console.error("Error parsing or rendering list_branches result:", e);
+            // Use helper to get raw content for error display
+             const errorDisplay = getRawContentForError(toolResult);
+
+            displayContent = (
+                <div className="text-red-700 text-xs">
+                    <p className="font-medium mb-1">Error rendering branch list:</p>
+                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
+                    <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
+                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
+                </div>
+            );
+        }
     } else {
-      // Default case for tools without specific rendering
-      if (toolResult.error) {
-        // Error display logic
-        displayContent = (
-          <div className="text-red-700 text-xs">
-            <p className="font-medium mb-1">Error:</p>
-            <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200 overflow-x-auto">{(()=>{
-              try {
-                // Use toolResult.error directly
-                return String(toolResult.error); 
-              } catch {
-                // Fallback if string conversion fails (shouldn't happen for string)
-                return "Could not display error content."; 
-              }
-            })()}</pre>
-          </div>
-        )
-      } else if (toolResult.content) {
-        let finalContent: any = null;
-        let isJson = false;
+        // Default case for tools without specific rendering or for errors
+        if (toolResult.error) {
+            // Error display logic
+            displayContent = (
+                <div className="text-red-700 text-xs">
+                    <p className="font-medium mb-1">Error:</p>
+                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200 overflow-x-auto">{(()=>{
+                        try {
+                            // Use toolResult.error directly
+                            return String(toolResult.error);
+                        } catch {
+                            // Fallback if string conversion fails (shouldn't happen for string)
+                            return "Could not display error content.";
+                        }
+                    })()}</pre>
+                </div>
+            )
+        } else if (toolResult.content) {
+            let finalContent: any = null;
+            let isJson = false;
 
-        // Step 1: Get the core content, trying to unwrap if necessary
-        if (Array.isArray(toolResult.content) && toolResult.content.length === 1 && typeof toolResult.content[0]?.text === 'string') {
-          finalContent = toolResult.content[0].text;
-          // Try to parse this text as JSON
-          try {
-            finalContent = JSON.parse(finalContent);
-            isJson = true;
-          } catch {
-            // It wasn't JSON, keep it as a string
-            isJson = false;
-          }
-        } else if (typeof toolResult.content === 'string') {
-           // Try to parse the string content as JSON
-           try {
-             finalContent = JSON.parse(toolResult.content);
-             isJson = true;
-           } catch {
-             // It wasn't JSON, keep it as a string
-             finalContent = toolResult.content;
-             isJson = false;
-           }
-        } else {
-           // Assume it's already an object/array (or some other type)
-           finalContent = toolResult.content;
-           // Consider it JSON-like if it's an object (for formatting purposes)
-           isJson = typeof finalContent === 'object' && finalContent !== null;
-        }
+            // Step 1: Get the core content, trying to unwrap if necessary
+            const jsonText = getJsonTextContent(toolResult);
+            if (jsonText !== null) {
+                // Try to parse this text as JSON
+                try {
+                    finalContent = JSON.parse(jsonText);
+                    isJson = true;
+                } catch {
+                    // It wasn't JSON, keep it as a string
+                    finalContent = jsonText;
+                    isJson = false;
+                }
+            } else {
+                 // Fallback: Assume toolResult.content is the data directly
+                 console.warn("Parsing default/unknown tool result from potentially direct content structure.");
+                 finalContent = toolResult.content;
+                 // Consider it JSON-like if it's an object (for formatting purposes)
+                 isJson = typeof finalContent === 'object' && finalContent !== null;
+            }
 
-        // Step 2: Render the content
-        if (isJson) {
-          // Render as formatted JSON
-          displayContent = (
-            <pre className="text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200 overflow-x-auto">
-              {JSON.stringify(finalContent, null, 2)}
-            </pre>
-          );
+
+            // Step 2: Render the content
+            if (isJson) {
+                // Render as formatted JSON
+                displayContent = (
+                    <pre className="text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200 overflow-x-auto">
+                        {JSON.stringify(finalContent, null, 2)}
+                    </pre>
+                );
+            } else {
+                // Render as preformatted text
+                displayContent = (
+                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200 overflow-x-auto">
+                        {String(finalContent)}
+                    </pre>
+                );
+            }
         } else {
-           // Render as preformatted text
-           displayContent = (
-             <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200 overflow-x-auto">
-               {String(finalContent)}
-             </pre>
-           );
+            displayContent = <span className="text-gray-500 italic text-xs">No result content available.</span>
         }
-      } else {
-        displayContent = <span className="text-gray-500 italic text-xs">No result content available.</span>
-      }
     }
 
     const cardBorderColor = toolResult.error ? "border-red-200" : "border-green-200";
@@ -1240,7 +1313,7 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
               {renderToolFormTabs()}
 
               {/* Render inputs for the single active tool */}
-              {toolForms[0] && renderToolFormInputs(toolForms[0], 0)}
+              {toolForms[0] && renderToolFormInputs(toolForms[0])}
             </CardContent>
           </Card>
         </div>
@@ -1275,8 +1348,9 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
           </div>
         )}
 
-        {/* Results section - now shows the result of the single tool execution */} 
-        {(cell.status === "success" || (cell.status === "error" && cell.result?.content)) && cell.result && (
+        {/* Results section - Render if a result exists, regardless of status if loaded initially */}
+        {/* The check for status == 'success' or 'error' primarily applies after execution via WebSocket update */}
+        {cell.result && (
           <div>
             {renderResultData()}
             {renderMetadata()}

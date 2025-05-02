@@ -176,19 +176,26 @@ export const useConnectionStore = create<ConnectionState>()(
           }));
 
           try {
+            console.log(`useConnectionStore: Attempting to fetch tools for ${connectionType}...`);
             const tools = await api.connections.getTools(connectionType);
-            set(state => ({
-              toolDefinitions: { ...state.toolDefinitions, [connectionType]: tools },
-              toolLoadingStatus: { ...state.toolLoadingStatus, [connectionType]: 'success' },
-            }));
-            console.log(`Successfully fetched ${tools.length} tools for ${connectionType}`);
+            console.log(`useConnectionStore: Received tools for ${connectionType}:`, tools);
+            set(state => {
+              console.log(`useConnectionStore: Setting definitions and status=success for ${connectionType}`);
+              return {
+                toolDefinitions: { ...state.toolDefinitions, [connectionType]: tools },
+                toolLoadingStatus: { ...state.toolLoadingStatus, [connectionType]: 'success' },
+              }
+            });
           } catch (err) {
             console.error(`Failed to fetch tools for ${connectionType}:`, err);
-            set(state => ({
-              toolLoadingStatus: { ...state.toolLoadingStatus, [connectionType]: 'error' },
-              // Optionally clear definitions on error, or keep stale data
-              // toolDefinitions: { ...state.toolDefinitions, [connectionType]: undefined }, 
-            }));
+            set(state => {
+              console.log(`useConnectionStore: Setting status=error for ${connectionType}`);
+              return {
+                 toolLoadingStatus: { ...state.toolLoadingStatus, [connectionType]: 'error' },
+                // Optionally clear definitions on error, or keep stale data
+                // toolDefinitions: { ...state.toolDefinitions, [connectionType]: undefined }, 
+              }
+            });
           }
         },
 

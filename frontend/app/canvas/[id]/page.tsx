@@ -171,6 +171,7 @@ export default function CanvasPage() {
           try {
             const cellsData = await api.cells.list(notebookId)
             if (Array.isArray(cellsData)) {
+              console.log("[CanvasPage] Cells loaded from API:", JSON.stringify(cellsData.map(c => ({ id: c.id, type: c.type, result: !!c.result, tool_name: c.tool_name, status: c.status })), null, 2)); // Log API cell data
               setCells(cellsData)
             } else if (notebookData.cells && typeof notebookData.cells === "object") {
               const cellsArray = Object.values(notebookData.cells)

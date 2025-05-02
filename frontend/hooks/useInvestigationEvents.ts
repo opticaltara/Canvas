@@ -435,14 +435,25 @@ export function useInvestigationEvents({
         },
       };
 
-      onCreateCell(cellParams);
+      // ---> CHANGE: Use onUpdateCell instead of onCreateCell
+      // Assuming the cell with event.cell_id already exists from an earlier step or initial load.
+      // We only need to update its status and result.
+      console.log(`[handleGithubToolCellCreated] Updating cell ${event.cell_id} with status: success and result.`);
+      onUpdateCell(event.cell_id, {
+          status: "success",
+          result: event.result,
+          // We might also want to update metadata if it changed, but status/result are key
+          metadata: cellParams.metadata, // Pass updated metadata too
+          content: cellParams.content // Update content just in case backend changed it
+      });
+      // Original call: onCreateCell(cellParams);
 
       toast({
         title: "GitHub Tool Completed",
         description: `Tool '${event.tool_name}' executed successfully.`,
       });
     },
-    [onCreateCell, toast]
+    [onUpdateCell, toast]
   );
 
   const handleGithubToolError = useCallback(

@@ -5,6 +5,7 @@ import { Inter } from "next/font/google"
 import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
 import { usePathname } from "next/navigation"
+import StoreInitializer from "@/components/StoreInitializer"
 
 // You can use Inter as a fallback, but we'll prioritize DM Sans from our CSS variables
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" })
@@ -45,6 +46,7 @@ export default function RootLayout({
       </head>
       <body className={inter.variable}>
         <ThemeProvider attribute="class" defaultTheme="light" enableSystem>
+          <StoreInitializer />
           <RootLayoutContent>{children}</RootLayoutContent>
         </ThemeProvider>
       </body>
