@@ -82,11 +82,14 @@ class ChatDatabase:
         cur.execute('''
         CREATE TABLE IF NOT EXISTS chat_sessions (
             id TEXT PRIMARY KEY,
-            notebook_id TEXT,
+            notebook_id TEXT UNIQUE,
             created_at TIMESTAMP,
             updated_at TIMESTAMP
         );
         ''')
+
+        # Add index for notebook_id if it doesn't exist
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_notebook_id ON chat_sessions (notebook_id);')
         
         cur.execute('''
         CREATE TABLE IF NOT EXISTS chat_messages (
@@ -135,6 +138,26 @@ class ChatDatabase:
         if not row:
             return None
         
+        return {
+            "id": row[0],
+            "notebook_id": row[1],
+            "created_at": row[2],
+            "updated_at": row[3]
+        }
+    
+    async def get_session_by_notebook_id(self, notebook_id: str) -> Optional[dict]:
+        """Get the chat session associated with a notebook ID."""
+        # Since notebook_id is UNIQUE, this should return at most one row
+        cursor = await self._asyncify(
+            self._execute,
+            "SELECT id, notebook_id, created_at, updated_at FROM chat_sessions WHERE notebook_id = ?;",
+            notebook_id
+        )
+        row = await self._asyncify(cursor.fetchone)
+
+        if not row:
+            return None
+
         return {
             "id": row[0],
             "notebook_id": row[1],

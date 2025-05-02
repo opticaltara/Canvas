@@ -11,6 +11,7 @@ from typing import Dict, List, Tuple
 from uuid import uuid4, UUID
 from uuid import uuid4
 from datetime import datetime, timezone
+import sqlite3
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, Form, Path
 from fastapi.responses import StreamingResponse
@@ -135,68 +136,140 @@ async def create_session(
     settings: Settings = Depends(get_settings)
 ) -> Dict:
     """
-    Create a new chat session record in DB and store essential info in Redis
-    
+    Finds an existing chat session for the notebook or creates a new one.
+    Ensures DB session, Redis cache, and Agent cache are consistent.
+
     Returns:
-        The session ID
+        The existing or newly created session ID.
     """
     start_time = time.time()
-    
+    notebook_id = request_data.notebook_id
+    correlation_id = str(uuid4())
+    chat_logger.info(f"Request to get/create session for notebook {notebook_id}", extra={'correlation_id': correlation_id})
+
     try:
-        session_id = str(uuid4())
-        notebook_id = request_data.notebook_id
+        # 1. Check for existing session in DB
+        existing_session = await chat_db.get_session_by_notebook_id(notebook_id)
 
-        # Create session in DB
-        await chat_db.create_session(session_id, notebook_id)
+        if existing_session:
+            session_id = existing_session["id"]
+            chat_logger.info(f"Found existing session {session_id} for notebook {notebook_id}", extra={'correlation_id': correlation_id})
 
-        # Store info in Redis
-        redis_key = f"chat_session:{session_id}:notebook_id"
-        await redis.set(redis_key, notebook_id, ex=settings.chat_session_ttl)
-        chat_logger.info(f"Stored session info in Redis for session {session_id} with TTL {settings.chat_session_ttl}s")
+            # Ensure Redis cache is updated/refreshed
+            redis_key = f"chat_session:{session_id}:notebook_id"
+            try:
+                await redis.set(redis_key, notebook_id, ex=settings.chat_session_ttl)
+                chat_logger.info(f"Refreshed Redis cache for existing session {session_id}", extra={'correlation_id': correlation_id})
+            except RedisError as e_redis:
+                chat_logger.warning(f"Failed to refresh Redis cache for existing session {session_id}: {e_redis}", extra={'correlation_id': correlation_id}, exc_info=True)
+                # Continue even if Redis fails, DB is source of truth
 
-        # --- Create, Initialize, and Cache Agent --- 
-        notebook_manager, connection_manager = managers # Unpack managers
-        chat_agents_cache = request.app.state.chat_agents # Get the cache dict
-        
-        # Check if agent already exists (e.g., race condition?) - unlikely but safe
-        if session_id not in chat_agents_cache:
-            chat_logger.info(f"Creating and initializing ChatAgentService for new session {session_id}")
-            agent_instance = ChatAgentService(notebook_manager, connection_manager, redis_client=redis)
-            await agent_instance.initialize(notebook_id)
-            chat_agents_cache[session_id] = agent_instance
-            chat_logger.info(f"Cached ChatAgentService instance for session {session_id}")
+            # Ensure Agent is initialized and cached (it might have been evicted)
+            chat_agents_cache = request.app.state.chat_agents
+            if session_id not in chat_agents_cache:
+                chat_logger.warning(f"Agent for existing session {session_id} not found in cache. Re-initializing.", extra={'correlation_id': correlation_id})
+                try:
+                    notebook_manager, connection_manager = managers
+                    agent_instance = ChatAgentService(notebook_manager, connection_manager, redis_client=redis)
+                    await agent_instance.initialize(notebook_id)
+                    chat_agents_cache[session_id] = agent_instance
+                    chat_logger.info(f"Re-initialized and cached agent for existing session {session_id}", extra={'correlation_id': correlation_id})
+                except Exception as e_agent_init:
+                    chat_logger.error(f"Failed to re-initialize agent for existing session {session_id}: {e_agent_init}", extra={'correlation_id': correlation_id}, exc_info=True)
+                    # If agent init fails, we might still return the session ID, but log the error
+                    # Or raise 500? Let's raise for now, as the agent is crucial.
+                    raise HTTPException(status_code=500, detail=f"Failed to initialize agent for existing session {session_id}")
+            else:
+                 chat_logger.info(f"Agent for existing session {session_id} already in cache.", extra={'correlation_id': correlation_id})
+
+            process_time = time.time() - start_time
+            chat_logger.info(
+                f"Returning existing session {session_id}",
+                extra={
+                    'correlation_id': correlation_id,
+                    'session_id': session_id,
+                    'notebook_id': notebook_id,
+                    'processing_time_ms': round(process_time * 1000, 2)
+                }
+            )
+            return {"session_id": session_id}
+
         else:
-            chat_logger.warning(f"Agent instance for session {session_id} already exists in cache during creation.")
-        # --- End Agent Creation --- 
+            # 2. Create a new session if none exists
+            session_id = str(uuid4())
+            chat_logger.info(f"No existing session found for notebook {notebook_id}. Creating new session {session_id}", extra={'correlation_id': correlation_id})
 
-        process_time = time.time() - start_time
-        chat_logger.info(
-            f"Created new chat session record in DB and Redis", # Updated log message
-            extra={
-                'correlation_id': str(uuid4()),
-                'session_id': session_id,
-                'notebook_id': notebook_id, 
-                'redis_key': redis_key,
-                'processing_time_ms': round(process_time * 1000, 2)
-            }
-        )
-        
-        return {"session_id": session_id}
-    
+            try:
+                # Create session in DB (Handles potential UNIQUE constraint violation)
+                await chat_db.create_session(session_id, notebook_id)
+                chat_logger.info(f"Created new session {session_id} in DB for notebook {notebook_id}", extra={'correlation_id': correlation_id})
+            except sqlite3.IntegrityError:
+                 # This might happen in a race condition if another request created the session just now.
+                 # Re-query the DB to get the session ID that was created.
+                 chat_logger.warning(f"IntegrityError on create for notebook {notebook_id}. Re-querying.", extra={'correlation_id': correlation_id})
+                 existing_session_after_race = await chat_db.get_session_by_notebook_id(notebook_id)
+                 if existing_session_after_race:
+                     session_id = existing_session_after_race["id"]
+                     chat_logger.info(f"Found session {session_id} after IntegrityError for notebook {notebook_id}", extra={'correlation_id': correlation_id})
+                     # Proceed as if we found the session initially (ensure caches)
+                 else:
+                     # This case is strange - IntegrityError but session not found? Log and raise.
+                     chat_logger.error(f"IntegrityError occurred but session for notebook {notebook_id} still not found.", extra={'correlation_id': correlation_id})
+                     raise HTTPException(status_code=500, detail="Failed to create or retrieve chat session due to potential race condition.")
+            except Exception as e_db_create:
+                chat_logger.error(f"Failed to create session {session_id} in DB: {e_db_create}", extra={'correlation_id': correlation_id}, exc_info=True)
+                raise HTTPException(status_code=500, detail=f"Failed to save new chat session: {str(e_db_create)}")
+
+            # Store info in Redis
+            redis_key = f"chat_session:{session_id}:notebook_id"
+            try:
+                await redis.set(redis_key, notebook_id, ex=settings.chat_session_ttl)
+                chat_logger.info(f"Stored new session info in Redis for session {session_id}", extra={'correlation_id': correlation_id})
+            except RedisError as e_redis_set:
+                 chat_logger.warning(f"Failed to set Redis cache for new session {session_id}: {e_redis_set}", extra={'correlation_id': correlation_id}, exc_info=True)
+                 # Continue even if Redis fails for creation
+
+            # Create, Initialize, and Cache Agent
+            notebook_manager, connection_manager = managers
+            chat_agents_cache = request.app.state.chat_agents
+            try:
+                chat_logger.info(f"Creating and initializing ChatAgentService for new session {session_id}", extra={'correlation_id': correlation_id})
+                agent_instance = ChatAgentService(notebook_manager, connection_manager, redis_client=redis)
+                await agent_instance.initialize(notebook_id)
+                chat_agents_cache[session_id] = agent_instance
+                chat_logger.info(f"Cached ChatAgentService instance for new session {session_id}", extra={'correlation_id': correlation_id})
+            except Exception as e_agent_create:
+                 chat_logger.error(f"Failed to initialize agent for new session {session_id}: {e_agent_create}", extra={'correlation_id': correlation_id}, exc_info=True)
+                 # If agent init fails for a NEW session, it's critical. Raise 500.
+                 # Potentially delete the DB session record? Or leave it for retry?
+                 # Let's raise for now.
+                 raise HTTPException(status_code=500, detail=f"Failed to initialize agent for new session {session_id}")
+
+            process_time = time.time() - start_time
+            chat_logger.info(
+                f"Created new session {session_id}",
+                extra={
+                    'correlation_id': correlation_id,
+                    'session_id': session_id,
+                    'notebook_id': notebook_id,
+                    'processing_time_ms': round(process_time * 1000, 2)
+                }
+            )
+            return {"session_id": session_id}
+
     except Exception as e:
         process_time = time.time() - start_time
         chat_logger.error(
-            f"Error creating chat session",
+            f"Unhandled error in create_session for notebook {notebook_id}",
             extra={
-                'correlation_id': str(uuid4()),
+                'correlation_id': correlation_id,
                 'error': str(e),
                 'error_type': type(e).__name__,
                 'processing_time_ms': round(process_time * 1000, 2)
             },
             exc_info=True
         )
-        # Consider closing Redis connection if managed manually
-        raise HTTPException(status_code=500, detail=f"Failed to create chat session: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create or retrieve chat session: {str(e)}")
 
 
 @router.get("/sessions/{session_id}/messages")
@@ -233,7 +306,7 @@ async def get_session_messages(
         )
         
         # Convert to ChatMessage format and serialize as newline-delimited JSON
-        chat_messages = [json.dumps(ChatMessage.model_validate(msg).model_dump()) for msg in messages]
+        chat_messages = [json.dumps(to_chat_message(msg).model_dump()) for msg in messages]
         return Response(
             content="\n".join(chat_messages),
             media_type="text/plain"
