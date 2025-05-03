@@ -11,10 +11,10 @@ from typing import Dict, List, Optional, Tuple, Union, Any
 from uuid import uuid4
 import asyncio
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 import aiofiles
 
-from mcp import ClientSession, StdioServerParameters
+from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 
 from backend.config import get_settings
@@ -22,6 +22,9 @@ from backend.db.database import get_db_session
 from backend.db.repositories import ConnectionRepository
 
 from backend.core.types import MCPToolInfo
+
+# Import handler registry functions
+from backend.services.connection_handlers.registry import get_handler, get_all_handler_types
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -37,14 +40,8 @@ class CorrelationIdFilter(logging.Filter):
 # Add the filter to our logger
 logger.addFilter(CorrelationIdFilter())
 
-# Define the command/args template for GitHub MCP stdio
-GITHUB_MCP_COMMAND = ["docker", "run", "-i", "--rm"]
-GITHUB_MCP_ARGS_TEMPLATE = [
-    # PAT environment variable will be added dynamically during validation/agent execution
-    "ghcr.io/github/github-mcp-server"
-]
-GRAFANA_MCP_COMMAND = ["mcp-grafana"] # New Grafana command
-
+# --- Simplified Connection Config ---
+# BaseConnectionConfig remains the same
 class BaseConnectionConfig(BaseModel):
     """Base connection configuration"""
     id: str
@@ -52,70 +49,8 @@ class BaseConnectionConfig(BaseModel):
     type: str
     config: Dict[str, Any] = Field(default_factory=dict)
 
-class GrafanaConnectionConfig(BaseConnectionConfig):
-    """Grafana stdio connection configuration"""
-    type: str = "grafana"
-    # url and api_key are now stored within the base 'config' dict, specifically under 'env'
-    # config field is inherited from BaseConnectionConfig
 
-class GithubConnectionConfig(BaseConnectionConfig):
-    """GitHub connection configuration (uses stdio MCP server)"""
-    type: str = "github"
-    # Stores stdio command/args template in base 'config', PAT is handled separately within 'config'
-    # config field is inherited from BaseConnectionConfig
-
-# Generic fallback for other types
-class GenericConnectionConfig(BaseConnectionConfig):
-    """Generic connection configuration"""
-    config: Dict[str, str] = Field(default_factory=dict)
-
-class ConnectionConfig(BaseConnectionConfig):
-    """Connection configuration"""
-    def to_specific_config(self) -> Union[
-        GrafanaConnectionConfig, 
-        GithubConnectionConfig,
-        GenericConnectionConfig
-    ]:
-        """Convert to a type-specific configuration"""
-        if self.type == "grafana":
-            # Returns the Grafana config, the base 'config' dict holds the details (command, args, env, url, api_key)
-            return GrafanaConnectionConfig(
-                id=self.id,
-                name=self.name,
-                config=self.config
-            )
-        elif self.type == "github":
-            # Returns the GitHub config, the base 'config' dict holds the details (command, args template, pat)
-            return GithubConnectionConfig(
-                id=self.id,
-                name=self.name,
-                config=self.config # Contains command and args template now
-            )
-        else:
-            return GenericConnectionConfig(
-                id=self.id,
-                name=self.name,
-                type=self.type,
-                config=self.config
-            )
-    
-    @classmethod
-    def from_specific_config(cls, config: Union[
-        GrafanaConnectionConfig, 
-        GithubConnectionConfig,
-        GenericConnectionConfig
-    ]) -> 'ConnectionConfig':
-        """Create from a type-specific configuration"""
-        # For stdio types (Grafana, GitHub) and Generic, the relevant details are already in the specific config's 'config' dict
-        if isinstance(config, (GrafanaConnectionConfig, GithubConnectionConfig, GenericConnectionConfig)):
-             return cls(
-                id=config.id,
-                name=config.name,
-                type=config.type,
-                config=config.config # The specific config's 'config' dict holds everything needed for the base config
-            )
-        else:
-            raise ValueError(f"Unsupported config type: {type(config)}")
+ConnectionConfig = BaseConnectionConfig
 
 # Singleton instance
 _connection_manager_instance = None
@@ -131,70 +66,57 @@ def get_connection_manager():
 
 class ConnectionManager:
     """
-    Manages connections to data sources via MCP servers
+    Manages connections to data sources via MCP servers using Connection Handlers.
     """
     def __init__(self):
         self.connections: Dict[str, ConnectionConfig] = {}
         self.default_connections: Dict[str, str] = {}
         self.settings = get_settings()
+        # Handler registration should happen automatically when handler modules are imported.
+        # If doing explicit registration, it should ideally occur during app startup (e.g., in main.py).
+        logger.info(f"ConnectionManager initialized. Registered handlers: {get_all_handler_types()}")
     
     async def initialize(self) -> None:
         """Initialize and load connections"""
         correlation_id = str(uuid4())
         logger.info("Initializing ConnectionManager", extra={'correlation_id': correlation_id})
-        # Load connections from storage
         await self._load_connections()
-        logger.info("ConnectionManager initialized successfully", extra={'correlation_id': correlation_id})
+        logger.info(f"ConnectionManager initialized successfully with {len(self.connections)} connections loaded.", extra={'correlation_id': correlation_id})
     
     async def close(self) -> None:
         """Close all connections and cleanup resources"""
         correlation_id = str(uuid4())
         logger.info("Closing ConnectionManager", extra={'correlation_id': correlation_id})
+        # Add cleanup logic here if necessary (e.g., closing MCP processes)
         logger.info("ConnectionManager closed successfully", extra={'correlation_id': correlation_id})
     
     async def get_connection(self, connection_id: str) -> Optional[ConnectionConfig]:
-        """Get a connection by ID"""
+        """Get a connection by ID (logic remains mostly the same)"""
         logger.info(f"Getting connection {connection_id}")
-        
-        # First check the in-memory cache
+        # Prioritize cache
         if connection_id in self.connections:
             return self.connections[connection_id]
-            
-        # If not found, query the database
+        # Fallback to DB
         try:
             async with get_db_session() as session:
                 repo = ConnectionRepository(session)
                 db_connection = await repo.get_by_id(connection_id)
-                
                 if db_connection:
-                    # Convert to ConnectionConfig and cache it
                     connection_dict = db_connection.to_dict()
-                    connection = ConnectionConfig(
-                        id=connection_dict["id"],
-                        name=connection_dict["name"],
-                        type=connection_dict["type"],
-                        config=connection_dict["config"]
-                    )
-                    # Update the cache
+                    # Use the simplified ConnectionConfig
+                    connection = ConnectionConfig(**connection_dict)
+                    # Update cache
                     self.connections[connection_id] = connection
                     return connection
-                    
-            # Not found in database either
+            # Not found in DB either
+            logger.warning(f"Connection {connection_id} not found in cache or DB.")
             return None
         except Exception as e:
-            logger.error(f"Error retrieving connection from database: {str(e)}")
-            return None
-    
+            logger.error(f"Error retrieving connection {connection_id} from database: {str(e)}", exc_info=True)
+            return None # Propagate None on error
+
     async def get_connections_by_type(self, connection_type: str) -> List[ConnectionConfig]:
-        """
-        Get all connections for a specific type
-        
-        Args:
-            connection_type: The type of connection
-            
-        Returns:
-            List of connections for the type
-        """
+        """Get all connections for a specific type (logic remains mostly the same)"""
         try:
             # Query the database directly
             async with get_db_session() as session:
@@ -204,926 +126,684 @@ class ConnectionManager:
                 connections = []
                 for db_conn in db_connections:
                     conn_dict = db_conn.to_dict()
-                    connection = ConnectionConfig(
-                        id=conn_dict["id"],
-                        name=conn_dict["name"],
-                        type=conn_dict["type"],
-                        config=conn_dict["config"]
-                    )
-                    # Update cache
+                    # Use simplified ConnectionConfig
+                    connection = ConnectionConfig(**conn_dict)
+                    # Update cache as we load
                     self.connections[conn_dict["id"]] = connection
                     connections.append(connection)
                 
                 return connections
         except Exception as e:
-            logger.error(f"Error retrieving connections by type from database: {str(e)}")
-            return []
-    
+            logger.error(f"Error retrieving connections by type '{connection_type}' from database: {str(e)}", exc_info=True)
+            return [] # Return empty list on error
+
     async def get_all_connections(self) -> List[Dict]:
-        """
-        Get all connections (with sensitive fields redacted)
-        
-        Returns:
-            List of connection information
-        """
+        """Get all connections (uses _redact_sensitive_fields which now uses handlers)"""
         try:
-            # Query the database directly
+            # Always fetch fresh from DB to get current state including `is_default`
             async with get_db_session() as session:
                 repo = ConnectionRepository(session)
                 db_connections = await repo.get_all()
                 
-                # Update cache with any new connections
+                # Update cache with any changes/new connections
                 for db_conn in db_connections:
                     conn_dict = db_conn.to_dict()
-                    self.connections[conn_dict["id"]] = ConnectionConfig(
-                        id=conn_dict["id"],
-                        name=conn_dict["name"],
-                        type=conn_dict["type"],
-                        config=conn_dict["config"]
-                    )
+                    # Use simplified ConnectionConfig
+                    self.connections[conn_dict["id"]] = ConnectionConfig(**conn_dict)
                 
-                return [
-                    {
-                        "id": conn.to_dict()["id"],
-                        "name": conn.to_dict()["name"],
-                        "type": conn.to_dict()["type"],
-                        "config": self._redact_sensitive_fields(conn.to_dict()["config"], conn_dict["type"])
-                    }
-                    for conn in db_connections
-                ]
+                # Prepare response DTOs
+                response_list = []
+                for conn in db_connections:
+                    try:
+                        conn_dict = conn.to_dict()
+                        # Redaction uses handler via _redact_sensitive_fields (updated call)
+                        redacted_config = self._redact_sensitive_fields(conn_dict["config"], str(conn_dict["type"]))
+                        response_list.append({
+                            "id": conn_dict["id"],
+                            "name": conn_dict["name"],
+                            "type": conn_dict["type"],
+                            "is_default": conn_dict["is_default"],
+                            "config": redacted_config
+                        })
+                    except Exception as redact_err:
+                         logger.error(f"Error redacting config for connection {conn.id} ({conn.type}): {redact_err}", exc_info=True)
+                         response_list.append({
+                             "id": conn.id, "name": conn.name, "type": conn.type, "is_default": conn.is_default,
+                             "config": {"error": "Failed to redact configuration"}
+                         })
+
+                return response_list
         except Exception as e:
-            logger.error(f"Error retrieving all connections from database: {str(e)}")
-            # Fallback to in-memory cache
-            return [
-                {
-                    "id": conn.id,
-                    "name": conn.name,
-                    "type": conn.type,
-                    "config": self._redact_sensitive_fields(conn.config, conn.type)
-                }
-                for conn in self.connections.values()
-            ]
-    
+            logger.error(f"Error retrieving all connections from database: {str(e)}", exc_info=True)
+            # Fallback uses cache
+            logger.warning("Falling back to cached connections due to DB error.")
+            response_list = []
+            for conn in self.connections.values(): # Iterate over cached ConnectionConfig objects
+                 try:
+                      # Use simplified ConnectionConfig format
+                      redacted_config = self._redact_sensitive_fields(conn.config, str(conn.type))
+                      response_list.append({
+                          "id": conn.id, "name": conn.name, "type": conn.type,
+                          "is_default": self.default_connections.get(str(conn.type)) == conn.id,
+                          "config": redacted_config
+                      })
+                 except Exception as redact_err:
+                      logger.error(f"Error redacting cached config for connection {conn.id} ({conn.type}): {redact_err}", exc_info=True)
+                      response_list.append({
+                          "id": conn.id, "name": conn.name, "type": conn.type,
+                          "is_default": self.default_connections.get(str(conn.type)) == conn.id,
+                          "config": {"error": "Failed to redact configuration"}
+                      })
+            return response_list
+
+
     async def get_default_connection(self, connection_type: str) -> Optional[ConnectionConfig]:
-        """
-        Get the default connection for a given type
-        
-        Args:
-            connection_type: The connection type to find
-            
-        Returns:
-            The default connection or None if not found
-        """
-        # Check environment variables for default connection
+        """Get the default connection for a given type (logic remains mostly the same)"""
+        # Check environment variable override first
         env_var_name = f"SHERLOG_CONNECTION_DEFAULT_{connection_type.upper()}"
         default_conn_name = os.environ.get(env_var_name)
         
-        # If we have a default connection name from env vars, try to get it
         if default_conn_name:
+            logger.info(f"Attempting to find default {connection_type} connection named '{default_conn_name}' from env var.")
             try:
                 async with get_db_session() as session:
                     repo = ConnectionRepository(session)
                     db_connection = await repo.get_by_name_and_type(default_conn_name, connection_type)
-                    
                     if db_connection:
                         conn_dict = db_connection.to_dict()
-                        connection = ConnectionConfig(
-                            id=conn_dict["id"],
-                            name=conn_dict["name"],
-                            type=conn_dict["type"],
-                            config=conn_dict["config"]
-                        )
-                        # Update cache
-                        self.connections[conn_dict["id"]] = connection
+                        # Use simplified ConnectionConfig
+                        connection = ConnectionConfig(**conn_dict)
+                        self.connections[conn_dict["id"]] = connection # Update cache
+                        logger.info(f"Found default connection via env var: {connection.id}")
                         return connection
+                    else:
+                         logger.warning(f"Default connection name '{default_conn_name}' from env var not found in DB for type {connection_type}.")
             except Exception as e:
-                logger.error(f"Error finding default connection by name: {str(e)}")
+                logger.error(f"Error finding default connection by name '{default_conn_name}': {str(e)}", exc_info=True)
         
-        # Otherwise, check if we have a default connection stored in db
+        # Then check DB flag
         try:
             async with get_db_session() as session:
                 repo = ConnectionRepository(session)
                 db_connection = await repo.get_default_connection(connection_type)
-                
                 if db_connection:
                     conn_dict = db_connection.to_dict()
-                    connection = ConnectionConfig(
-                        id=conn_dict["id"],
-                        name=conn_dict["name"],
-                        type=conn_dict["type"],
-                        config=conn_dict["config"]
-                    )
-                    # Update cache
+                    # Use simplified ConnectionConfig
+                    connection = ConnectionConfig(**conn_dict)
+                    # Update cache and in-memory default tracking
                     self.connections[conn_dict["id"]] = connection
-                    # Update in-memory default tracking
                     self.default_connections[connection_type] = conn_dict["id"]
+                    logger.info(f"Found default connection via DB flag: {connection.id}")
                     return connection
                     
-                # If still not found, try to return the first connection of the type
+                # Fallback: if no default is set, return the *first* connection of the type found
+                logger.info(f"No explicit default found for {connection_type}, checking for any connection of this type.")
+                # Use the already defined method which queries DB
                 connections = await self.get_connections_by_type(connection_type)
                 if connections:
-                    return connections[0]
+                     first_connection = connections[0]
+                     logger.warning(f"Returning first available connection '{first_connection.name}' ({first_connection.id}) as implicit default for {connection_type}.")
+                     return first_connection
         except Exception as e:
-            logger.error(f"Error retrieving default connection from database: {str(e)}")
+            logger.error(f"Error retrieving default connection for {connection_type} from database: {str(e)}", exc_info=True)
         
-        # No connection found
-        return None
-    
-    async def create_connection(self, name: str, type: str, config: Dict, **kwargs) -> ConnectionConfig:
+        logger.warning(f"No connection of type '{connection_type}' found.")
+        return None # No connection found
+
+    async def create_connection(self, name: str, type: str, connection_data: BaseModel) -> ConnectionConfig:
         """
-        Create a new connection
-        
+        Create a new connection using the appropriate handler.
+
         Args:
-            name: The name of the connection
-            type: The type of connection
-            config: The base connection configuration (may be empty for some types)
-            **kwargs: Additional type-specific arguments (e.g., github_pat)
-            
+            name: The name for the connection.
+            type: The type of connection.
+            connection_data: Validated Pydantic model instance containing type-specific data.
+
         Returns:
-            The created connection
+            The created ConnectionConfig.
             
         Raises:
-            ValueError: If connection validation fails
+            ValueError: If connection validation or preparation fails.
+            TypeError: If connection_data is not a Pydantic BaseModel.
         """
         correlation_id = str(uuid4())
-        logger.info(f"Creating new {type} connection: {name}", extra={'correlation_id': correlation_id})
+        logger.info(f"Attempting to create new {type} connection: {name}", extra={'correlation_id': correlation_id})
 
-        # Validate the connection and prepare final config
-        logger.info(f"Validating connection {name}", extra={'correlation_id': correlation_id})
-        
-        # Pass kwargs for type-specific validation data (like PAT)
-        is_valid, message, prepared_config = await self._validate_and_prepare_connection(
-            connection_id=None, 
-            connection_type=type, 
-            initial_config=config, 
-            **kwargs 
-        )
-        
-        if not is_valid:
-            logger.error(f"Connection validation failed for {name}: {message}", extra={'correlation_id': correlation_id})
-            raise ValueError(message)
+        if not isinstance(connection_data, BaseModel):
+             raise TypeError("connection_data must be a Pydantic BaseModel instance")
+
+        try:
+            # Get the handler for the specified type
+            handler = get_handler(type)
+            logger.info(f"Using handler {handler.__class__.__name__} for type {type}", extra={'correlation_id': correlation_id})
+            
+            # Prepare the configuration using the handler
+            # This now includes validation logic (like the MCP check)
+            logger.info(f"Preparing configuration for {name} ({type})...", extra={'correlation_id': correlation_id})
+            prepared_config = await handler.prepare_config(
+                connection_id=None, 
+                input_data=connection_data, 
+                existing_config=None
+            )
+            logger.info(f"Configuration prepared successfully for {name}", extra={'correlation_id': correlation_id})
+
+        except (ValueError, TypeError, ValidationError) as e:
+            # Handles errors from get_handler and prepare_config (incl. MCP validation failures)
+            logger.error(f"Handler configuration preparation failed for {name} ({type}): {e}", extra={'correlation_id': correlation_id}, exc_info=True) # Log stack trace for unexpected type errors
+            raise ValueError(f"Configuration failed: {str(e)}") from e # Raise ValueError consistent with API expectations
+        except Exception as e: # Catch truly unexpected handler errors
+            logger.error(f"Unexpected error during handler configuration preparation for {name} ({type}): {e}", extra={'correlation_id': correlation_id}, exc_info=True)
+            raise ValueError(f"An unexpected error occurred during configuration: {str(e)}") from e
+
 
         # Create the connection in the database with the prepared config
         async with get_db_session() as session:
             repo = ConnectionRepository(session)
-            # Use prepared_config which contains validated/structured data (like command/args for github)
-            db_connection = await repo.create(name, type, prepared_config) 
-            
-            # Convert to ConnectionConfig model
-            connection_dict = db_connection.to_dict()
-            connection = ConnectionConfig(
-                id=connection_dict["id"],
-                name=connection_dict["name"],
-                type=connection_dict["type"],
-                config=connection_dict["config"] # This is the prepared_config
-            )
+            try:
+                # Check if name already exists for this type
+                existing_by_name = await repo.get_by_name_and_type(name, type)
+                if existing_by_name:
+                    raise ValueError(f"A connection named '{name}' of type '{type}' already exists.")
 
-        # Add to in-memory connections
+                db_connection = await repo.create(name, type, prepared_config)
+                # Convert to ConnectionConfig model
+                connection_dict = db_connection.to_dict()
+                # Use simplified ConnectionConfig
+                connection = ConnectionConfig(**connection_dict)
+            except Exception as db_e: # Catch potential DB errors (incl. unique constraints)
+                 logger.error(f"Database error creating connection {name} ({type}): {db_e}", extra={'correlation_id': correlation_id}, exc_info=True)
+                 # Make common DB errors more user-friendly if possible
+                 if "unique constraint" in str(db_e).lower():
+                      raise ValueError(f"Database error: A connection with similar properties might already exist.")
+                 raise ValueError(f"Database error creating connection: {str(db_e)}") from db_e
+
+        # Add to in-memory cache
         self.connections[connection.id] = connection
 
-        # If this is the first connection for this type, set it as default
-        # Check default *after* potential creation
-        existing_default = await self.get_default_connection(type)
-        if not existing_default:
-            logger.info(f"Setting {name} ({connection.id}) as default {type} connection", extra={'correlation_id': correlation_id})
-            self.default_connections[type] = connection.id
+        # Set as default if first of its type (check *after* creation)
+        # Use the existing method which queries DB
+        connections_of_type = await self.get_connections_by_type(type)
+        if len(connections_of_type) == 1: # If this newly created one is the only one
+            logger.info(f"Setting {name} ({connection.id}) as default {type} connection (first of its type).", extra={'correlation_id': correlation_id})
             await self.set_default_connection(connection.id)
 
         logger.info(f"Successfully created connection {name} ({connection.id})", extra={'correlation_id': correlation_id})
         return connection
-    
-    async def update_connection(self, connection_id: str, name: str, config: Dict, **kwargs) -> ConnectionConfig:
+
+    async def update_connection(self, connection_id: str, name: Optional[str], connection_data: BaseModel) -> ConnectionConfig:
         """
-        Update an existing connection
-        
+        Update an existing connection using the appropriate handler.
+        Name update is handled separately from config update via the handler.
+
         Args:
-            connection_id: The ID of the connection to update
-            name: The new name of the connection
-            config: The new base connection configuration
-            **kwargs: Additional type-specific arguments (e.g., github_pat for re-validation)
-            
+            connection_id: The ID of the connection to update.
+            name: The new name for the connection (optional, if None, name is not changed).
+            connection_data: Validated Pydantic model instance containing update data for the config.
+
         Returns:
-            The updated connection
+            The updated ConnectionConfig.
             
         Raises:
-            ValueError: If the connection is not found or validation fails
+            ValueError: If connection not found, or validation/preparation fails.
+             TypeError: If connection_data is not a Pydantic BaseModel.
         """
         correlation_id = str(uuid4())
-        logger.info(f"Updating connection {connection_id} with new name: {name}", extra={'correlation_id': correlation_id})
-        connection = await self.get_connection(connection_id)
-        if not connection:
+        logger.info(f"Attempting to update connection {connection_id} (New name: {name or 'unchanged'})", extra={'correlation_id': correlation_id})
+        
+        if not isinstance(connection_data, BaseModel):
+             raise TypeError("connection_data must be a Pydantic BaseModel instance")
+
+        # Get existing connection (use await)
+        existing_connection = await self.get_connection(connection_id)
+        if not existing_connection:
             logger.error(f"Connection not found for update: {connection_id}", extra={'correlation_id': correlation_id})
             raise ValueError(f"Connection not found: {connection_id}")
 
-        # Validate the connection and prepare final config
-        logger.info(f"Validating updated connection {name} ({connection_id})", extra={'correlation_id': correlation_id})
-        
-        is_valid, message, prepared_config = await self._validate_and_prepare_connection(
-            connection_id=connection_id, 
-            connection_type=connection.type, 
-            initial_config=config, 
-            **kwargs # Pass PAT if provided for re-validation
-        )
-        
-        if not is_valid:
-            logger.error(f"Connection validation failed for update {name} ({connection_id}): {message}", extra={'correlation_id': correlation_id})
-            raise ValueError(message)
+        final_name = name if name is not None else existing_connection.name
+        existing_config = existing_connection.config
+        connection_type = existing_connection.type # Type cannot be changed
 
-        # Update the connection in the database with the prepared config
-        async with get_db_session() as session:
-            repo = ConnectionRepository(session)
-            db_connection = await repo.update(connection_id, name, prepared_config)
-            if not db_connection:
-                logger.error(f"Failed to update connection {connection_id} in database", extra={'correlation_id': correlation_id})
-                raise ValueError(f"Failed to update connection: {connection_id}")
+        prepared_config = existing_config # Start with existing config
+        config_changed = False
 
-            # Convert to ConnectionConfig model
-            connection_dict = db_connection.to_dict()
-            updated_connection = ConnectionConfig(
-                id=connection_dict["id"],
-                name=connection_dict["name"],
-                type=connection_dict["type"],
-                config=connection_dict["config"] # This is the prepared_config
-            )
+        # Check if there's actual config data to update in the input model
+        # Use model_dump with exclude_unset=True to see if any fields were provided
+        update_payload = connection_data.model_dump(exclude_unset=True)
 
-        # Update the in-memory connection
+        if update_payload: # Only run handler prepare if there are config changes
+            config_changed = True
+            logger.info(f"Config changes detected for {connection_id}, preparing new config...", extra={'correlation_id': correlation_id})
+            try:
+                # Get the handler for the existing connection type
+                handler = get_handler(connection_type)
+                logger.info(f"Using handler {handler.__class__.__name__} for update ({connection_type})", extra={'correlation_id': correlation_id})
+
+                # Prepare the updated configuration using the handler
+                prepared_config = await handler.prepare_config(
+                    connection_id=connection_id, 
+                    input_data=connection_data, # Pass the Pydantic model
+                    existing_config=existing_config
+                )
+                logger.info(f"Updated configuration prepared successfully for {connection_id}", extra={'correlation_id': correlation_id})
+
+            except (ValueError, TypeError, ValidationError) as e:
+                logger.error(f"Handler configuration preparation failed for update {final_name} ({connection_id}): {e}", extra={'correlation_id': correlation_id}, exc_info=True)
+                raise ValueError(f"Update configuration failed: {str(e)}") from e
+            except Exception as e: # Catch unexpected handler errors
+                logger.error(f"Unexpected error during handler configuration preparation for update {final_name} ({connection_id}): {e}", extra={'correlation_id': correlation_id}, exc_info=True)
+                raise ValueError(f"An unexpected error occurred during update configuration: {str(e)}") from e
+        else:
+             logger.info(f"No config changes detected for {connection_id}, only name might be updated.", extra={'correlation_id': correlation_id})
+
+
+        # Update the connection in the database (only if name or config changed)
+        if final_name != existing_connection.name or config_changed:
+            logger.info(f"Saving updates to DB for {connection_id} (Name: {final_name}, Config changed: {config_changed})", extra={'correlation_id': correlation_id})
+            async with get_db_session() as session:
+                repo = ConnectionRepository(session)
+                try:
+                    # Check if new name conflicts with another connection of the same type
+                    if final_name != existing_connection.name:
+                         existing_by_name = await repo.get_by_name_and_type(final_name, connection_type)
+                         # Explicitly check if an object was returned, then check its ID from the dict
+                         if existing_by_name is not None and existing_by_name.to_dict()['id'] != connection_id:
+                             raise ValueError(f"A connection named '{final_name}' of type '{connection_type}' already exists.")
+
+                    db_connection = await repo.update(connection_id, final_name, prepared_config)
+                    if not db_connection:
+                        # This case might indicate a concurrent delete or other issue
+                        logger.error(f"Failed to update connection {connection_id} in database (not found after check?)", extra={'correlation_id': correlation_id})
+                        raise ValueError(f"Failed to update connection (not found): {connection_id}")
+
+                    # Convert to ConnectionConfig model
+                    connection_dict = db_connection.to_dict()
+                    # Use simplified ConnectionConfig
+                    updated_connection = ConnectionConfig(**connection_dict)
+
+                except Exception as db_e: # Catch potential DB errors
+                    logger.error(f"Database error updating connection {final_name} ({connection_id}): {db_e}", extra={'correlation_id': correlation_id}, exc_info=True)
+                    if "unique constraint" in str(db_e).lower():
+                         raise ValueError(f"Database error: A connection named '{final_name}' might already exist.")
+                    raise ValueError(f"Database error updating connection: {str(db_e)}") from db_e
+        else:
+             # No changes to save, return the existing connection object
+             logger.info(f"No changes to save for connection {connection_id}.", extra={'correlation_id': correlation_id})
+             updated_connection = existing_connection # Return the original object
+
+        # Update the in-memory cache with the potentially updated object
         self.connections[connection_id] = updated_connection
 
-        logger.info(f"Successfully updated connection {name} ({connection_id})", extra={'correlation_id': correlation_id})
+        logger.info(f"Successfully updated connection {final_name} ({connection_id})", extra={'correlation_id': correlation_id})
         return updated_connection
     
     async def delete_connection(self, connection_id: str) -> None:
-        """
-        Delete a connection
-        
-        Args:
-            connection_id: The ID of the connection to delete
-            
-        Raises:
-            ValueError: If the connection is not found
-        """
-        logger.info(f"Deleting connection {connection_id}")
-        connection = self.get_connection(connection_id)
+        """Delete a connection (logic remains mostly the same) - Ensure get_connection is awaited"""
+        logger.info(f"Attempting to delete connection {connection_id}")
+        # Use await to get the connection object
+        connection = await self.get_connection(connection_id) 
         if not connection:
             logger.error(f"Connection not found for deletion: {connection_id}")
+            # Keep raising ValueError for consistency with update/get
             raise ValueError(f"Connection not found: {connection_id}")
         
+        connection_type_deleted = connection.type # Store type before deletion
+
         # Delete from database
         async with get_db_session() as session:
             repo = ConnectionRepository(session)
             success = await repo.delete(connection_id)
             if not success:
-                logger.error(f"Failed to delete connection {connection_id} from database")
-                raise ValueError(f"Failed to delete connection: {connection_id}")
+                # This could happen if deleted between get and delete, or DB error
+                logger.error(f"Failed to delete connection {connection_id} from database (already gone or DB error?)")
+                # Decide whether to raise or log and continue
+                raise ValueError(f"Failed to delete connection from database: {connection_id}")
         
-        # Remove from in-memory connections
+        # Remove from in-memory cache
         if connection_id in self.connections:
             del self.connections[connection_id]
+            logger.info(f"Removed connection {connection_id} from cache.")
         
-        # Update default connections if needed
-        for conn_type, default_id in list(self.default_connections.items()):
-            if default_id == connection_id:
-                logger.info(f"Removing {connection_id} as default connection for type {conn_type}")
-                # Find another connection for this type
-                connections = await self.get_connections_by_type(conn_type)
+        # Update default connections if needed (check memory first)
+        if self.default_connections.get(connection_type_deleted) == connection_id:
+            logger.info(f"Removing deleted connection {connection_id} as default for type {connection_type_deleted}")
+            del self.default_connections[connection_type_deleted] # Remove from memory immediately
+
+            # Find and set a new default in the DB
+            async with get_db_session() as session:
+                repo = ConnectionRepository(session)
+                # Fetch remaining directly from DB
+                connections = await repo.get_by_type(connection_type_deleted)
                 if connections:
-                    new_default = connections[0].id
-                    logger.info(f"Setting new default connection for type {conn_type}: {new_default}")
-                    self.default_connections[conn_type] = new_default
-                    await self.set_default_connection(new_default)
+                    # Get the ID from the dictionary representation of the first connection
+                    first_connection_dict = connections[0].to_dict()
+                    new_default_id = first_connection_dict['id'] 
+                    
+                    logger.info(f"Setting new default connection for type {connection_type_deleted} in DB: {new_default_id}")
+                    try:
+                        # Pass the string ID to the repository method
+                        await repo.set_default_connection(connection_type_deleted, new_default_id)
+                        # Update memory tracking as well
+                        self.default_connections[connection_type_deleted] = new_default_id
+                    except Exception as set_default_err:
+                         logger.error(f"Failed to set new default connection {new_default_id} after deleting {connection_id}: {set_default_err}", exc_info=True)
+                         # State might be inconsistent here
                 else:
-                    logger.info(f"No remaining connections for type {conn_type}, removing default")
-                    if conn_type in self.default_connections:
-                        del self.default_connections[conn_type]
+                    logger.info(f"No remaining connections for type {connection_type_deleted}, default cleared.")
+                    # Ensure no default flag remains in DB (set_default_connection with None ID?)
+                    # Assuming repo.set_default_connection handles clearing if ID is invalid/None or a dedicated method exists
+                    # For now, we rely on the fact that no connection has the flag set.
         
         logger.info(f"Successfully deleted connection {connection_id}")
-    
+
+
     async def set_default_connection(self, connection_id: str) -> None:
-        """
-        Set a connection as the default for its type
-        
-        Args:
-            connection_id: The ID of the connection to set as default
-            
-        Raises:
-            ValueError: If the connection is not found
-        """
+        """Set a connection as the default for its type (logic remains mostly the same) - Ensure get_connection is awaited"""
+        # Use await to get the connection object
         connection = await self.get_connection(connection_id)
         if not connection:
             raise ValueError(f"Connection not found: {connection_id}")
         
-        # Set as default in memory
-        self.default_connections[connection.type] = connection_id
+        connection_type = connection.type
+        logger.info(f"Setting connection {connection_id} ({connection.name}) as default for type {connection_type}")
         
-        # Set as default in database
+        # Set as default in database - this handles unsetting the old default
         async with get_db_session() as session:
             repo = ConnectionRepository(session)
-            await repo.set_default_connection(connection.type, connection_id)
+            try:
+                await repo.set_default_connection(connection_type, connection_id)
+            except Exception as e:
+                logger.error(f"Failed to set default connection {connection_id} in DB: {e}", exc_info=True)
+                raise ValueError(f"Database error setting default connection: {str(e)}") from e
+
+        # Update in-memory default tracking AFTER successful DB operation
+        self.default_connections[connection_type] = connection_id
+        logger.info(f"Updated in-memory default for {connection_type} to {connection_id}")
+
     
-    async def test_connection(self, connection_type: str, config: Dict, **kwargs) -> Tuple[bool, str]:
+    async def test_connection(self, connection_type: str, config_data: BaseModel) -> Tuple[bool, str]:
         """
-        Test a connection configuration without saving it.
-        
+        Test a connection configuration using the appropriate handler's test logic.
+
         Args:
-            connection_type: The type of connection
-            config: The connection configuration to test
-            **kwargs: Additional type-specific arguments (e.g., github_pat)
-            
+            connection_type: The type of connection.
+            config_data: Validated Pydantic model instance containing test data.
+                         Note: This model should come from the handler's get_test_model().
+
         Returns:
             Tuple (is_valid: bool, message: str)
         """
-        logger.info(f"Testing {connection_type} connection configuration")
+        correlation_id = str(uuid4())
+        logger.info(f"Testing {connection_type} connection configuration", extra={'correlation_id': correlation_id})
+
+        if not isinstance(config_data, BaseModel):
+             # This check might be redundant if FastAPI/Pydantic handles validation upstream
+             raise TypeError("config_data must be a Pydantic BaseModel instance")
+
         try:
-            # Delegate to the validation logic
-            is_valid, message, _ = await self._validate_and_prepare_connection(
-                connection_id=None, # No ID for testing
-                connection_type=connection_type,
-                initial_config=config,
-                is_test_run=True, # Indicate this is just a test
-                **kwargs # Pass PAT etc.
+            # Get the handler
+            handler = get_handler(connection_type)
+            logger.info(f"Using handler {handler.__class__.__name__} for test ({connection_type})", extra={'correlation_id': correlation_id})
+
+            # Use the handler's prepare_config logic as the test mechanism.
+            # This ensures the same validation path (including MCP checks) is used.
+            # Pass the validated test_data model directly.
+            logger.info(f"Attempting prepare_config via handler for test...", extra={'correlation_id': correlation_id})
+            await handler.prepare_config(
+                connection_id=None, # Not updating an existing connection
+                input_data=config_data, 
+                existing_config=None
             )
-            return is_valid, message
-        except Exception as e:
-            logger.error(f"Error testing connection configuration: {str(e)}")
-            return False, f"Error testing connection: {str(e)}"
-
-    async def _validate_and_prepare_connection(
-        self, 
-        connection_id: Optional[str], 
-        connection_type: str, 
-        initial_config: Dict,
-        is_test_run: bool = False, # Flag to indicate if this is just a test
-        **kwargs
-    ) -> Tuple[bool, str, Dict]:
-        """
-        Validate a connection configuration and prepare it for saving.
-        
-        Args:
-            connection_id: ID if updating, None if creating or testing.
-            connection_type: Type of connection.
-            initial_config: Configuration dictionary from the request.
-            is_test_run: If True, don't prepare for saving, just validate.
-            **kwargs: Additional type-specific arguments (e.g., github_pat).
-
-        Returns:
-            Tuple (is_valid: bool, message: str, prepared_config: Dict)
-            prepared_config is the config to be saved to the DB.
-        """
-        correlation_id = kwargs.get('correlation_id', str(uuid4()))
-        logger.info(f"Validating connection type {connection_type}", extra={'correlation_id': correlation_id})
-        
-        try:
-            if connection_type == "grafana":
-                grafana_url = kwargs.get("grafana_url")
-                grafana_api_key = kwargs.get("grafana_api_key")
-
-                # Attempt to retrieve from existing config if not provided (e.g., during a test or update without changes)
-                if not grafana_url and connection_id:
-                    existing_conn = await self.get_connection(connection_id)
-                    if existing_conn and existing_conn.config.get("grafana_url"):
-                         grafana_url = existing_conn.config["grafana_url"]
-                         logger.info("Using existing Grafana URL for validation.", extra={'correlation_id': correlation_id})
-                if not grafana_api_key and connection_id:
-                     existing_conn = await self.get_connection(connection_id)
-                     # Check both the direct key and inside env for robustness
-                     if existing_conn and existing_conn.config.get("grafana_api_key"):
-                         grafana_api_key = existing_conn.config["grafana_api_key"]
-                         logger.info("Using existing Grafana API Key (top-level) for validation.", extra={'correlation_id': correlation_id})
-                     elif existing_conn and isinstance(existing_conn.config.get("env"), dict) and existing_conn.config["env"].get("GRAFANA_API_KEY"):
-                         grafana_api_key = existing_conn.config["env"]["GRAFANA_API_KEY"]
-                         logger.info("Using existing Grafana API Key (from env) for validation.", extra={'correlation_id': correlation_id})
-
-
-                if not grafana_url or not grafana_api_key:
-                    raise ValueError("Grafana URL and API Key are required.")
-
-                is_valid, message = await self._validate_grafana_stdio(grafana_url, grafana_api_key, correlation_id)
-                if not is_valid:
-                    return False, message, {}
-
-                # Prepare config for saving (command, args, env, and original url/key for reference)
-                prepared_config = {
-                    "mcp_command": GRAFANA_MCP_COMMAND,
-                    "mcp_args": [], # Grafana MCP takes no command line args
-                    "env": {
-                        "GRAFANA_URL": grafana_url,
-                        "GRAFANA_API_KEY": grafana_api_key # Needs redaction before display
-                    },
-                    # Store original values for easier reference/updates, mark api_key for redaction
-                    "grafana_url": grafana_url,
-                    "grafana_api_key": grafana_api_key
-                }
-                logger.warning("Storing Grafana API Key directly in config. Needs encryption/redaction!", extra={'correlation_id': correlation_id})
-                return True, "Grafana stdio connection validated successfully", prepared_config
-
-            elif connection_type == "github":
-                # GitHub stdio validation
-                github_pat = kwargs.get("github_personal_access_token")
-                existing_config = None
-                
-                if not github_pat:
-                    # If updating/testing and PAT not provided, try to get it from existing config
-                    if connection_id:
-                        existing_conn = await self.get_connection(connection_id)
-                        if existing_conn and existing_conn.config.get("github_pat"):
-                            # Ensure retrieved PAT is a string
-                            potential_pat = existing_conn.config.get("github_pat")
-                            if isinstance(potential_pat, str):
-                                github_pat = potential_pat
-                            else:
-                                # Log error if PAT exists but is not a string?
-                                logger.error(f"Stored github_pat for {connection_id} is not a string.", extra={'correlation_id': correlation_id})
-                                # Proceed as if PAT was not found
-                                pass 
-                            existing_config = existing_conn.config # Keep existing config if validation passes
-                            logger.info("Using existing GitHub PAT from DB for validation.", extra={'correlation_id': correlation_id})
-                        else:
-                            # If no PAT provided and none exists in DB, fail validation unless just updating name
-                            if not is_test_run and not kwargs.get("config"): # Allow name-only updates without PAT
-                                logger.info("GitHub PAT not provided or found, but allowing name-only update.", extra={'correlation_id': correlation_id})
-                                existing_conn_config = existing_conn.config if existing_conn else {}
-                                return True, "GitHub PAT not provided, name update allowed.", existing_conn_config
-                            else:
-                                msg = "GitHub connection requires Personal Access Token for validation (not provided and not found in existing config)."
-                                logger.warning(msg, extra={'correlation_id': correlation_id})
-                                return False, msg, {}
-                    else: # Create or Test requires PAT if not updating
-                        msg = "GitHub connection requires Personal Access Token for validation."
-                        logger.warning(msg, extra={'correlation_id': correlation_id})
-                        return False, msg, {}
-
-                # Check if github_pat is now a valid string before validating
-                if not isinstance(github_pat, str) or not github_pat:
-                    # This case should ideally be caught earlier, but double-check
-                    msg = "Failed to obtain a valid GitHub PAT for validation."
-                    logger.error(msg, extra={'correlation_id': correlation_id})
-                    return False, msg, {}
-                
-                # Perform validation using the obtained PAT
-                is_valid, message = await self._validate_github_stdio(github_pat, correlation_id)
-                
-                if not is_valid:
-                    return False, message, {}
-                
-                # If validation passed using an existing PAT, return the existing config
-                if existing_config is not None:
-                    logger.info("Validation with existing PAT successful, returning existing config.", extra={'correlation_id': correlation_id})
-                    return True, message, existing_config
-                    
-                # Prepare config for saving (command, args template, AND PAT)
-                # !!! SECURITY WARNING: Storing PAT plaintext is not recommended! Encrypt in production. !!!
-                prepared_config = {
-                    "mcp_command": GITHUB_MCP_COMMAND,
-                    "mcp_args_template": GITHUB_MCP_ARGS_TEMPLATE,
-                    "github_pat": github_pat # Store PAT directly (NEEDS ENCRYPTION IN PROD)
-                }
-                logger.warning("Storing GitHub PAT directly in config. Needs encryption!", extra={'correlation_id': correlation_id})
-                return True, "GitHub stdio connection validated successfully", prepared_config
-                
-            elif connection_type == "python":
-                logger.info("No specific validation for Python connection type.", extra={'correlation_id': correlation_id})
-                return True, "Python connection validated", initial_config # Return initial config
-
-            else:
-                # Allow generic/unknown through without specific validation for now
-                logger.warning(f"No specific validation logic for connection type: {connection_type}", extra={'correlation_id': correlation_id})
-                return True, f"Connection validated (or validation not implemented for type {connection_type})", initial_config # Return initial config
-
-        except Exception as e:
-            logger.error(f"Error validating connection: {e}", extra={'correlation_id': correlation_id}, exc_info=True)
-            return False, f"Error validating connection: {str(e)}", {}
-
-    async def _validate_github_stdio(self, github_pat: str, correlation_id: str) -> Tuple[bool, str]:
-        """
-        Validate GitHub connection by running a test MCP stdio session.
-        
-        Args:
-            github_pat: The GitHub Personal Access Token.
-            correlation_id: For logging.
-
-        Returns:
-            Tuple (is_valid: bool, message: str)
-        """
-        logger.info("Performing GitHub stdio validation", extra={'correlation_id': correlation_id})
-        
-        # Construct arguments for docker run, including the -e flag for the PAT
-        # Args should be: ['run', '-i', '--rm', '-e', f'GITHUB_PERSONAL_ACCESS_TOKEN={pat}', 'ghcr.io/github/github-mcp-server']
-        dynamic_env_arg = ["-e", f"GITHUB_PERSONAL_ACCESS_TOKEN={github_pat}"]
-        full_args = GITHUB_MCP_COMMAND[1:] + dynamic_env_arg + GITHUB_MCP_ARGS_TEMPLATE
-        command = GITHUB_MCP_COMMAND[0]
-        
-        # Do not pass env here; the -e arg handles it for the container
-        params = StdioServerParameters(
-            command=command,
-            args=full_args
-        )
-        
-        logger.info(f"Created StdioServerParameters for GitHub. Command: '{params.command}', Args: {params.args}")
-        return True, "GitHub stdio connection validated successfully."
-
-    async def _validate_grafana_stdio(self, grafana_url: str, grafana_api_key: str, correlation_id: str) -> Tuple[bool, str]:
-        """Validate Grafana connection by running a test MCP stdio session."""
-        logger.info("Performing Grafana stdio validation", extra={'correlation_id': correlation_id})
-
-        env_vars = {
-            "GRAFANA_URL": grafana_url,
-            "GRAFANA_API_KEY": grafana_api_key
-        }
-
-        # mcp-grafana takes no command line args, config is via env vars
-        server_params = StdioServerParameters(
-            command=GRAFANA_MCP_COMMAND[0], # 'mcp-grafana'
-            args=[],
-            env=env_vars
-        )
-
-        try:
-            logger.info(f"Attempting stdio_client connection with Grafana params: {server_params}", extra={'correlation_id': correlation_id})
-            async with stdio_client(server_params) as (read, write):
-                async with ClientSession(read, write) as session:
-                    logger.info("Initializing MCP session for Grafana validation...", extra={'correlation_id': correlation_id})
-                    # Set a timeout for initialization
-                    init_task = asyncio.create_task(session.initialize())
-                    try:
-                        await asyncio.wait_for(init_task, timeout=30.0) # 30 second timeout
-                    except asyncio.TimeoutError:
-                         logger.error("Timeout during Grafana MCP session initialization", extra={'correlation_id': correlation_id})
-                         return False, "Validation failed: Timeout initializing Grafana MCP session. Check mcp-grafana binary, URL, API key, and network."
-                    except Exception as init_err:
-                        logger.error(f"Error during Grafana MCP session initialization: {init_err}", extra={'correlation_id': correlation_id})
-                        # Provide more specific error if possible, e.g., connection refused
-                        return False, f"Validation failed: Error initializing Grafana MCP session: {init_err}"
-
-                    logger.info("Listing tools via MCP session for Grafana validation...", extra={'correlation_id': correlation_id})
-                    # Set a timeout for list_tools
-                    list_tools_task = asyncio.create_task(session.list_tools())
-                    try:
-                         tools = await asyncio.wait_for(list_tools_task, timeout=15.0) # 15 second timeout
-                    except asyncio.TimeoutError:
-                         logger.error("Timeout during Grafana MCP list_tools call", extra={'correlation_id': correlation_id})
-                         return False, "Validation failed: Timeout listing tools via Grafana MCP. Check server logs."
-                    except Exception as list_err:
-                        logger.error(f"Error during Grafana MCP list_tools call: {list_err}", extra={'correlation_id': correlation_id})
-                        return False, f"Validation failed: Error listing tools via Grafana MCP: {list_err}"
-
-                    # Basic check: Did we get tools? Grafana MCP should provide some.
-                    if tools and tools.tools:
-                        logger.info(f"Grafana stdio validation successful. Found {len(tools.tools)} tools.", extra={'correlation_id': correlation_id})
-                        return True, "Grafana stdio connection validated successfully."
-                    else:
-                        logger.warning("Grafana stdio validation potentially failed: No tools listed.", extra={'correlation_id': correlation_id})
-                        # Consider this a failure, as we expect tools (e.g., query_prometheus, query_loki)
-                        return False, "Validation failed: Grafana MCP server connected but reported no tools. Check Grafana setup or mcp-grafana logs."
-
-        except FileNotFoundError:
-             logger.error(f"Validation failed: Command '{GRAFANA_MCP_COMMAND[0]}' not found. Was it installed correctly in the Docker image?", extra={'correlation_id': correlation_id})
-             return False, f"Validation failed: Required command '{GRAFANA_MCP_COMMAND[0]}' not found. Ensure it's installed and in PATH."
-        except Exception as e:
-            # Catch potential OS errors during process start e.g. permission denied
-            logger.error(f"Error during Grafana stdio validation process startup or communication: {e}", extra={'correlation_id': correlation_id}, exc_info=True)
-            return False, f"Validation failed due to system error: {str(e)}"
-        # Fallback if logic doesn't return explicitly
-        return False, "Unknown validation error for Grafana stdio."
-
-    async def get_connection_schema(self, connection_id: str) -> Dict:
-        """
-        Get the schema for a connection (tables, fields, etc.)
-        
-        Args:
-            connection_id: The connection ID
             
-        Returns:
-            The connection schema or an error message
-        """
-        connection = await self.get_connection(connection_id)
-        if not connection:
-            return {"error": f"Connection not found: {connection_id}"}
-            
-        try:
-            if connection.type == "grafana":
-                # Fetch dashboards and datasources from Grafana
-                return {"message": "Grafana schema retrieval not implemented yet"}
-            else:
-                return {"message": f"Schema retrieval not implemented for {connection.type} connections"}
+            # If prepare_config succeeded without raising ValueError, it's valid
+            logger.info(f"Test successful for {connection_type}", extra={'correlation_id': correlation_id})
+            return True, f"{connection_type.capitalize()} connection configuration is valid."
+
+        except (ValueError, TypeError, ValidationError) as e:
+            # Catch errors from get_handler or prepare_config
+            error_message = f"Validation failed: {str(e)}"
+            logger.warning(f"Test failed for {connection_type}: {error_message}", extra={'correlation_id': correlation_id}) # Log as warning, don't need full trace for expected validation errors
+            return False, error_message
         except Exception as e:
-            logger.error(f"Error retrieving schema: {e}")
-            return {"error": f"Error retrieving schema: {str(e)}"}
-    
+            # Catch unexpected errors during handler execution
+            logger.error(f"Unexpected error testing {connection_type} connection: {str(e)}", extra={'correlation_id': correlation_id}, exc_info=True)
+            return False, f"An unexpected error occurred during testing: {str(e)}"
+
     def _redact_sensitive_fields(self, config: Dict, connection_type: Optional[str] = None) -> Dict:
         """
-        Redact sensitive fields from a connection configuration
-        
-        Args:
-            config: The configuration to redact
-            connection_type: The type of connection (for context, e.g., github should show PAT)
-            
-        Returns:
-            The redacted configuration
+        Redact sensitive fields from a connection configuration using the handler.
+        Handles cases where the handler or config might be missing.
         """
-        sensitive_fields = [
+        sensitive_keys: List[str] = []
+        # Define a comprehensive fallback list for safety
+        fallback_keys = [
             "password", "secret", "key", "token", "api_key", 
-            "aws_secret_access_key", "private_key",
-            "github_pat", # Add github_pat to the sensitive list
-            "github_personal_access_token" # Keep this for redacting input if ever present
-        ]
-        
-        redacted_config = config.copy()
-        
-        # Remove PAT if present, regardless of type, before general redaction
-        if "github_pat" in redacted_config:
-            redacted_config["github_pat"] = "********"
-        if "github_personal_access_token" in redacted_config: # Also redact this input key if present
-            redacted_config["github_personal_access_token"] = "********"
+            "aws_secret_access_key", "private_key", 
+            "github_pat", "github_personal_access_token", 
+            "jira_api_token", "jira_personal_token"
+        ] 
 
-        # General redaction based on key names
-        for key in list(redacted_config.keys()): # Iterate over keys list for safe removal
-            # Skip keys already redacted
-            if redacted_config[key] == "********":
-                continue
-            if isinstance(redacted_config[key], str) and any(sensitive_part in key.lower() for sensitive_part in sensitive_fields):
+        if not isinstance(config, dict):
+             logger.error(f"Config passed to _redact_sensitive_fields is not a dict: {type(config)}. Returning empty.")
+             return {} # Return empty if input is invalid
+
+        if not connection_type:
+            logger.warning("Connection type not provided for redaction. Falling back to generic list.")
+            sensitive_keys = fallback_keys
+        else:
+            try:
+                # Get sensitive keys from the handler
+                handler = get_handler(connection_type)
+                sensitive_keys = handler.get_sensitive_fields()
+            except ValueError:
+                # Handler not found for the type
+                logger.warning(f"No handler found for type '{connection_type}' during redaction. Falling back to generic list.")
+                sensitive_keys = fallback_keys
+            except Exception as e:
+                 # Unexpected error getting fields from handler
+                 logger.error(f"Error getting sensitive fields from handler for type '{connection_type}': {e}. Falling back to generic list.", exc_info=True)
+                 sensitive_keys = fallback_keys
+
+        # Add fallback keys to handler keys to be safe, avoid duplicates
+        combined_sensitive_keys = list(set(sensitive_keys + fallback_keys))
+        sensitive_keys_lower = [sk.lower() for sk in combined_sensitive_keys]
+
+        redacted_config = {}
+        for key, value in config.items():
+            lower_key = key.lower()
+            # Check if the exact key (case-insensitive) or parts of the key match sensitive keys
+            is_sensitive = lower_key in sensitive_keys_lower
+            if not is_sensitive:
+                 # Check if any sensitive key is a distinct part of the current key (e.g., _pat, token_)
+                 for sk_lower in sensitive_keys_lower:
+                      # Check for common separators or exact match
+                      if f"_{sk_lower}" in lower_key or f"{sk_lower}_" in lower_key:
+                           is_sensitive = True
+                           break 
+
+            if is_sensitive and value is not None: 
                 redacted_config[key] = "********"
+            # Also redact common nested env vars (less dependent on handler providing nested keys)
+            elif key == "env" and isinstance(value, dict):
+                 redacted_env = {}
+                 for env_key, env_value in value.items():
+                     lower_env_key = env_key.lower()
+                     is_env_sensitive = lower_env_key in sensitive_keys_lower
+                     if not is_env_sensitive:
+                         for sk_lower in sensitive_keys_lower:
+                             if f"_{sk_lower}" in lower_env_key or f"{sk_lower}_" in lower_env_key:
+                                 is_env_sensitive = True
+                                 break
+                                 
+                     redacted_env[env_key] = "********" if is_env_sensitive and env_value is not None else env_value
+                 redacted_config[key] = redacted_env
+            else:
+                redacted_config[key] = value
 
-        # Type-specific redaction (e.g., nested keys)
-        if connection_type == "github": # No change needed here if github_pat is already covered
-            pass
-        elif connection_type == "grafana":
-            # Redact the top-level key if present
-            if "grafana_api_key" in redacted_config:
-                 redacted_config["grafana_api_key"] = "***REDACTED***"
-            # Redact the key within the 'env' dict
-            if "env" in redacted_config and isinstance(redacted_config["env"], dict):
-                 if "GRAFANA_API_KEY" in redacted_config["env"]:
-                     # Ensure we modify a copy if 'env' might be shared or reused
-                     if redacted_config["env"] is config.get("env"): # Check if it's the same dict instance
-                          redacted_config["env"] = redacted_config["env"].copy()
-                     redacted_config["env"]["GRAFANA_API_KEY"] = "***REDACTED***"
+        # Remove internal MCP fields (these are not sensitive but shouldn't be exposed)
+        redacted_config.pop("mcp_command", None)
+        redacted_config.pop("mcp_args_template", None)
 
         return redacted_config
-    
+
     async def _load_connections(self) -> None:
-        """Load connections from storage"""
+        """Load connections from storage (DB)"""
         correlation_id = str(uuid4())
         try:
-            # Always use database storage
             logger.info("Loading connections from database storage", extra={'correlation_id': correlation_id})
             await self._load_connections_from_db()
-            logger.info(f"Successfully loaded {len(self.connections)} connections", extra={'correlation_id': correlation_id})
+            logger.info(f"Successfully loaded {len(self.connections)} connections from DB.", extra={'correlation_id': correlation_id})
         except Exception as e:
-            logger.error(f"Error loading connections: {str(e)}", extra={'correlation_id': correlation_id})
+            logger.error(f"Error loading connections from DB: {str(e)}", extra={'correlation_id': correlation_id}, exc_info=True)
+            # Decide if this is fatal or if the app can continue with an empty cache
+            # For now, let the error propagate if needed by the caller (initialize)
             raise
     
     async def _load_connections_from_db(self) -> None:
-        """Load connections from database"""
+        """Load connections from database into cache"""
         async with get_db_session() as session:
             repo = ConnectionRepository(session)
-            
-            # Load all connections
             db_connections = await repo.get_all()
-            self.connections = {
-                conn.to_dict()["id"]: ConnectionConfig(
-                    id=conn.to_dict()["id"],
-                    name=conn.to_dict()["name"],
-                    type=conn.to_dict()["type"],
-                    config=conn.to_dict()["config"]
-                )
-                for conn in db_connections
-            }
             
-            # Load default connections
-            for conn_type in set(conn.to_dict()["type"] for conn in db_connections):
-                default_conn = await repo.get_default_connection(conn_type)
-                if default_conn:
-                    self.default_connections[conn_type] = default_conn.to_dict()["id"]
-    
-    async def _save_connections_to_file(self, data: Dict) -> None:
-        """Save connections to a local file"""
-        file_path = self.settings.connection_file_path
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        
-        # Save to file (use async file operations)
-        async with aiofiles.open(file_path, "w") as f:
-            await f.write(json.dumps(data, indent=2))
-    
-    async def _load_connections_from_file(self) -> Dict:
-        """Load connections from a local file"""
-        file_path = self.settings.connection_file_path
-        
-        if not os.path.exists(file_path):
-            return {"connections": {}, "defaults": {}}
-        
-        # Load from file (use async file operations)
-        try:
-            async with aiofiles.open(file_path, "r") as f:
-                content = await f.read()
-                return json.loads(content)
-        except Exception as e:
-            print(f"Error loading connections from file: {e}")
-            return {"connections": {}, "defaults": {}}
-    
-    def _load_connections_from_env(self) -> Dict:
-        """Load connections from environment variables"""
-        connections = {}
-        default_connections = {}
-        
-        prefix = "SHERLOG_CONNECTION_"
-        
-        for key, value in os.environ.items():
-            if not key.startswith(prefix):
-                continue
-            
-            parts = key[len(prefix):].split("_")
-            if len(parts) < 2:
-                continue
-            
-            # Check if this is a default connection
-            if parts[0] == "DEFAULT" and len(parts) >= 2:
-                connection_type = parts[1].lower()
-                default_connections[connection_type] = value
-                continue
-            
-            connection_type = parts[0].lower()
-            conn_id = parts[1].lower()
-            
-            if len(parts) < 3:
-                continue
-            
-            # Get the field name and value
-            if parts[2] == "NAME":
-                # Connection name
-                if conn_id not in connections:
-                    connections[conn_id] = {
-                        "id": conn_id,
-                        "name": value,
-                        "type": connection_type,
-                        "config": {}
-                    }
-                else:
-                    connections[conn_id]["name"] = value
-            
-            elif parts[2] == "CONFIG" and len(parts) >= 4:
-                # Connection config
-                config_key = "_".join(parts[3:]).lower()
-                
-                if conn_id not in connections:
-                    connections[conn_id] = {
-                        "id": conn_id,
-                        "name": f"{connection_type.capitalize()} Connection",
-                        "type": connection_type,
-                        "config": {config_key: value}
-                    }
-                else:
-                    if "config" not in connections[conn_id]:
-                        connections[conn_id]["config"] = {}
-                    connections[conn_id]["config"][config_key] = value
-        
-        return {
-            "connections": connections,
-            "defaults": default_connections
-        }
+            loaded_connections: Dict[str, ConnectionConfig] = {}
+            loaded_defaults: Dict[str, str] = {}
 
-    # --- Tool Discovery --- 
+            for conn in db_connections:
+                conn_dict = conn.to_dict()
+                # Use simplified ConnectionConfig
+                connection_obj = ConnectionConfig(**conn_dict)
+                loaded_connections[connection_obj.id] = connection_obj
+                if conn_dict['is_default']: # Use dict value for bool check
+                     conn_type_from_dict = conn_dict['type'] # Use dict value
+                     conn_id_from_dict = conn_dict['id'] # Use dict value
+                     if conn_type_from_dict in loaded_defaults:
+                         logger.error(f"Multiple defaults found for type {conn_type_from_dict} in DB! Using {conn_id_from_dict} over {loaded_defaults[conn_type_from_dict]}")
+                     loaded_defaults[conn_type_from_dict] = conn_id_from_dict # Assign str ID
+
+            # Atomically update the cache and defaults
+            self.connections = loaded_connections
+            self.default_connections = loaded_defaults
+            logger.debug(f"Loaded {len(self.connections)} connections and {len(self.default_connections)} defaults into memory.")
+
+    # --- Tool Discovery (Uses Handler) --- 
     async def get_tools_for_connection_type(self, connection_type: str) -> List[MCPToolInfo]:
         """
-        Retrieves the list of available tools for a given connection type by querying its MCP.
-        Returns basic tool info including the raw inputSchema.
+        List available tools for a given connection type using its default connection and handler.
         """
         correlation_id = str(uuid4())
         logger.info(f"Fetching tools for connection type: {connection_type}", extra={'correlation_id': correlation_id})
-        
-        # --- Start Implementation (Modified for MCPToolInfo) --- 
-        connection_config = await self.get_default_connection(connection_type)
-        if not connection_config: 
-            logger.warning(f"No default connection found for {connection_type}", extra={'correlation_id': correlation_id})
-            return []
-        config_dict = connection_config.config
-        if not isinstance(config_dict, dict): raise ValueError(f"Invalid config for {connection_config.id}")
 
-        mcp_command_list = config_dict.get("mcp_command")
-        mcp_args_template = config_dict.get("mcp_args_template", []) 
-        mcp_env = config_dict.get("env", {})
-        if not mcp_command_list or not isinstance(mcp_command_list, list) or not mcp_command_list: raise ValueError(f"Missing MCP command config for {connection_type}")
-        command = mcp_command_list[0]
-        base_args = mcp_command_list[1:]
-        full_args = base_args + mcp_args_template
+        default_conn = await self.get_default_connection(connection_type)
+        if not default_conn:
+            # Log clearly, return empty list - API caller handles 'no connection' case.
+            logger.warning(f"No default connection found for type '{connection_type}'. Cannot list tools.", extra={'correlation_id': correlation_id})
+            return [] 
 
-        # Handle GitHub PAT injection (same as before)
-        if connection_type == "github":
-            github_pat = config_dict.get("github_pat")
-            if not github_pat or not isinstance(github_pat, str): raise ValueError("Missing GitHub PAT")
-            if command == "docker" and "run" in base_args:
-                pat_arg_index = -1
-                if mcp_args_template: 
-                    try: pat_arg_index = full_args.index(mcp_args_template[0])
-                    except ValueError: pass 
-                if pat_arg_index != -1: full_args.insert(pat_arg_index, f"GITHUB_PERSONAL_ACCESS_TOKEN={github_pat}"); full_args.insert(pat_arg_index, "-e")
-                else: 
-                    if mcp_args_template: full_args = base_args + ["-e", f"GITHUB_PERSONAL_ACCESS_TOKEN={github_pat}"] + mcp_args_template
-                    else: logger.warning("Cannot determine where to insert GitHub PAT env var, appending.", extra={'correlation_id': correlation_id}); full_args.extend(["-e", f"GITHUB_PERSONAL_ACCESS_TOKEN={github_pat}"])
-            else: logger.warning("GitHub not using 'docker run', PAT injection might fail.", extra={'correlation_id': correlation_id}); mcp_env["GITHUB_PERSONAL_ACCESS_TOKEN"] = github_pat
+        config_dict = default_conn.config
+        if not isinstance(config_dict, dict):
+             # This indicates corrupted data for the default connection
+             logger.error(f"Default connection {default_conn.id} for {connection_type} has invalid config format. Cannot list tools.", extra={'correlation_id': correlation_id})
+             # Raise an error as this is an internal inconsistency
+             raise ValueError(f"Invalid config format for default connection {default_conn.id}") 
 
-        server_params = StdioServerParameters(command=command, args=full_args, env=mcp_env)
-        
         try:
-            logger.info(f"Attempting MCP connection for {connection_type} with params: {server_params}", extra={'correlation_id': correlation_id})
+            # Get handler and stdio parameters
+            handler = get_handler(connection_type)
+            logger.info(f"Using handler {handler.__class__.__name__} for tool discovery ({connection_type})", extra={'correlation_id': correlation_id})
+            
+            server_params = handler.get_stdio_params(config_dict)
+            
+            # Redact sensitive info before logging params 
+            sensitive_keys_lower = [sk.lower() for sk in handler.get_sensitive_fields()]
+            redacted_args = []
+            if server_params.args:
+                 for arg in server_params.args:
+                      lower_arg = arg.lower()
+                      # Simple check if sensitive key is part of the arg
+                      is_sensitive_arg = any(sk in lower_arg for sk in sensitive_keys_lower if sk in lower_arg)
+                      if is_sensitive_arg:
+                           if "=" in arg: # Attempt to redact value part of "KEY=VALUE"
+                                parts = arg.split("=", 1)
+                                redacted_args.append(f"{parts[0]}=********")
+                           else: # Redact whole arg if no '=' found
+                                redacted_args.append("********")
+                      else:
+                           redacted_args.append(arg)
+            else: # Handle case where args might be None
+                redacted_args = []
+
+            # Also redact sensitive env vars
+            redacted_env = {}
+            if server_params.env:
+                for env_key, env_val in server_params.env.items():
+                    lower_env_key = env_key.lower()
+                    is_sensitive_env = any(sk in lower_env_key for sk in sensitive_keys_lower if sk in lower_env_key)
+                    redacted_env[env_key] = "********" if is_sensitive_env and env_val is not None else env_val
+            
+            logger.info(f"Attempting MCP connection for {connection_type} tool discovery. Command='{server_params.command}', Args='{' '.join(redacted_args)}', Env={redacted_env}", extra={'correlation_id': correlation_id})
+
+            # Connect and list tools
             async with stdio_client(server_params) as (read, write):
                 async with ClientSession(read, write) as session:
                     logger.info(f"Initializing MCP session for {connection_type} tool discovery...", extra={'correlation_id': correlation_id})
-                    try: await asyncio.wait_for(session.initialize(), timeout=30.0)
-                    except asyncio.TimeoutError: raise ValueError(f"Timeout initializing MCP session for {connection_type}")
-                    except Exception as init_err: raise ValueError(f"Error initializing MCP session for {connection_type}: {init_err}")
+                    try: 
+                        await asyncio.wait_for(session.initialize(), timeout=45.0) # Increased timeout for process startup
+                    except asyncio.TimeoutError: 
+                        logger.error(f"Timeout initializing MCP session for {connection_type} tool discovery.", extra={'correlation_id': correlation_id})
+                        raise ValueError(f"Timeout initializing MCP session for {connection_type}")
+                    except Exception as init_err: 
+                        logger.error(f"MCP Initialization error during tool discovery for {connection_type}: {init_err}", extra={'correlation_id': correlation_id})
+                        raise ValueError(f"Error initializing MCP session for {connection_type}: {init_err}")
 
                     logger.info(f"Listing tools via MCP session for {connection_type}...", extra={'correlation_id': correlation_id})
                     try:
-                         response = await asyncio.wait_for(session.list_tools(), timeout=15.0) 
+                         response = await asyncio.wait_for(session.list_tools(), timeout=20.0) # Shorter timeout for list_tools call
                          
-                         # --- Simplified MCP Tool Parsing --- 
-                         parsed_tools: List[MCPToolInfo] = [] # Updated type
+                         # --- Parse MCP Tool Info --- 
+                         parsed_tools: List[MCPToolInfo] = []
                          mcp_tools_list = getattr(response, 'tools', [])
                          if not isinstance(mcp_tools_list, list): 
-                             logger.warning(f"MCP list_tools response for {connection_type} lacked a list in 'tools' attribute.", extra={'correlation_id': correlation_id}); mcp_tools_list = []
+                             logger.warning(f"MCP list_tools response for {connection_type} lacked a list in 'tools' attribute.", extra={'correlation_id': correlation_id})
+                             mcp_tools_list = [] # Treat as empty
 
                          for mcp_tool in mcp_tools_list:
                              try:
-                                 # Extract basic info + raw schema
-                                 tool_name = getattr(mcp_tool, 'name', 'Unknown Tool')
-                                 tool_description = getattr(mcp_tool, 'description', None)
-                                 input_schema = getattr(mcp_tool, 'inputSchema', {})
-                                 
-                                 # Ensure inputSchema is a dict
-                                 if not isinstance(input_schema, dict):
-                                     logger.warning(f"Tool '{tool_name}' has invalid inputSchema format (not a dict), skipping.", extra={'correlation_id': correlation_id})
-                                     continue
-                                 
-                                 # Create MCPToolInfo instance
+                                 # Use MCPToolInfo directly if the structure matches, otherwise adapt
+                                 # Assuming mcp_tool has 'name', 'description', 'inputSchema' attributes
                                  tool_info = MCPToolInfo(
-                                     name=tool_name,
-                                     description=tool_description,
-                                     inputSchema=input_schema # Store the raw schema
+                                     name=getattr(mcp_tool, 'name', 'Unknown Tool'),
+                                     description=getattr(mcp_tool, 'description', None),
+                                     inputSchema=getattr(mcp_tool, 'inputSchema', {}) # Ensure schema is a dict
                                  )
+                                 if not isinstance(tool_info.inputSchema, dict):
+                                      logger.warning(f"Tool '{tool_info.name}' has invalid inputSchema format (not a dict), using empty schema.", extra={'correlation_id': correlation_id})
+                                      tool_info.inputSchema = {}
+
                                  parsed_tools.append(tool_info)
+                             except AttributeError as attr_err:
+                                  logger.error(f"Tool object from MCP list_tools response missing expected attribute: {attr_err}. Skipping tool.", extra={'correlation_id': correlation_id})
+                                  continue
                              except Exception as tool_parse_err:
-                                 logger.error(f"Skipping tool due to error: {tool_parse_err}", extra={'correlation_id': correlation_id}, exc_info=True)
-                                 continue # Skip this tool if basic extraction fails
-                         # --- End Simplified Parsing --- 
+                                 logger.error(f"Skipping tool parsing due to unexpected error: {tool_parse_err}", extra={'correlation_id': correlation_id}, exc_info=True)
+                                 continue 
+                         # --- End Parsing --- 
                          
                          logger.info(f"Retrieved {len(parsed_tools)} tools info for {connection_type}", extra={'correlation_id': correlation_id})
                          return parsed_tools
                          
-                    except asyncio.TimeoutError: raise ValueError(f"Timeout listing tools via MCP for {connection_type}")
-                    except Exception as list_err: raise ValueError(f"Error listing tools via MCP for {connection_type}: {list_err}")
-        except FileNotFoundError: raise ValueError(f"Command '{command}' not found for {connection_type}")
-        except Exception as e: raise ValueError(f"Failed to communicate with MCP for {connection_type}: {str(e)}")
-    # --- End Tool Discovery ---
-
-# --- Helper Function for GitHub Stdio Params --- 
-
-async def get_github_stdio_params() -> Optional[StdioServerParameters]:
-    """
-    Fetches the default GitHub connection and constructs StdioServerParameters.
-
-    Returns:
-        StdioServerParameters instance if successful, None otherwise.
-    """
-    logger = logging.getLogger("connection_manager") # Use appropriate logger
-    try:
-        connection_manager = get_connection_manager() # Get manager instance
-        github_conn = await connection_manager.get_default_connection("github")
+                    except asyncio.TimeoutError: 
+                        logger.error(f"Timeout listing tools via MCP for {connection_type}.", extra={'correlation_id': correlation_id})
+                        raise ValueError(f"Timeout listing tools via MCP for {connection_type}")
+                    except Exception as list_err: 
+                        logger.error(f"MCP list_tools error during tool discovery for {connection_type}: {list_err}", extra={'correlation_id': correlation_id})
+                        raise ValueError(f"Error listing tools via MCP for {connection_type}: {list_err}")
         
-        if not github_conn:
-            logger.error("No default GitHub connection found.")
-            return None
-        
-        config = github_conn.config
-        if not isinstance(config, dict):
-            logger.error(f"GitHub connection {github_conn.id} config is not a dictionary: {type(config)}")
-            return None
-
-        command_list = config.get("mcp_command")
-        args_template = config.get("mcp_args_template", [])
-        pat = config.get("github_pat")
-        
-        if not command_list or not isinstance(command_list, list) or not command_list:
-            logger.error(f"Invalid or missing 'mcp_command' in GitHub connection {github_conn.id}")
-            return None
-        if not args_template or not isinstance(args_template, list):
-             logger.warning(f"Missing or invalid 'mcp_args_template' in GitHub connection {github_conn.id}. Using empty list.")
-             args_template = []
-        if not pat or not isinstance(pat, str):
-            logger.error(f"Invalid or missing 'github_pat' in GitHub connection {github_conn.id}")
-            return None
-            
-        dynamic_env_arg = ["-e", f"GITHUB_PERSONAL_ACCESS_TOKEN={pat}"]
-        full_args = command_list[1:] + dynamic_env_arg + args_template
-        command = command_list[0]
-        
-        params = StdioServerParameters(
-            command=command,
-            args=full_args
-        )
-        
-        logger.info(f"Created StdioServerParameters for GitHub. Command: '{params.command}', Args: {params.args}")
-        return params
-        
-    except Exception as e:
-        logger.error(f"Error getting/configuring GitHub stdio parameters: {e}", exc_info=True)
-        return None
+        except FileNotFoundError as e: 
+             logger.error(f"Command not found error during tool discovery for {connection_type}: {e}", extra={'correlation_id': correlation_id})
+             raise ValueError(f"Command not found for {connection_type}: {str(e)}") 
+        except ValueError as e:
+             # Catch ValueErrors raised by get_handler, get_stdio_params, or within the MCP communication block
+             logger.error(f"Configuration or communication error during tool discovery for {connection_type}: {e}", extra={'correlation_id': correlation_id})
+             raise # Re-raise the specific ValueError
+        except Exception as e: 
+             logger.error(f"Unexpected error during tool discovery for {connection_type}: {e}", extra={'correlation_id': correlation_id}, exc_info=True)
+             raise ValueError(f"Failed to communicate with MCP for {connection_type}: {str(e)}")

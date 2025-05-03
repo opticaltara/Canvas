@@ -19,6 +19,7 @@ from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.mcp import MCPServerStdio
 from mcp.shared.exceptions import McpError 
+from mcp import StdioServerParameters
 
 from backend.config import get_settings
 from backend.ai.events import (
@@ -32,7 +33,8 @@ from backend.ai.events import (
     FinalStatusEvent,
     FatalErrorEvent,
 )
-from backend.services.connection_manager import get_github_stdio_params
+from backend.services.connection_manager import get_connection_manager
+from backend.services.connection_handlers.registry import get_handler
 
 github_query_agent_logger = logging.getLogger("ai.github_query_agent")
 
@@ -53,18 +55,31 @@ class GitHubQueryAgent:
         github_query_agent_logger.info(f"GitHubQueryAgent initialized successfully (Agent instance created later).")
 
     async def _get_stdio_server(self) -> Optional[MCPServerStdio]:
-        """Fetches default GitHub connection and creates the MCPServerStdio instance."""
+        """Fetches default GitHub connection, gets handler, and creates MCPServerStdio instance."""
         try:
-            stdio_params = await get_github_stdio_params()
-            if not stdio_params:
-                github_query_agent_logger.error("Failed to get StdioServerParameters for GitHub.")
+            connection_manager = get_connection_manager()
+            # Get the default github connection
+            default_conn = await connection_manager.get_default_connection("github")
+            if not default_conn:
+                github_query_agent_logger.error("No default GitHub connection found.")
                 return None
+            if not default_conn.config:
+                 github_query_agent_logger.error(f"Default GitHub connection {default_conn.id} has no config.")
+                 return None
 
-            github_query_agent_logger.info(f"Retrieved StdioServerParameters. Command: {stdio_params.command} {stdio_params.args}")
-            return MCPServerStdio(command=stdio_params.command, args=stdio_params.args)
+            # Get the handler and stdio parameters
+            handler = get_handler("github")
+            stdio_params: StdioServerParameters = handler.get_stdio_params(default_conn.config)
 
+            github_query_agent_logger.info(f"Retrieved StdioServerParameters. Command: {stdio_params.command} Args: {stdio_params.args}")
+            # Create the MCPServerStdio instance needed by the agent
+            return MCPServerStdio(command=stdio_params.command, args=stdio_params.args, env=stdio_params.env)
+
+        except ValueError as ve: # Catch errors from get_handler or get_stdio_params
+             github_query_agent_logger.error(f"Configuration error getting GitHub stdio params: {ve}", exc_info=True)
+             return None
         except Exception as e:
-            github_query_agent_logger.error(f"Error creating MCPServerStdio instance from params: {e}", exc_info=True)
+            github_query_agent_logger.error(f"Error creating MCPServerStdio instance: {e}", exc_info=True)
             return None
 
     def _read_system_prompt(self) -> str:

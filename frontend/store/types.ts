@@ -61,8 +61,8 @@ export const NotebookSchema = z.object({
 })
 export type Notebook = z.infer<typeof NotebookSchema>
 
-// Update the ConnectionTypeSchema to only include currently supported types
-export const ConnectionTypeSchema = z.enum(["grafana", "github"])
+// --- Update: Remove 'grafana' and 'python' from ConnectionTypeSchema ---
+export const ConnectionTypeSchema = z.enum(["github", "jira"])
 export type ConnectionType = z.infer<typeof ConnectionTypeSchema>
 
 export const ConnectionSchema = z.object({
@@ -72,7 +72,6 @@ export const ConnectionSchema = z.object({
   config: z.record(z.any()),
   is_default: z.boolean(),
 })
-export type Connection = z.infer<typeof ConnectionSchema>
 
 export const WebSocketStatusSchema = z.enum(["connecting", "connected", "disconnected", "error"])
 export type WebSocketStatus = z.infer<typeof WebSocketStatusSchema>
@@ -93,3 +92,60 @@ export interface MCPToolInfo {
   inputSchema: Record<string, any>; // Raw JSON Schema (Record<string, any> is equivalent to Dict[str, Any])
 }
 // --- End Simplified Tool Info Structure ---
+
+// Interface for the base connection structure returned by the list endpoint
+// Configuration is redacted here
+export interface ConnectionListItem {
+  id: string;
+  name: string;
+  type: ConnectionType;
+  is_default: boolean;
+  config: Record<string, any>; // Redacted config is just a generic object
+}
+
+export interface GithubConnectionConfig {
+  // github_pat is redacted
+  [key: string]: any; // Allow other potential fields
+}
+
+// New interface for Jira redacted config
+export interface JiraConnectionConfig {
+  jira_url?: string;
+  jira_auth_type?: 'cloud' | 'server';
+  jira_ssl_verify?: boolean;
+  jira_username?: string; // May or may not be redacted by backend policy
+  enabled_tools?: string;
+  read_only_mode?: boolean;
+  jira_projects_filter?: string;
+  // api_token and personal_token are redacted
+  [key: string]: any; // Allow other potential fields
+}
+
+// Represents a fully loaded connection object (potentially used in UI state after fetching details)
+// The config here uses the specific interfaces defined above.
+export interface Connection {
+  id: string;
+  name: string;
+  type: ConnectionType;
+  is_default: boolean;
+  config: GithubConnectionConfig | JiraConnectionConfig | Record<string, any>; // Use specific types + fallback
+}
+
+export interface GithubConnectionCreateFormData {
+  name: string;
+  github_personal_access_token: string;
+}
+
+// New interface for Jira form data
+export interface JiraConnectionCreateFormData {
+  name: string;
+  jira_url: string;
+  jira_auth_type: 'cloud' | 'server';
+  jira_ssl_verify: boolean;
+  jira_username?: string; // Optional in form, required for cloud submission
+  jira_api_token?: string; // Optional in form, required for cloud submission
+  jira_personal_token?: string; // Optional in form, required for server submission
+  enabled_tools?: string;
+  read_only_mode?: boolean | null; // Allow null if using a tri-state or default
+  jira_projects_filter?: string;
+}

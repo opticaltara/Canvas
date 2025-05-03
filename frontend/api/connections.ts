@@ -1,8 +1,8 @@
 // API client for data connections
 import axios from "axios"
 import { BACKEND_URL } from "@/config/api-config"
-// Import the canonical Connection type
-import type { Connection } from "../store/types"
+// Import the canonical Connection type and form data types
+import type { Connection, JiraConnectionCreateFormData, GithubConnectionCreateFormData } from "../store/types"
 // Import MCPToolInfo type
 import type { MCPToolInfo } from "../store/types";
 
@@ -12,6 +12,52 @@ export interface ConnectionType {
 }
 
 const API_BASE_URL = `${BACKEND_URL}/api`
+
+// Helper function to handle the final response processing
+const processConnectionResponse = (response: any): Connection => {
+  const connectionResult = response.data as Connection;
+  if (connectionResult.is_default === undefined) {
+      connectionResult.is_default = false;
+  }
+  return connectionResult;
+}
+
+// Helper function for error handling
+const handleApiError = (error: any, type: string | undefined, name: string | undefined) => {
+   console.error(`Failed to create ${type || 'unknown type'} connection '${name || 'unnamed'}':`, error)
+   if (axios.isAxiosError(error) && error.response) {
+     throw new Error(error.response.data.detail || `Failed to create connection: ${error.message}`)
+   } else if (error instanceof Error) {
+       throw error; // Re-throw known errors (like validation errors)
+   }
+   throw new Error(`An unexpected error occurred while creating the connection.`)
+}
+
+// Type definition for the new Create request payload
+interface CreateConnectionPayload {
+  name: string;
+  payload: { 
+    type: string; 
+    [key: string]: any; // for type-specific fields
+  };
+}
+
+// Type definition for the new Update request payload
+interface UpdateConnectionPayload {
+  name?: string;
+  payload?: { 
+    type: string; 
+    [key: string]: any; // for type-specific fields
+  } | null; // Allow null or undefined payload
+}
+
+// Type definition for the new Test request payload
+interface TestConnectionPayload {
+  payload: { 
+    type: string; 
+    [key: string]: any; // for type-specific fields
+  };
+}
 
 // Export as connectionApi (singular) to match the expected export
 export const connectionApi = {
@@ -30,85 +76,78 @@ export const connectionApi = {
     return response.data
   },
 
-  async createConnection(connectionData: Partial<Connection>): Promise<Connection> {
-    const { type, name, config } = connectionData
+  // --- Refactored createConnection method --- 
+  async createConnection(connectionData: { name: string; type: string; [key: string]: any }): Promise<Connection> {
+    const { name, type, ...configFields } = connectionData;
 
     if (!name || !type) {
-      throw new Error("Connection name and type are required.")
+      throw new Error("Connection name and type are required.");
     }
 
-    let response
+    // Construct the payload required by the backend
+    const requestPayload: CreateConnectionPayload = {
+      name: name,
+      payload: {
+        type: type,
+        ...configFields // Spread the rest of the fields into the payload
+      }
+    };
+
     try {
-      if (type === "github") {
-        if (!config?.github_personal_access_token) {
-          throw new Error("GitHub Personal Access Token is required in config.")
-        }
-        response = await axios.post(`${API_BASE_URL}/connections/github`, {
-          name: name,
-          github_personal_access_token: config.github_personal_access_token,
-        })
-      } else if (type === "grafana") {
-        if (!config?.url || !config?.api_key) {
-          throw new Error("Grafana URL and API Key are required in config.")
-        }
-        response = await axios.post(`${API_BASE_URL}/connections/grafana`, {
-          name: name,
-          url: config.url,
-          api_key: config.api_key,
-        })
-      } else if (type === "python") {
-        // Assuming python connection takes config directly
-        response = await axios.post(`${API_BASE_URL}/connections/python`, {
-          name: name,
-          ...(config || {}), // Spread the config object
-        })
-      } else {
-        // Fallback to generic endpoint - This might need adjustment depending on backend
-        // Consider logging a warning if this generic endpoint is used
-        console.warn(`Using generic connection creation endpoint for type: ${type}`)
-        response = await axios.post(`${API_BASE_URL}/connections`, {
-          name: name,
-          type: type,
-          config: config || {},
-        })
-      }
-      // Ensure the response data conforms to the Connection type as much as possible
-      // Add default 'is_default' if missing
-      const connectionResult = response.data as Connection;
-      if (connectionResult.is_default === undefined) {
-          connectionResult.is_default = false;
-      }
-      return connectionResult;
-
+        // Send to the unified POST /connections endpoint
+        const response = await axios.post(`${API_BASE_URL}/connections`, requestPayload);
+        // Use helper for response processing
+        return processConnectionResponse(response);
     } catch (error) {
-      console.error(`Failed to create ${type} connection '${name}':`, error)
-      // Re-throw or handle error appropriately
-      if (axios.isAxiosError(error) && error.response) {
-        throw new Error(error.response.data.detail || `Failed to create connection: ${error.message}`)
-      } else if (error instanceof Error) {
-          throw error; // Re-throw known errors (like validation errors)
-      }
-      throw new Error(`An unexpected error occurred while creating the connection.`)
+        // Use helper for error handling
+        handleApiError(error, type, name);
+        // Need to return/throw something here to satisfy TypeScript
+        throw new Error("Connection creation failed."); 
     }
   },
+  // --- End Refactored createConnection method ---
 
-  async updateConnection(connectionId: string, connectionData: Partial<Connection>): Promise<Connection> {
-    // For GitHub connections, we need to handle PAT updates
-    if (connectionData.type === "github" && connectionData.config?.github_personal_access_token) {
-      const response = await axios.put(`${API_BASE_URL}/connections/${connectionId}`, {
-        name: connectionData.name,
-        github_personal_access_token: connectionData.config.github_personal_access_token,
-      })
-      return response.data
-    } else {
-      // For other connection types or just name updates
-      const response = await axios.put(`${API_BASE_URL}/connections/${connectionId}`, {
-        name: connectionData.name,
-        config: connectionData.config,
-      })
-      return response.data
+  // --- Refactored updateConnection method --- 
+  async updateConnection(connectionId: string, connectionData: { name?: string; type: string; [key: string]: any }): Promise<Connection> {
+    const { name, type, ...configFields } = connectionData;
+
+    // Construct the payload required by the backend
+    let requestPayload: UpdateConnectionPayload = {};
+    
+    if (name) {
+        requestPayload.name = name;
+    }
+    
+    // Check if there are any config fields to update
+    // We need to filter out 'type' and potentially 'name' if it was passed in configFields accidentally
+    const configUpdateFields = Object.keys(configFields)
+        .filter(key => key !== 'type' && key !== 'name')
+        .reduce((obj, key) => { 
+            obj[key] = configFields[key]; 
+            return obj; 
+        }, {} as {[key: string]: any});
+
+    if (Object.keys(configUpdateFields).length > 0) {
+        requestPayload.payload = {
+            type: type, // Type is required in the payload for discrimination
+            ...configUpdateFields
+        };
+    }
+
+    if (!requestPayload.name && !requestPayload.payload) {
+         throw new Error("Update requires at least a name or config field changes.");
+    }
+
+    try {
+        // Send to the unified PUT /connections/{id} endpoint
+        const response = await axios.put(`${API_BASE_URL}/connections/${connectionId}`, requestPayload);
+        return processConnectionResponse(response);
+    } catch (error) {
+         handleApiError(error, type, name || 'existing connection');
+         throw new Error("Connection update failed.");
     }
   },
+   // --- End Refactored updateConnection method --- 
 
   async deleteConnection(connectionId: string): Promise<boolean> {
     await axios.delete(`${API_BASE_URL}/connections/${connectionId}`)
@@ -124,53 +163,50 @@ export const connectionApi = {
   async getToolsForConnection(connectionType: string): Promise<MCPToolInfo[]> {
     try {
       const response = await axios.get(`${API_BASE_URL}/connections/${connectionType}/tools`);
-      // TODO: Add validation logic here if necessary (e.g., using Zod)
       return response.data as MCPToolInfo[];
     } catch (error) {
       console.error(`Failed to fetch tools for connection type ${connectionType}:`, error);
-      // Re-throw or return empty array based on desired error handling
       if (axios.isAxiosError(error) && error.response?.status === 404) {
-        // Treat 404 (Not Found) as no tools defined, not necessarily an error
         return [];
       }
-      // For other errors, re-throw to be caught by the store action
       throw error;
     }
   },
 
-  async testConnection(connectionData: Partial<Connection>): Promise<{ valid: boolean; message: string }> {
-    // For GitHub connections
-    if (connectionData.type === "github") {
-      const response = await axios.post(`${API_BASE_URL}/connections/test`, {
-        type: "github",
-        config: {},
-        github_personal_access_token: connectionData.config?.github_personal_access_token || "",
-      })
-      return response.data
-    } else if (connectionData.type === "grafana") {
-      const response = await axios.post(`${API_BASE_URL}/connections/test`, {
-        type: "grafana",
-        config: {
-          url: connectionData.config?.url || "",
-          api_key: connectionData.config?.api_key || "",
-        },
-      })
-      return response.data
-    } else if (connectionData.type === "python") {
-      const response = await axios.post(`${API_BASE_URL}/connections/test`, {
-        type: "python",
-        config: connectionData.config || {},
-      })
-      return response.data
-    } else {
-      // Generic test endpoint
-      const response = await axios.post(`${API_BASE_URL}/connections/test`, {
-        type: connectionData.type,
-        config: connectionData.config || {},
-      })
-      return response.data
-    }
-  },
+  // --- Refactored testConnection method --- 
+  async testConnection(connectionData: { type: string; [key: string]: any }): Promise<{ valid: boolean; message: string }> {
+     const { type, ...configFields } = connectionData;
+     
+     if (!type) {
+         throw new Error("Connection type is required for testing.");
+     }
+
+     // Construct the payload required by the backend
+     const requestPayload: TestConnectionPayload = {
+         payload: {
+             type: type,
+             ...configFields // Spread the rest of the fields into the payload
+         }
+     };
+
+     try {
+         // Send to the unified POST /connections/test endpoint
+         const response = await axios.post(`${API_BASE_URL}/connections/test`, requestPayload);
+         return response.data;
+     } catch (error) {
+         // Handle potential errors (e.g., validation errors from backend)
+         console.error(`Failed to test ${type} connection:`, error);
+         if (axios.isAxiosError(error) && error.response) {
+            // Return the backend validation error message
+            return { valid: false, message: error.response.data.detail || `Testing failed: ${error.message}` };
+         } else if (error instanceof Error) {
+             return { valid: false, message: error.message };
+         }
+         return { valid: false, message: "An unexpected error occurred during testing." };
+     }
+  }
+   // --- End Refactored testConnection method --- 
+
 }
 
 // Export the connections API in the format expected by the client code

@@ -6,11 +6,12 @@ from typing import Any, Callable, Dict, List, Optional, Set, Union
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from backend.core.cell import Cell, CellStatus, CellType, GitHubCell
 from backend.core.notebook import Notebook
 from backend.core.dependency import ToolCallID
-from backend.services.connection_manager import get_github_stdio_params, ConnectionManager, get_connection_manager
+from backend.services.connection_manager import ConnectionManager, get_connection_manager
 from backend.core.cell import GitHubCell
 from mcp.client.stdio import stdio_client
 from mcp import ClientSession
@@ -19,6 +20,14 @@ import logging
 
 # Import StdioServerParameters
 from mcp import StdioServerParameters
+# Import handler registry
+from backend.services.connection_handlers.registry import get_handler
+# Import settings
+from backend.config import get_settings
+# Assuming ErrorData is here (adjust if necessary)
+from mcp.types import ErrorData
+# Import DB session management
+from backend.db.database import get_db_session 
 
 # Initialize loggers
 execution_logger = logging.getLogger("execution")
@@ -129,6 +138,7 @@ class ExecutionQueue:
     async def _process_queue(self) -> None:
         """Process items in the execution queue"""
         while self._running:
+            notebook_id, cell_id, executor, correlation_id = None, None, None, None # Initialize for finally block
             try:
                 # Get the next cell to execute
                 notebook_id, cell_id, executor, correlation_id = await self.queue.get()
@@ -143,7 +153,7 @@ class ExecutionQueue:
                             'cell_id': str(cell_id)
                         }
                     )
-                    self.queue.task_done()
+                    # self.queue.task_done() # Moved to finally
                     continue
                 
                 # Track active task
@@ -152,7 +162,7 @@ class ExecutionQueue:
                 
                 try:
                     self.logger.info(
-                        "Starting cell execution",
+                        "Starting cell execution within DB session scope",
                         extra={
                             'correlation_id': correlation_id,
                             'notebook_id': str(notebook_id),
@@ -162,8 +172,9 @@ class ExecutionQueue:
                         }
                     )
                     
-                    # Execute the cell
-                    await executor.execute_cell(notebook_id, cell_id, correlation_id)
+                    # Execute the cell within a database session scope
+                    async with get_db_session() as db:
+                        await executor.execute_cell(db, notebook_id, cell_id, correlation_id)
                     
                     process_time = time.time() - start_time
                     self.logger.info(
@@ -189,171 +200,150 @@ class ExecutionQueue:
                         },
                         exc_info=True
                     )
-                finally:
-                    # Remove from active tasks
-                    self.active_tasks.remove(cell_id)
-                    self.queue.task_done()
+                # finally: # Moved outer finally
+                #     # Remove from active tasks
+                #     if cell_id in self.active_tasks:
+                #         self.active_tasks.remove(cell_id)
+                #     self.queue.task_done()
             
             except asyncio.CancelledError:
                 # Queue processing has been cancelled
+                self.logger.info("Execution queue processing cancelled.")
                 break
             except Exception as e:
+                # Log unexpected errors in the queue processing loop itself
                 self.logger.error(
-                    "Error in execution queue processing",
+                    "Unexpected error in execution queue processing loop",
                     extra={
-                        'correlation_id': str(uuid4()),
-                        'error': str(e),
-                        'error_type': type(e).__name__
-                    },
+                        'error': str(e), 
+                        'error_type': type(e).__name__, 
+                        'notebook_id': str(notebook_id), # Log context if available
+                        'cell_id': str(cell_id), 
+                        'correlation_id': correlation_id
+                        },
                     exc_info=True
                 )
-                await asyncio.sleep(1)  # Prevent tight loop on error
+            finally:
+                # Ensure task is marked done and removed from active set regardless of outcome
+                if cell_id is not None and cell_id in self.active_tasks:
+                    self.active_tasks.remove(cell_id)
+                if notebook_id is not None: # Check if item was successfully dequeued
+                    self.queue.task_done()
 
 
 class CellExecutor:
     """
-    Executes cells and manages their execution state
-    Different cell types will have different execution strategies
+    Handles the execution of individual cells
+    Orchestrates interaction with MCP clients
+    Updates cell status and results
     """
     def __init__(self, notebook_manager, connection_manager: Optional[ConnectionManager] = None):
         self.notebook_manager = notebook_manager
-        self.connection_manager = connection_manager or get_connection_manager() # Use injected or singleton
+        self.connection_manager = connection_manager or get_connection_manager()
         self.logger = cell_executor_logger
-    
-    async def execute_cell(self, notebook_id: UUID, cell_id: UUID, correlation_id: Optional[str] = None) -> Any:
+
+    async def execute_cell(self, db: Session, notebook_id: UUID, cell_id: UUID, correlation_id: Optional[str] = None) -> Any:
         """
-        Execute a cell and update its state
+        Execute a single cell and update its state
         
         Args:
+            db: The database session.
             notebook_id: ID of the notebook containing the cell
             cell_id: ID of the cell to execute
-            correlation_id: Optional correlation ID for tracing execution
+            correlation_id: Optional correlation ID for logging
             
         Returns:
-            The result of the cell execution
+            The result of the cell execution, or None if execution failed
         """
-        correlation_id = correlation_id if correlation_id else str(uuid4())
-        
-        notebook = self.notebook_manager.get_notebook(notebook_id)
-        cell = notebook.get_cell(cell_id)
-        
-        # Update cell status
-        cell.status = CellStatus.RUNNING
-        
-        # Notify that the cell is running
-        await self.notebook_manager.notify_cell_update(notebook_id, cell_id)
-        
-        # Track execution time
         start_time = time.time()
+        correlation_id = correlation_id or str(uuid4()) # Ensure correlation_id exists
+        log_extra = {'correlation_id': correlation_id, 'notebook_id': str(notebook_id), 'cell_id': str(cell_id)}
+        
+        self.logger.info("Starting execution for cell", extra=log_extra)
+        
+        # 1. Get Notebook and Cell
+        notebook = await self.notebook_manager.get_notebook(db, notebook_id)
+        if not notebook:
+            self.logger.error("Notebook not found", extra=log_extra)
+            return None # Or raise an error
+        
+        cell = notebook.get_cell(cell_id)
+        if not cell:
+            self.logger.error("Cell not found in notebook object", extra=log_extra)
+            return None # Or raise an error
+
+        # 2. Check if already running or completed
+        if cell.status == CellStatus.RUNNING:
+            self.logger.warning("Cell execution requested but already running", extra=log_extra)
+            return None # Or potentially wait/poll? For now, just return
+        
+        # Allow re-execution of SUCCESS/ERROR cells if explicitly requested (e.g., by user action)
+        # For now, assume execute_cell is the start of a new execution attempt
+        
+        # 3. Update Status to RUNNING
+        await self.notebook_manager.update_cell_status(db, notebook_id, cell_id, CellStatus.RUNNING, correlation_id)
+        
+        # 4. Prepare Execution Context
+        # Collect results from dependencies
+        dependency_results = self._get_dependency_results(notebook, cell_id)
+        
+        context = ExecutionContext(
+            notebook=notebook,
+            cell_id=cell_id,
+            variables=dependency_results,
+            settings=get_settings().dict() # Pass current settings
+        )
+        
+        # 5. Execute Based on Type
         result = None
         error = None
-        
-        self.logger.info(
-            "Starting cell execution",
-            extra={
-                'correlation_id': correlation_id,
-                'notebook_id': str(notebook_id),
-                'cell_id': str(cell_id),
-                'cell_type': cell.type.value,
-                'dependencies_count': len(cell.dependencies) if hasattr(cell, 'dependencies') else 0
-            }
-        )
-        
         try:
-            # Create execution context
-            # Get cell settings
-            settings = {}
-            if hasattr(cell, 'settings') and cell.settings:
-                settings = cell.settings
-            
-            # Get dependencies
-            dependency_start = time.time()
-            variables = self._get_dependency_results(notebook, cell_id)
-            dependency_time = time.time() - dependency_start
-            
-            self.logger.info(
-                "Dependencies resolved",
-                extra={
-                    'correlation_id': correlation_id,
-                    'notebook_id': str(notebook_id),
-                    'cell_id': str(cell_id),
-                    'dependency_count': len(variables),
-                    'resolution_time_ms': round(dependency_time * 1000, 2)
-                }
-            )
-            
-            context = ExecutionContext(
-                notebook=notebook,
-                cell_id=cell_id,
-                variables=variables,
-                settings=settings
-            )
-            
-            # Execute the cell based on its type
-            execution_start = time.time()
             result = await self._execute_by_type(cell, context, correlation_id)
-            execution_time = time.time() - execution_start
-            
-            self.logger.info(
-                "Cell execution successful",
-                extra={
-                    'correlation_id': correlation_id,
-                    'notebook_id': str(notebook_id),
-                    'cell_id': str(cell_id),
-                    'execution_time_ms': round(execution_time * 1000, 2)
-                }
-            )
-            
+            status = CellStatus.SUCCESS
+            self.logger.info(f"Cell executed successfully. Result type: {type(result).__name__}", extra=log_extra)
         except Exception as e:
-            # Capture execution error
-            error = str(e)
-            self.logger.error(
-                "Cell execution failed",
-                extra={
-                    'correlation_id': correlation_id,
-                    'notebook_id': str(notebook_id),
-                    'cell_id': str(cell_id),
-                    'error': str(e),
-                    'error_type': type(e).__name__
-                },
-                exc_info=True
-            )
-        
-        # Calculate total execution time
-        total_execution_time = time.time() - start_time
-        
-        # Update cell status and result
-        cell.set_result(result, error, total_execution_time)
-        
-        # Notify that the cell has been updated
-        await self.notebook_manager.notify_cell_update(notebook_id, cell_id)
-        
-        self.logger.info(
-            "Cell processing completed",
-            extra={
-                'correlation_id': correlation_id,
-                'notebook_id': str(notebook_id),
-                'cell_id': str(cell_id),
-                'status': cell.status.value,
-                'total_time_ms': round(total_execution_time * 1000, 2),
-                'has_error': error is not None
-            }
+            status = CellStatus.ERROR
+            error_message = f"{type(e).__name__}: {str(e)}"
+            error = { "type": type(e).__name__, "message": str(e), "traceback": str(traceback.format_exc())}
+            self.logger.error(f"Cell execution failed: {error_message}", exc_info=True, extra=log_extra)
+            result = None # Ensure result is None on error
+            
+        # 6. Update Cell State (Status, Result/Error, Timestamp)
+        end_time = time.time()
+        await self.notebook_manager.set_cell_result(
+            db=db, 
+            notebook_id=notebook_id,
+            cell_id=cell_id,
+            result=result,
+            error=error.get("message") if error else None,
+            execution_time=round((end_time - start_time), 3)
         )
         
-        return result
-    
-    async def execute_notebook(self, notebook_id: UUID) -> None:
+        execution_time_ms = round((end_time - start_time) * 1000, 2)
+        self.logger.info(f"Finished execution for cell. Status: {status.value}, Time: {execution_time_ms}ms", extra={**log_extra, 'status': status.value, 'execution_time_ms': execution_time_ms})
+        
+        # 7. Trigger Dependent Cells (if successful)
+        if status == CellStatus.SUCCESS:
+            # In a full dependency system, we might notify downstream cells.
+            # Currently handled by ExecutionQueue/NotebookExecutor polling readiness.
+            pass
+            
+        return result # Return the execution result or None
+
+    async def execute_notebook(self, db: Session, notebook_id: UUID) -> None:
         """
-        Execute all runnable cells in a notebook, respecting dependencies.
+        Executes all cells in a notebook according to their dependencies.
+        (This assumes a more sophisticated execution model than just queueing)
         
         Args:
+            db: The database session.
             notebook_id: ID of the notebook to execute
         """
-        correlation_id = str(uuid4())
-        self.logger.info(f"Starting execution for notebook {notebook_id}", extra={'correlation_id': correlation_id})
-
+        correlation_id = str(uuid4()) # Unique ID for the whole notebook run
+        self.logger.info(f"Starting execution for entire notebook {notebook_id}", extra={'correlation_id': correlation_id})
+        
         try:
-            notebook = self.notebook_manager.get_notebook(notebook_id)
+            notebook = await self.notebook_manager.get_notebook(db, notebook_id)
             if not notebook:
                 self.logger.error(f"Notebook {notebook_id} not found for execution.", extra={'correlation_id': correlation_id})
                 return
@@ -410,9 +400,13 @@ class CellExecutor:
                     if all_deps_met:
                         self.logger.info(f"Executing cell {cell_id} (Cycle {execution_cycles})", extra={'correlation_id': correlation_id})
                         try:
-                            await self.execute_cell(notebook_id, cell_id, correlation_id)
+                            # Ensure cell_id is passed as UUID, although it likely already is
+                            await self.execute_cell(db, notebook_id, cell_id, correlation_id)
                             # Re-fetch cell to check status after execution
-                            updated_cell = notebook.get_cell(cell_id) 
+                            # NOTE: get_notebook refetches the whole notebook, maybe inefficient?
+                            # Consider adding get_cell to NotebookManager if needed.
+                            updated_notebook = await self.notebook_manager.get_notebook(db, notebook_id)
+                            updated_cell = updated_notebook.get_cell(cell_id) 
                             if updated_cell.status == CellStatus.SUCCESS:
                                 completed_cells.add(cell_id)
                                 self.logger.info(f"Cell {cell_id} completed successfully.", extra={'correlation_id': correlation_id})
@@ -446,6 +440,7 @@ class CellExecutor:
                 self.logger.info(f"Notebook {notebook_id} execution finished successfully.", extra={'correlation_id': correlation_id})
 
         except Exception as outer_err:
+            # NOTE: This method also needs the 'db' session passed to it
             self.logger.error(f"Error during notebook execution process for {notebook_id}: {outer_err}", exc_info=True, extra={'correlation_id': correlation_id})
     
     async def _execute_by_type(self, cell: Cell, context: ExecutionContext, correlation_id: Optional[str] = None) -> Any:
@@ -460,75 +455,71 @@ class CellExecutor:
         Returns:
             The result of the execution
         """
-        # TODO: Inject or retrieve MCP clients based on cell.source or type
-        # mcp_clients = context.mcp_clients # Assuming clients are passed in context
-        
         if cell.type == CellType.MARKDOWN:
-            return cell.content # Markdown just displays content
+            return cell.content
         
         elif cell.type == CellType.SUMMARIZATION:
-            # Currently, summarization cells just hold content/results generated by the agent.
-            # If they needed active execution (e.g., calling a summarization API), 
-            # that logic would go here, likely using an MCP client.
             return cell.content
         
         # Check if this cell represents a tool call
         elif cell.tool_name and cell.tool_arguments is not None:
             tool_name = cell.tool_name
             tool_args = cell.tool_arguments
-            # Determine which MCP client to use based on cell type or source
-            # For now, hardcoding for GitHub as it's the only tool type left
-            connection_id = cell.connection_id # Get connection ID from cell
+            connection_id = cell.connection_id 
 
-            if cell.type == CellType.GITHUB:
-                self.logger.info(f"Executing GitHub tool via MCP: cell={cell.id}, tool='{tool_name}', args={tool_args}, connection_id={connection_id}", extra={'correlation_id': correlation_id})
-                
-                if not connection_id:
-                    error_msg = f"GitHub cell {cell.id} is missing a connection_id."
-                    self.logger.error(error_msg, extra={'correlation_id': correlation_id, 'cell_id': cell.id})
-                    raise ValueError(error_msg)
+            if not connection_id:
+                error_msg = f"Cell {cell.id} (type: {cell.type}) requires a connection_id but none was found."
+                self.logger.error(error_msg, extra={'correlation_id': correlation_id, 'cell_id': cell.id})
+                raise ValueError(error_msg)
 
-                # Fetch connection details using ConnectionManager
-                connection_config = await self.connection_manager.get_connection(str(connection_id))
-                if not connection_config or connection_config.type != 'github':
-                    error_msg = f"Failed to get valid GitHub connection details for ID {connection_id}."
-                    self.logger.error(error_msg, extra={'correlation_id': correlation_id, 'cell_id': cell.id, 'connection_id': connection_id})
-                    raise ConnectionError(error_msg)
+            # Fetch connection details using ConnectionManager
+            connection_config = await self.connection_manager.get_connection(str(connection_id))
+            if not connection_config:
+                error_msg = f"Failed to get connection details for ID {connection_id}."
+                self.logger.error(error_msg, extra={'correlation_id': correlation_id, 'cell_id': cell.id, 'connection_id': connection_id})
+                raise ConnectionError(error_msg)
+            
+            if not connection_config.config:
+                error_msg = f"Connection config is missing for ID {connection_id}."
+                self.logger.error(error_msg, extra={'correlation_id': correlation_id, 'cell_id': cell.id, 'connection_id': connection_id})
+                raise ConnectionError(error_msg)
 
-                # Prepare StdioServerParameters from connection config
-                cmd = connection_config.config.get('command')
-                args = connection_config.config.get('args')
-                env = connection_config.config.get('env') # Get env vars which might include PAT
+            # Get the appropriate handler based on connection type
+            try:
+                handler = get_handler(connection_config.type)
+            except ValueError as e:
+                error_msg = f"No connection handler found for type '{connection_config.type}' (connection: {connection_id}): {e}"
+                self.logger.error(error_msg, extra={'correlation_id': correlation_id, 'cell_id': cell.id, 'connection_id': connection_id, 'connection_type': connection_config.type})
+                raise NotImplementedError(error_msg)
 
-                if not cmd or not args:
-                    error_msg = f"GitHub connection {connection_id} is missing command or args in config."
-                    self.logger.error(error_msg, extra={'correlation_id': correlation_id, 'cell_id': cell.id, 'connection_id': connection_id})
-                    raise ConnectionError(error_msg)
+            # Delegate execution to the handler
+            try:
+                self.logger.info(f"Delegating tool execution to handler: {handler.__class__.__name__}", extra={'correlation_id': correlation_id, 'cell_id': cell.id, 'tool_name': tool_name, 'connection_type': connection_config.type})
+                mcp_result = await handler.execute_tool_call(
+                    tool_name=tool_name,
+                    tool_args=tool_args,
+                    db_config=connection_config.config,
+                    correlation_id=correlation_id
+                )
+                self.logger.info(f"Handler execution successful for cell {cell.id}. Result type: {type(mcp_result)}", extra={'correlation_id': correlation_id})
+                return mcp_result
+            except (ValueError, ConnectionError, McpError, NotImplementedError) as handler_error:
+                 # Errors related to config, connection, or tool execution within the handler
+                 error_msg = f"Handler error executing tool '{tool_name}' for cell {cell.id}: {handler_error}"
+                 self.logger.error(error_msg, exc_info=True, extra={'correlation_id': correlation_id, 'cell_id': cell.id, 'tool_name': tool_name, 'error_type': type(handler_error).__name__})
+                 raise # Re-raise the specific error from the handler
+            except Exception as unexpected_handler_error:
+                 # Catch-all for truly unexpected errors within the handler
+                 error_msg = f"Unexpected handler error executing tool '{tool_name}' for cell {cell.id}: {unexpected_handler_error}"
+                 self.logger.error(error_msg, exc_info=True, extra={'correlation_id': correlation_id, 'cell_id': cell.id, 'tool_name': tool_name})
+                 raise Exception(error_msg) from unexpected_handler_error # Wrap in generic Exception
+            
+            # --- Remove Old GitHub specific logic --- 
+            # if cell.type == CellType.GITHUB: 
+            #    ... (old logic was here) ...
+            # else:
+            #     raise NotImplementedError(f"Execution via MCP not implemented for cell type/source: {cell.type}")
 
-                stdio_params = StdioServerParameters(command=cmd, args=args, env=env)
-
-                # Execute using stdio_client context manager
-                mcp_result = None
-                try:
-                    async with stdio_client(stdio_params) as (read, write):
-                        async with ClientSession(read, write) as session:
-                            await session.initialize()
-                            mcp_result = await session.call_tool(tool_name, arguments=tool_args)
-                            self.logger.info(f"GitHub MCP call successful for cell {cell.id}. Result type: {type(mcp_result)}", extra={'correlation_id': correlation_id})
-                    return mcp_result
-                except McpError as e:
-                    error_msg = f"MCP Error executing tool '{tool_name}' for cell {cell.id}: {e}"
-                    self.logger.error(error_msg, exc_info=True, extra={'correlation_id': correlation_id, 'cell_id': cell.id, 'tool_name': tool_name})
-                    raise # Re-raise to be caught by execute_cell
-                except Exception as e:
-                    error_msg = f"Unexpected Error executing tool '{tool_name}' for cell {cell.id}: {e}"
-                    self.logger.error(error_msg, exc_info=True, extra={'correlation_id': correlation_id, 'cell_id': cell.id, 'tool_name': tool_name})
-                    raise # Re-raise
-            else:
-                # Handle other potential tool sources if added later
-                raise NotImplementedError(f"Execution via MCP not implemented for cell type/source: {cell.type}")
-        
-        # If not Markdown, Summarization, or a recognized tool call cell
         else:
             self.logger.warning(f"Cell {cell.id} of type {cell.type} has no execution logic defined and is not a tool call. Returning content.", extra={'cell_id': cell.id})
             return cell.content # Default fallback
@@ -554,3 +545,6 @@ class CellExecutor:
                     variables[str(dep_id)] = dep_cell.result.content
         
         return variables
+
+# --- Utility ---
+import traceback # Moved import here to be closer to usage

@@ -7,6 +7,7 @@ import type { MCPToolInfo } from "./types"
 interface ConnectionState {
   // Connection data
   connections: Connection[]
+  availableTypes: string[]
 
   // Tool definitions per connection type
   toolDefinitions: Record<string, MCPToolInfo[] | undefined>
@@ -18,6 +19,7 @@ interface ConnectionState {
 
   // Actions
   loadConnections: () => Promise<void>
+  loadAvailableTypes: () => Promise<void>
   createConnection: (connectionData: Partial<Connection>) => Promise<Connection | null>
   updateConnection: (id: string, connectionData: Partial<Connection>) => Promise<Connection | null>
   deleteConnection: (id: string) => Promise<boolean>
@@ -40,11 +42,16 @@ export const useConnectionStore = create<ConnectionState>()(
         error: null,
         toolDefinitions: {},
         toolLoadingStatus: {},
+        availableTypes: [],
 
         // Load all connections
         loadConnections: async () => {
           console.log("useConnectionStore: loadConnections called")
           set({ loading: true, error: null })
+          
+          // Call loadAvailableTypes concurrently or sequentially?
+          // Let's call it concurrently for efficiency
+          const loadTypesPromise = get().loadAvailableTypes();
 
           try {
             // Assume api.connections.list() returns Connection[] as typed
@@ -75,6 +82,10 @@ export const useConnectionStore = create<ConnectionState>()(
               }
             });
 
+            // Wait for types to load as well (if needed before proceeding)
+            // or just let it run in background if types aren't needed immediately after loadConnections
+            // await loadTypesPromise; // Uncomment if subsequent logic depends on types being loaded
+
           } catch (err) {
             console.error("Failed to load connections:", err)
             set({
@@ -82,31 +93,75 @@ export const useConnectionStore = create<ConnectionState>()(
               loading: false,
               connections: [], // Ensure connections is reset on error
             })
+            // Ensure the types promise doesn't cause unhandled rejection if it also fails
+            loadTypesPromise.catch(typeErr => console.error("Error from concurrent loadAvailableTypes:", typeErr));
+          }
+        },
+
+        // Load available connection types
+        loadAvailableTypes: async () => {
+          try {
+            // Avoid re-fetching if already populated? Or always refresh?
+            // Let's refresh for now, could add a check later.
+            const types = await api.connections.getTypes();
+            set({ availableTypes: types });
+          } catch (err) {
+            console.error("Failed to load available connection types:", err);
+            // Set error state or show toast?
+            // For now, just log and leave types empty/stale
+            set(state => ({ 
+              error: state.error || "Failed to load connection types."
+            })); 
           }
         },
 
         // Create a new connection
-        createConnection: async (connectionData) => {
+        createConnection: async (connectionData: Partial<Connection>) => {
           try {
-            const newConnection = await api.connections.create(connectionData)
-            // Only update state if creation was successful (newConnection is not null)
+            console.log("useConnectionStore: Calling unified api.connections.create");
+            // Check for required fields before calling API
+            if (!connectionData.name || !connectionData.type) {
+              throw new Error("Connection name and type are required to create.");
+            }
+            // Use type assertion after checks
+            const newConnection = await api.connections.create(connectionData as { name: string; type: string; [key: string]: any });
+
+            // Only update state if creation was successful (newConnection should not be null from the unified API)
             if (newConnection) {
               set((state) => ({
-                // Assert the type of newConnection to satisfy the state type
                 connections: [...state.connections, newConnection as Connection],
               }))
+              // Fetch tools for the new connection type if not already loaded/loading
+              const currentToolStatus = get().toolLoadingStatus[newConnection.type];
+              if (!currentToolStatus || currentToolStatus === 'idle' || currentToolStatus === 'error') {
+                get().fetchToolsForConnection(newConnection.type);
+              }
+              return newConnection // Return the created connection
+            } else {
+              // This case should technically not be reached if api.connections.create throws on failure
+              console.error("useConnectionStore: api.connections.create returned nullish value unexpectedly.");
+              throw new Error("Connection creation failed unexpectedly.")
             }
-            return newConnection // Return the actual result (Connection or null)
           } catch (err) {
-            console.error("Failed to create connection:", err)
-            return null
+            console.error("useConnectionStore: Failed to create connection:", err)
+            // Propagate the error message for the UI to display
+            if (err instanceof Error) {
+                throw err;
+            }
+            throw new Error("An unknown error occurred while creating the connection.")
           }
         },
 
         // Update an existing connection
         updateConnection: async (id, connectionData) => {
           try {
-            const updatedConnection = await api.connections.update(id, connectionData)
+             // Check for required type field before calling API
+            if (!connectionData.type) {
+              // This shouldn't happen if updating an existing connection, but check defensively
+              throw new Error("Connection type is required for update.");
+            }
+            // Use type assertion after check
+            const updatedConnection = await api.connections.update(id, connectionData as { name?: string; type: string; [key: string]: any });
             set((state) => ({
               connections: state.connections.map((conn) => (conn.id === id ? updatedConnection : conn)),
             }))
@@ -151,8 +206,13 @@ export const useConnectionStore = create<ConnectionState>()(
         // Test a connection
         testConnection: async (connectionData) => {
           try {
-            // Return type from api.connections.test is { valid: boolean; message: string }
-            return await api.connections.test(connectionData)
+            // Ensure the connection type is present before calling the API
+            if (!connectionData.type) {
+               throw new Error("Connection type is required for testing.");
+            }
+            // Cast connectionData to the expected type after the check
+            // The rest operator (...) correctly includes other fields
+            return await api.connections.test(connectionData as { type: string; [key: string]: any }); 
           } catch (err) {
             console.error("Failed to test connection:", err)
             // Return the correct structure on error

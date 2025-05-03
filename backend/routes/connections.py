@@ -2,23 +2,30 @@
 Connection API Endpoints
 """
 
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Union, Annotated
 from uuid import uuid4
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Request, Body
+from pydantic import BaseModel, Field, model_validator
 
 from backend.services.connection_manager import (
     ConnectionManager, 
     get_connection_manager,
-    GrafanaConnectionConfig,
-    GenericConnectionConfig,
-    BaseConnectionConfig,
-    GithubConnectionConfig
+    ConnectionConfig
 )
 import logging
 from backend.core.types import MCPToolInfo
+
+# Import handler-specific Pydantic models for Union
+from backend.services.connection_handlers.github_handler import (
+    GithubConnectionCreate, GithubConnectionUpdate, GithubConnectionTest
+)
+from backend.services.connection_handlers.jira_handler import (
+    JiraConnectionCreate, JiraConnectionUpdate, JiraConnectionTest
+)
+# Import function to get registered types and handler getter
+from backend.services.connection_handlers.registry import get_all_handler_types, get_handler
 
 # Initialize logger
 connection_logger = logging.getLogger("routes.connections")
@@ -51,67 +58,72 @@ if not connection_logger.handlers:
 router = APIRouter()
 
 
-class ConnectionConfig(BaseModel):
-    """Configuration for a connection"""
-    id: str
-    name: str
-    type: str  # "grafana", "sql", "prometheus", "loki", "s3", "kubernetes", etc.
-    config: Dict[str, str]  # Configuration details (API keys, URLs, etc.)
+# --- Define Discriminated Unions for Payloads --- 
+
+# Union for specific config fields during creation
+CreatePayloadUnion = Annotated[
+    Union[GithubConnectionCreate, JiraConnectionCreate],
+    Field(discriminator="type")
+]
+
+# Union for specific config fields during update
+# Note: Update models in handlers allow optional fields
+UpdatePayloadUnion = Annotated[
+    Union[GithubConnectionUpdate, JiraConnectionUpdate],
+    Field(discriminator="type")
+]
+
+# Union for specific config fields during testing
+TestPayloadUnion = Annotated[
+    Union[GithubConnectionTest, JiraConnectionTest],
+    Field(discriminator="type")
+]
 
 
-class ConnectionRequest(BaseModel):
-    """Request to create a new connection"""
-    name: str
-    type: str  # "grafana", "sql", "prometheus", "loki", "s3", "kubernetes", etc.
-    config: Dict[str, str]
+# --- Define New Request Body Models --- 
+
+class CreateRequest(BaseModel):
+    """Request body for creating a new connection."""
+    name: str = Field(..., description="Unique name for the connection.")
+    # The payload contains the type discriminator and type-specific fields
+    payload: CreatePayloadUnion
+
+class UpdateRequest(BaseModel):
+    """Request body for updating a connection."""
+    name: Optional[str] = Field(None, description="Optional new name for the connection.")
+    # Payload is optional; if omitted, only the name might be updated.
+    # If provided, it contains type discriminator and optional fields to update.
+    payload: Optional[UpdatePayloadUnion] = None 
+
+    # Ensure at least one field is provided for an update
+    @model_validator(mode='before')
+    @classmethod
+    def check_at_least_one_value(cls, values):
+        if not values.get('name') and not values.get('payload'):
+            raise ValueError('At least name or payload must be provided for update')
+        return values
+
+class TestRequest(BaseModel):
+    """Request body for testing a connection configuration."""
+    # The payload contains the type discriminator and type-specific fields for testing
+    payload: TestPayloadUnion 
 
 
-# Type-specific connection creation models
-class GrafanaConnectionCreate(BaseModel):
-    """Grafana connection creation parameters"""
-    name: str
-    url: str
-    api_key: str
-
-class GithubConnectionCreate(BaseModel):
-    """GitHub connection creation parameters"""
-    name: str
-    github_personal_access_token: str
-
-# Generic fallback for connection create
-class ConnectionCreate(BaseModel):
-    """Parameters for creating a connection"""
-    name: str
-    type: str  # "grafana", "sql", "prometheus", "loki", "s3", "kubernetes", etc.
-    config: Dict
-
-
-class ConnectionUpdate(BaseModel):
-    """Parameters for updating a connection"""
-    name: Optional[str] = None
-    config: Optional[Dict] = None
-    github_personal_access_token: Optional[str] = None
-
-
-class ConnectionTest(BaseModel):
-    """Parameters for testing a connection"""
-    type: str  # "grafana", "sql", "prometheus", "loki", "s3", "kubernetes", etc.
-    config: Dict
-    github_personal_access_token: Optional[str] = None
-
+# --- API Endpoints --- 
 
 @router.get("/")
 async def list_connections(
     connection_manager: ConnectionManager = Depends(get_connection_manager)
-) -> List[Dict]:
+) -> List[Dict]: # Return list of dicts matching DB structure + redaction
     """
-    Get a list of all connections
+    Get a list of all connections (sensitive fields redacted).
     
     Returns:
-        List of connection information
+        List of connection information including id, name, type, is_default, and redacted config.
     """
     start_time = time.time()
     try:
+        # ConnectionManager now handles fetching and redaction via handlers
         connections = await connection_manager.get_all_connections()
         process_time = time.time() - start_time
         connection_logger.info(
@@ -126,119 +138,71 @@ async def list_connections(
         process_time = time.time() - start_time
         connection_logger.error(
             "Error listing connections",
-            extra={
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
+            extra={'error': str(e), 'error_type': type(e).__name__, 'processing_time_ms': round(process_time * 1000, 2)},
             exc_info=True
         )
-        raise
+        # Reraise as internal server error or specific type?
+        raise HTTPException(status_code=500, detail=f"Failed to list connections: {str(e)}")
 
 
 @router.get("/types")
-async def list_connection_types(
-    connection_manager: ConnectionManager = Depends(get_connection_manager)
-) -> List[str]:
-    """
-    Get a list of all available connection types
-    
-    Returns:
-        List of connection types
-    """
+async def list_connection_types() -> List[str]:
+    """Get a list of all available connection types."""
     start_time = time.time()
     try:
-        # Return supported connection types
-        # Data connection types
-        data_connections = ["grafana", "github"]
-        # Utility connection types
+        # Get types from the handler registry
+        handler_types = get_all_handler_types()
+        # Add other supported types manually if not using handlers (e.g., python)
         utility_connections = ["python"]
+        connection_types = sorted(list(set(handler_types + utility_connections)))
         
-        connection_types = data_connections + utility_connections
         process_time = time.time() - start_time
-        
         connection_logger.info(
             "Listed connection types",
-            extra={
-                'type_count': len(connection_types),
-                'processing_time_ms': round(process_time * 1000, 2)
-            }
+            extra={'type_count': len(connection_types), 'processing_time_ms': round(process_time * 1000, 2)}
         )
         return connection_types
     except Exception as e:
         process_time = time.time() - start_time
         connection_logger.error(
             "Error listing connection types",
-            extra={
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
+            extra={'error': str(e), 'error_type': type(e).__name__, 'processing_time_ms': round(process_time * 1000, 2)},
             exc_info=True
         )
-        raise
+        raise HTTPException(status_code=500, detail="Failed to list connection types")
 
 
 @router.get("/{connection_id}")
 async def get_connection(
     connection_id: str,
     connection_manager: ConnectionManager = Depends(get_connection_manager)
-) -> Dict:
+) -> Dict[str, Any]: # Return a dict representing the connection
     """
-    Get a connection by ID
-    
-    Args:
-        connection_id: The ID of the connection
-        
-    Returns:
-        The connection information
+    Get a specific connection by ID (sensitive fields redacted).
     """
     start_time = time.time()
     try:
         connection = await connection_manager.get_connection(connection_id)
         if not connection:
-            process_time = time.time() - start_time
-            connection_logger.warning(
-                "Connection not found",
-                extra={
-                    'connection_id': connection_id,
-                    'processing_time_ms': round(process_time * 1000, 2)
-                }
-            )
             raise HTTPException(status_code=404, detail=f"Connection {connection_id} not found")
         
-        # Convert to type-specific configuration
-        # Note: to_specific_config helps with type hinting but the actual data is in connection.config
-        specific_config = connection.to_specific_config() 
+        # Redact the config using the manager method (which uses handlers)
+        redacted_config = connection_manager._redact_sensitive_fields(connection.config, connection.type)
         
-        # Create response based on connection type
-        response: Dict[str, Any] = {
+        # Check if default (requires fetching default separately or adding to ConnectionConfig)
+        # Let's add a step to check if it's default
+        is_default = False
+        default_conn = await connection_manager.get_default_connection(connection.type)
+        if default_conn and default_conn.id == connection_id:
+            is_default = True
+
+        response = {
             "id": connection.id,
             "name": connection.name,
-            "type": connection.type
+            "type": connection.type,
+            "is_default": is_default,
+            "config": redacted_config
         }
-        
-        # Add type-specific fields based on connection type, reading from the stored config
-        if isinstance(specific_config, GrafanaConnectionConfig):
-            # For Grafana stdio, get url/key from the stored config dictionary
-            response["url"] = connection.config.get("grafana_url", "")
-            response["api_key"] = "***REDACTED***" # Always redact API key
-            response["config"] = connection_manager._redact_sensitive_fields(
-                connection.config, # Pass the full config for redaction
-                connection_type="grafana"
-            )
-        elif isinstance(specific_config, GithubConnectionConfig):
-            # GitHub config holds command/args template/pat
-            response["config"] = connection_manager._redact_sensitive_fields(
-                connection.config, # Pass the full config for redaction
-                connection_type="github"
-            )
-        elif isinstance(specific_config, GenericConnectionConfig):
-            # For GenericConnectionConfig, include the full redacted config dictionary
-            response["config"] = connection_manager._redact_sensitive_fields(connection.config)
-        else:
-            # Ultimate fallback - redact the original config
-            response["config"] = connection_manager._redact_sensitive_fields(connection.config)
         
         process_time = time.time() - start_time
         connection_logger.info(
@@ -250,210 +214,38 @@ async def get_connection(
                 'processing_time_ms': round(process_time * 1000, 2)
             }
         )
-        
         return response
-    except HTTPException:
+    except HTTPException: # Re-raise HTTP exceptions directly
         raise
     except Exception as e:
         process_time = time.time() - start_time
         connection_logger.error(
             "Error retrieving connection",
-            extra={
-                'connection_id': connection_id,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
+            extra={'connection_id': connection_id, 'error': str(e), 'error_type': type(e).__name__, 'processing_time_ms': round(process_time * 1000, 2)},
             exc_info=True
         )
-        raise
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve connection {connection_id}")
 
 
-@router.post("/grafana")
-async def create_grafana_connection(
-    connection_data: GrafanaConnectionCreate,
-    connection_manager: ConnectionManager = Depends(get_connection_manager)
-) -> Dict:
-    """
-    Create a new Grafana connection (now uses stdio MCP)
-    
-    Args:
-        connection_data: Parameters for creating the Grafana connection
-        
-    Returns:
-        The created connection information
-    """
-    start_time = time.time()
-    try:
-        # Pass url and api_key via kwargs for validation and inclusion in the prepared config
-        config = {} # Start with an empty config, manager prepares it
-        cm_kwargs = {
-            "grafana_url": connection_data.url,
-            "grafana_api_key": connection_data.api_key
-        }
-        
-        connection = await connection_manager.create_connection(
-            name=connection_data.name,
-            type="grafana",
-            config=config, # Empty, prepared by manager
-            **cm_kwargs
-        )
-        
-        process_time = time.time() - start_time
-        connection_logger.info(
-            "Created Grafana connection",
-            extra={
-                'connection_id': connection.id,
-                'connection_name': connection.name,
-                'processing_time_ms': round(process_time * 1000, 2)
-            }
-        )
-        
-        return {
-            "id": connection.id,
-            "name": connection.name,
-            "type": connection.type,
-            # Redact the final prepared config, specifying the type for correct redaction
-            "config": connection_manager._redact_sensitive_fields(connection.config, connection_type="grafana")
-        }
-    except ValueError as e:
-        process_time = time.time() - start_time
-        connection_logger.error(
-            "Error creating Grafana connection",
-            extra={
-                'connection_name': connection_data.name,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
-            exc_info=True
-        )
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        process_time = time.time() - start_time
-        connection_logger.error(
-            "Error creating Grafana connection",
-            extra={
-                'connection_name': connection_data.name,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
-            exc_info=True
-        )
-        raise
-
-@router.post("/github")
-async def create_github_connection(
-    connection_data: GithubConnectionCreate,
-    connection_manager: ConnectionManager = Depends(get_connection_manager)
-) -> Dict:
-    """
-    Create a new GitHub connection (Docker MCP)
-    
-    Args:
-        connection_data: Parameters for creating the GitHub connection
-        
-    Returns:
-        The created connection information
-    """
-    start_time = time.time()
-    try:
-        # Config dict itself is now prepared by connection manager during validation
-        # We just pass the PAT via kwargs
-        config = {}
-        cm_kwargs = {
-            "github_personal_access_token": connection_data.github_personal_access_token
-        }
-        
-        connection = await connection_manager.create_connection(
-            name=connection_data.name,
-            type="github",
-            config=config,
-            **cm_kwargs
-        )
-        
-        process_time = time.time() - start_time
-        connection_logger.info(
-            "Created GitHub connection",
-            extra={
-                'connection_id': connection.id,
-                'connection_name': connection.name,
-                'processing_time_ms': round(process_time * 1000, 2)
-            }
-        )
-        
-        return {
-            "id": connection.id,
-            "name": connection.name,
-            "type": connection.type,
-            "config": connection_manager._redact_sensitive_fields(connection.config, connection_type="github")
-        }
-    except ValueError as e:
-        process_time = time.time() - start_time
-        connection_logger.error(
-            "Error creating GitHub connection",
-            extra={
-                'connection_name': connection_data.name,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
-            exc_info=True
-        )
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        process_time = time.time() - start_time
-        connection_logger.error(
-            "Error creating GitHub connection",
-            extra={
-                'connection_name': connection_data.name,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
-            exc_info=True
-        )
-        raise
-
-# Keep the generic endpoint for backward compatibility and other connection types
-@router.post("/")
+# --- Refactored Generic Create Endpoint --- 
+@router.post("/", status_code=201)
 async def create_connection(
-    connection_data: ConnectionCreate,
+    request: CreateRequest, # Use the new request model with union
     connection_manager: ConnectionManager = Depends(get_connection_manager)
-) -> Dict:
+) -> Dict[str, Any]: # Return the created connection (redacted)
     """
-    Create a new connection (generic method)
-    
-    Args:
-        connection_data: Parameters for creating the connection
-        
-    Returns:
-        The created connection information
+    Create a new connection (handles different types via discriminated union).
     """
     start_time = time.time()
+    connection_name = request.name
+    connection_type = request.payload.type # Type comes from the payload
+    
     try:
-        # Prepare kwargs for potential PAT update
-        cm_kwargs = {}
-        if connection_data.type == "github" and connection_data.config.get("github_personal_access_token"):
-            cm_kwargs["github_personal_access_token"] = connection_data.config["github_personal_access_token"]
-        
-        # Ensure name and config are provided if they exist in the request
-        update_name = connection_data.name if connection_data.name is not None else None
-        update_config = connection_data.config if connection_data.config is not None else {}
-        
-        # Get current connection details to provide original name if not updated
-        current_connection = await connection_manager.get_connection(connection_data.name)
-        if not current_connection:
-            raise HTTPException(status_code=404, detail=f"Connection {connection_data.name} not found")
-        
-        final_name = update_name if update_name is not None else current_connection.name
-        
+        # Pass the validated payload model directly to the manager
         connection = await connection_manager.create_connection(
-            name=final_name,
-            type=connection_data.type,
-            config=update_config,
-            **cm_kwargs
+            name=connection_name,
+            type=connection_type,
+            connection_data=request.payload 
         )
         
         process_time = time.time() - start_time
@@ -467,81 +259,99 @@ async def create_connection(
             }
         )
         
+        # Redact the config before returning
+        redacted_config = connection_manager._redact_sensitive_fields(connection.config, connection.type)
+        
         return {
             "id": connection.id,
             "name": connection.name,
             "type": connection.type,
-            "config": connection_manager._redact_sensitive_fields(connection.config, connection_type=connection.type)
+            # Newly created might be default if it's the first of its type
+            "is_default": connection_manager.default_connections.get(connection.type) == connection.id,
+            "config": redacted_config
         }
-    except ValueError as e:
+    except (ValueError, TypeError) as e:
+        # Catch validation/config errors from ConnectionManager/Handlers
         process_time = time.time() - start_time
         connection_logger.error(
-            "Error creating connection",
-            extra={
-                'connection_name': connection_data.name,
-                'connection_type': connection_data.type,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
-            exc_info=True
+            f"Error creating {connection_type} connection '{connection_name}'",
+            extra={'error': str(e), 'error_type': type(e).__name__, 'processing_time_ms': round(process_time * 1000, 2)},
+            exc_info=True # Include traceback for unexpected TypeErrors
         )
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        # Catch unexpected errors
         process_time = time.time() - start_time
         connection_logger.error(
-            "Error creating connection",
-            extra={
-                'connection_name': connection_data.name,
-                'connection_type': connection_data.type,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
+            f"Unexpected error creating {connection_type} connection '{connection_name}'",
+            extra={'error': str(e), 'error_type': type(e).__name__, 'processing_time_ms': round(process_time * 1000, 2)},
             exc_info=True
         )
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
 
+# --- Refactored Update Endpoint --- 
 @router.put("/{connection_id}")
 async def update_connection(
     connection_id: str,
-    connection_data: ConnectionUpdate,
+    request: UpdateRequest, # Use the new request model with optional payload
     connection_manager: ConnectionManager = Depends(get_connection_manager)
-) -> Dict:
+) -> Dict[str, Any]: # Return the updated connection (redacted)
     """
-    Update a connection
-    
-    Args:
-        connection_id: The ID of the connection
-        connection_data: Parameters for updating the connection
-        
-    Returns:
-        The updated connection information
+    Update a connection (name and/or config fields).
+    Uses discriminated union for config updates.
     """
     start_time = time.time()
+    
+    # If payload is None, create a dummy empty model for the manager call? 
+    # No, the manager's update logic handles None payload correctly if only name is updated.
+    # However, the manager expects *some* pydantic model. Let's reconsider.
+    # Option 1: Pass None payload if None.
+    # Option 2: If payload is None, pass an empty dict? No, needs model.
+    # Option 3: Handler's update model should accept potentially all None values.
+    # Option 4: ConnectionManager detects None payload and only updates name. <-- Simpler
+
+    # Let's refine ConnectionManager.update_connection to handle this:
+    # It should accept `name: Optional[str]` and `connection_data: Optional[BaseModel]`. 
+    # We need to modify ConnectionManager first.
+
+    # *** TEMPORARY HACK: If payload is None, create an empty base model ***
+    # This avoids changing ConnectionManager for now, but isn't ideal.
+    # We'll assume a base update model exists or handlers handle empty update models.
+    # Let's assume handler update models work with no fields set.
+    connection_data_to_pass = request.payload 
+    
+    # Check if payload is provided and has actual update values
+    has_config_updates = request.payload is not None and request.payload.model_dump(exclude_unset=True)
+    
+    # If only name is provided and payload is empty/None, we still need to call update, 
+    # but the manager logic should handle the empty payload.
+    if not request.name and not has_config_updates:
+         # Pydantic validator in UpdateRequest should prevent this, but double-check
+         raise HTTPException(status_code=400, detail="Update requires at least a name or config changes.")
+
+    # Fetch connection type *before* calling update, in case update fails early
+    existing_conn = await connection_manager.get_connection(connection_id)
+    if not existing_conn:
+         raise HTTPException(status_code=404, detail=f"Connection {connection_id} not found")
+    connection_type = existing_conn.type
+
     try:
-        # Prepare kwargs for potential PAT update
-        cm_kwargs = {}
-        if connection_data.github_personal_access_token:
-            cm_kwargs["github_personal_access_token"] = connection_data.github_personal_access_token
-        
-        # Ensure name and config are provided if they exist in the request
-        update_name = connection_data.name if connection_data.name is not None else None
-        update_config = connection_data.config if connection_data.config is not None else {}
-        
-        # Get current connection details to provide original name if not updated
-        current_connection = await connection_manager.get_connection(connection_id)
-        if not current_connection:
-            raise HTTPException(status_code=404, detail=f"Connection {connection_id} not found")
-        
-        final_name = update_name if update_name is not None else current_connection.name
-        
+        # If payload is None, we need to instantiate the correct type for the manager
+        if connection_data_to_pass is None:
+            # Get the handler to find the appropriate update model type
+            try:
+                 handler = get_handler(connection_type)
+                 UpdateModel = handler.get_update_model()
+                 # Instantiate with type only, assuming other fields are optional
+                 connection_data_to_pass = UpdateModel(type=connection_type) 
+            except (ValueError, NotImplementedError) as e:
+                 raise HTTPException(status_code=400, detail=f"Cannot process name-only update for type '{connection_type}': {e}")
+
         connection = await connection_manager.update_connection(
             connection_id=connection_id,
-            name=final_name,
-            config=update_config,
-            **cm_kwargs
+            name=request.name, # Pass optional name
+            connection_data=connection_data_to_pass # Pass validated payload or dummy model
         )
         
         process_time = time.time() - start_time
@@ -555,40 +365,42 @@ async def update_connection(
             }
         )
         
+        # Redact the config before returning
+        redacted_config = connection_manager._redact_sensitive_fields(connection.config, connection.type)
+        
+        # Check if default
+        is_default = False
+        default_conn = await connection_manager.get_default_connection(connection.type)
+        if default_conn and default_conn.id == connection_id:
+            is_default = True
+
         return {
             "id": connection.id,
             "name": connection.name,
             "type": connection.type,
-            "config": connection_manager._redact_sensitive_fields(connection.config, connection_type=connection.type)
+            "is_default": is_default,
+            "config": redacted_config
         }
-    except ValueError as e:
+    except (ValueError, TypeError) as e:
+        # Catch validation/config errors from ConnectionManager/Handlers
         process_time = time.time() - start_time
         connection_logger.error(
-            "Error updating connection",
-            extra={
-                'connection_id': connection_id,
-                'connection_name': connection_data.name,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
+            f"Error updating connection {connection_id}",
+            extra={'error': str(e), 'error_type': type(e).__name__, 'processing_time_ms': round(process_time * 1000, 2)},
             exc_info=True
         )
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException: # Re-raise HTTP exceptions
+        raise
     except Exception as e:
+        # Catch unexpected errors
         process_time = time.time() - start_time
         connection_logger.error(
-            "Error updating connection",
-            extra={
-                'connection_id': connection_id,
-                'connection_name': connection_data.name,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
+            f"Unexpected error updating connection {connection_id}",
+            extra={'error': str(e), 'error_type': type(e).__name__, 'processing_time_ms': round(process_time * 1000, 2)},
             exc_info=True
         )
-        raise
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
 
 @router.delete("/{connection_id}", status_code=204)
@@ -596,118 +408,87 @@ async def delete_connection(
     connection_id: str,
     connection_manager: ConnectionManager = Depends(get_connection_manager)
 ) -> None:
-    """
-    Delete a connection
-    
-    Args:
-        connection_id: The ID of the connection
-    """
+    """Delete a connection."""
     start_time = time.time()
     try:
         await connection_manager.delete_connection(connection_id)
         process_time = time.time() - start_time
         connection_logger.info(
             "Deleted connection",
-            extra={
-                'connection_id': connection_id,
-                'processing_time_ms': round(process_time * 1000, 2)
-            }
+            extra={'connection_id': connection_id, 'processing_time_ms': round(process_time * 1000, 2)}
         )
     except ValueError as e:
+        # Typically "Connection not found"
         process_time = time.time() - start_time
-        connection_logger.error(
-            "Error deleting connection",
-            extra={
-                'connection_id': connection_id,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
-            exc_info=True
+        connection_logger.warning(
+            f"Failed to delete connection {connection_id}: {e}",
+            extra={'error': str(e), 'error_type': type(e).__name__, 'processing_time_ms': round(process_time * 1000, 2)}
         )
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         process_time = time.time() - start_time
         connection_logger.error(
-            "Error deleting connection",
-            extra={
-                'connection_id': connection_id,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
+            f"Error deleting connection {connection_id}",
+            extra={'error': str(e), 'error_type': type(e).__name__, 'processing_time_ms': round(process_time * 1000, 2)},
             exc_info=True
         )
-        raise
+        raise HTTPException(status_code=500, detail=f"Failed to delete connection: {str(e)}")
 
 
+# --- Refactored Test Endpoint --- 
 @router.post("/test")
 async def test_connection(
-    connection_data: ConnectionTest,
+    request: TestRequest, # Use the new request model with union
     connection_manager: ConnectionManager = Depends(get_connection_manager)
 ) -> Dict[str, Any]:
     """
-    Test a connection configuration
-    
-    Args:
-        connection_data: Parameters for testing the connection
-        
-    Returns:
-        The test result
+    Test a connection configuration without saving it.
     """
     start_time = time.time()
+    connection_type = request.payload.type
+    
     try:
-        # Prepare kwargs for type-specific test data (like PAT)
-        test_kwargs = {}
-        if connection_data.type == "github" and connection_data.github_personal_access_token:
-            test_kwargs["github_personal_access_token"] = connection_data.github_personal_access_token
-        
+        # Pass the validated payload model directly to the manager
         is_valid, message = await connection_manager.test_connection(
-            connection_type=connection_data.type,
-            config=connection_data.config,
-            **test_kwargs
+            connection_type=connection_type,
+            config_data=request.payload 
         )
         
         process_time = time.time() - start_time
         connection_logger.info(
             "Tested connection configuration",
             extra={
-                'connection_type': connection_data.type,
+                'connection_type': connection_type,
                 'is_valid': is_valid,
                 'processing_time_ms': round(process_time * 1000, 2)
             }
         )
         
-        return {
-            "valid": is_valid,
-            "message": message
-        }
-    except ValueError as e:
+        # Return validation result
+        # If invalid, return 400 status? Test endpoint usually returns 200 with validity flag.
+        status_code = 200 # Keep 200 even for invalid config
+        return {"valid": is_valid, "message": message}
+
+    except (ValueError, TypeError) as e:
+        # Catch errors from ConnectionManager/Handlers during test setup/execution
         process_time = time.time() - start_time
-        connection_logger.error(
-            "Error testing connection",
-            extra={
-                'connection_type': connection_data.type,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
-            exc_info=True
+        connection_logger.warning(
+            f"Error testing {connection_type} connection",
+            extra={'error': str(e), 'error_type': type(e).__name__, 'processing_time_ms': round(process_time * 1000, 2)}
+            # No need for full traceback on validation errors
         )
-        raise HTTPException(status_code=400, detail=str(e))
+        # Return validation failure with error message
+        return {"valid": False, "message": str(e)}
+        # raise HTTPException(status_code=400, detail=str(e)) # Or raise 400?
     except Exception as e:
+        # Catch unexpected errors
         process_time = time.time() - start_time
         connection_logger.error(
-            "Error testing connection",
-            extra={
-                'connection_type': connection_data.type,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
+            f"Unexpected error testing {connection_type} connection",
+            extra={'error': str(e), 'error_type': type(e).__name__, 'processing_time_ms': round(process_time * 1000, 2)},
             exc_info=True
         )
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred during testing: {str(e)}")
 
 
 @router.post("/{connection_id}/default")
@@ -715,95 +496,44 @@ async def set_default_connection(
     connection_id: str,
     connection_manager: ConnectionManager = Depends(get_connection_manager)
 ) -> Dict:
-    """
-    Set a connection as the default for its type
-    
-    Args:
-        connection_id: The ID of the connection
-        
-    Returns:
-        Success message
-    """
+    """Set a connection as the default for its type."""
     start_time = time.time()
     try:
         await connection_manager.set_default_connection(connection_id)
         process_time = time.time() - start_time
         connection_logger.info(
             "Set default connection",
-            extra={
-                'connection_id': connection_id,
-                'processing_time_ms': round(process_time * 1000, 2)
-            }
+            extra={'connection_id': connection_id, 'processing_time_ms': round(process_time * 1000, 2)}
         )
         return {"message": "Default connection set successfully"}
     except ValueError as e:
+        # Handles "Connection not found" or DB errors from manager
         process_time = time.time() - start_time
-        connection_logger.error(
-            "Error setting default connection",
-            extra={
-                'connection_id': connection_id,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
-            exc_info=True
+        connection_logger.warning(
+            f"Failed to set default connection {connection_id}: {e}",
+            extra={'error': str(e), 'error_type': type(e).__name__, 'processing_time_ms': round(process_time * 1000, 2)}
         )
-        raise HTTPException(status_code=400, detail=str(e))
+        # Return 404 if not found, 400/500 for other errors?
+        if "not found" in str(e).lower():
+             raise HTTPException(status_code=404, detail=str(e))
+        else:
+             raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         process_time = time.time() - start_time
         connection_logger.error(
-            "Error setting default connection",
-            extra={
-                'connection_id': connection_id,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'processing_time_ms': round(process_time * 1000, 2)
-            },
+            f"Error setting default connection {connection_id}",
+            extra={'error': str(e), 'error_type': type(e).__name__, 'processing_time_ms': round(process_time * 1000, 2)},
             exc_info=True
         )
-        raise
+        raise HTTPException(status_code=500, detail=f"Failed to set default connection: {str(e)}")
 
-
-@router.get("/{connection_id}/schema")
-async def get_connection_schema(
-    connection_id: str,
-    connection_manager: ConnectionManager = Depends(get_connection_manager)
-) -> Dict:
-    """
-    Get the schema for a connection
-    
-    Args:
-        connection_id: The ID of the connection
-        
-    Returns:
-        The schema information
-    """
-    try:
-        connection = await connection_manager.get_connection(connection_id)
-        if not connection:
-             raise HTTPException(status_code=404, detail=f"Connection {connection_id} not found")
-        schema = await connection_manager.get_connection_schema(connection_id)
-        return schema
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e: # Catch other potential errors
-        connection_logger.error(f"Error getting schema for {connection_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to retrieve connection schema")
 
 @router.get("/{connection_type}/tools")
 async def get_tools_for_connection_type(
     connection_type: str,
     connection_manager: ConnectionManager = Depends(get_connection_manager)
 ) -> List[MCPToolInfo]:
-    """
-    Get a list of available tools (name, description, inputSchema) for a specific connection type.
-    
-    Args:
-        connection_type: The type of connection (e.g., "github", "grafana")
-        
-    Returns:
-        List of tool definitions for the connection type
-    """
+    """Get available tools for a specific connection type via its default connection."""
     start_time = time.time()
     try:
         tools = await connection_manager.get_tools_for_connection_type(connection_type)
@@ -818,6 +548,7 @@ async def get_tools_for_connection_type(
         )
         return tools
     except ValueError as e:
+        # Catch errors from manager (no default conn, config error, MCP comms error)
         process_time = time.time() - start_time
         connection_logger.error(
             f"Error fetching tools for connection type: {connection_type}",
@@ -827,13 +558,17 @@ async def get_tools_for_connection_type(
                 'error_type': type(e).__name__,
                 'processing_time_ms': round(process_time * 1000, 2)
             },
-            exc_info=True
+            # exc_info=True # Maybe not needed for expected ValueErrors like 'no default'
         )
-        raise HTTPException(status_code=400, detail=str(e))
+        # Return 404 if no default, 400/500 otherwise?
+        if "no default connection found" in str(e).lower():
+             raise HTTPException(status_code=404, detail=str(e))
+        else: # Other config/MCP errors
+             raise HTTPException(status_code=500, detail=f"Failed to retrieve tools for {connection_type}: {str(e)}")
     except Exception as e:
         process_time = time.time() - start_time
         connection_logger.error(
-            f"Error fetching tools for connection type: {connection_type}",
+            f"Unexpected error fetching tools for connection type: {connection_type}",
             extra={
                 'connection_type': connection_type,
                 'error': str(e),
@@ -842,4 +577,4 @@ async def get_tools_for_connection_type(
             },
             exc_info=True
         )
-        raise HTTPException(status_code=500, detail=f"Failed to retrieve tools for {connection_type}")
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred retrieving tools for {connection_type}")

@@ -22,6 +22,7 @@ from backend.services.connection_manager import ConnectionManager
 from backend.services.notebook_manager import NotebookManager
 from backend.db.chat_db import ChatDatabase
 from backend.core.logging import setup_logging, get_logger
+from backend.services.connection_handlers.registry import get_all_handler_types
 
 # Initialize loggers
 app_loggers = setup_logging()
@@ -50,6 +51,17 @@ async def lifespan(app: FastAPI):
     app.state.execution_queue = ExecutionQueue() # Initialize execution queue
     app_logger.info("Initialized shared application state attributes.")
     
+    # Import connection handlers to trigger registration
+    try:
+        # These imports execute the handler files, which call register_handler
+        from backend.services.connection_handlers import github_handler
+        from backend.services.connection_handlers import jira_handler
+        app_logger.info(f"Successfully imported and registered connection handlers: {get_all_handler_types()}")
+    except ImportError as e:
+        app_logger.error(f"Failed to import connection handlers: {e}", exc_info=True)
+        # Depending on requirements, you might want to raise here to prevent startup
+        # if connection handlers are critical.
+
     # Create data directory if it doesn't exist
     data_dir = Path("data")
     data_dir.mkdir(exist_ok=True)

@@ -19,6 +19,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Search, Plus, MoreVertical, Trash2, FileText, ChevronLeft, ChevronRight, Database } from "lucide-react"
 import { api } from "@/api/client"
 import { useToast } from "@/hooks/use-toast"
+import DataConnectionsDialog from "./DataConnectionsDialog"
 
 // Define a type for the raw notebook data structure from the API
 interface RawNotebook {
@@ -64,6 +65,8 @@ export default function CanvasSidebar() {
   const [newCanvasDescription, setNewCanvasDescription] = useState("")
   // Add state for sidebar collapse
   const [isCollapsed, setIsCollapsed] = useState(false)
+  // Add state for Data Connections Dialog
+  const [isConnectionsDialogOpen, setIsConnectionsDialogOpen] = useState(false)
 
   // Helper to safely format RawNotebook to Canvas
   const formatNotebookToCanvas = (notebook: RawNotebook): Canvas => {
@@ -298,17 +301,16 @@ export default function CanvasSidebar() {
 
       {/* Footer Buttons */}
       <div className={`p-4 border-t ${isCollapsed ? "flex flex-col items-center space-y-4" : ""}`}>
-        {/* Data Connections Button */}
-        <Link href="/connections">
-          <Button
-            variant="outline"
-            className={`${isCollapsed ? "w-10 h-10 p-0" : "w-full mb-2"}`}
-            title="Data Connections"
-          >
-            <Database className={`h-4 w-4 ${isCollapsed ? "" : "mr-2"}`} />
-            {!isCollapsed && "Data Connections"}
-          </Button>
-        </Link>
+        {/* Data Connections Button - Changed from Link to Button triggering dialog */}
+        <Button
+          variant="outline"
+          className={`${isCollapsed ? "w-10 h-10 p-0" : "w-full mb-2"}`}
+          title="Data Connections"
+          onClick={() => setIsConnectionsDialogOpen(true)}
+        >
+          <Database className={`h-4 w-4 ${isCollapsed ? "" : "mr-2"}`} />
+          {!isCollapsed && "Data Connections"}
+        </Button>
 
         {/* Create Canvas Button */}
         <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
@@ -358,6 +360,13 @@ export default function CanvasSidebar() {
           </DialogContent>
         </Dialog>
       </div>
+
+      {/* Render the Data Connections Dialog */}
+      <DataConnectionsDialog
+        isOpen={isConnectionsDialogOpen}
+        onClose={() => setIsConnectionsDialogOpen(false)}
+        initialPage="list"
+      />
     </div>
   )
 }

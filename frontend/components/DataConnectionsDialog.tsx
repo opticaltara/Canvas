@@ -14,7 +14,6 @@ import {
   AlertCircle,
   CheckCircle,
   Database,
-  LineChart,
   Plus,
   Trash,
   Loader2,
@@ -23,6 +22,8 @@ import {
 } from "lucide-react"
 import type { ConnectionType } from "../store/types"
 import { useToast } from "@/hooks/use-toast"
+import GitHubConnectionForm from "./connection-forms/GitHubConnectionForm"
+import JiraConnectionForm from "./connection-forms/JiraConnectionForm"
 
 interface DataConnectionsDialogProps {
   isOpen: boolean
@@ -34,11 +35,11 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
   const [page, setPage] = useState<"list" | "add">(initialPage)
   const [newConnection, setNewConnection] = useState<{
     name: string
-    type: ConnectionType
+    type: ConnectionType | ""
     config: Record<string, any>
   }>({
     name: "",
-    type: "github",
+    type: "",
     config: {},
   })
   const [testResult, setTestResult] = useState<{ valid: boolean; message: string } | null>(null)
@@ -52,19 +53,28 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
     connections,
     loading,
     error,
+    availableTypes,
     loadConnections,
     createConnection,
     deleteConnection,
     testConnection,
   } = useConnectionStore()
 
-  // Load connections when the component mounts or dialog opens
+  // Effect to load connections (which now also loads types via the store action)
   useEffect(() => {
     if (isOpen) {
       console.log("DataConnectionsDialog: isOpen is true, calling loadConnections...")
       loadConnections()
     }
   }, [isOpen, loadConnections])
+
+  // Effect to set default type for the form *after* types load from store
+  useEffect(() => {
+    if (isOpen && availableTypes.length > 0 && !newConnection.type) {
+        setNewConnection(prev => ({ ...prev, type: availableTypes[0] as ConnectionType }));
+    }
+    // Only run when types array changes or dialog opens
+  }, [isOpen, availableTypes, newConnection.type]) 
 
   // Update page state if initialPage prop changes while dialog is open
   useEffect(() => {
@@ -84,7 +94,8 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
   const resetForm = () => {
     setNewConnection({
       name: "",
-      type: "github",
+      // Reset using types from store
+      type: availableTypes.length > 0 ? availableTypes[0] as ConnectionType : "",
       config: {},
     })
     setTestResult(null)
@@ -98,7 +109,7 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
     setDialogError(null)
   }
 
-  const handleConfigChange = (field: string, value: string) => {
+  const handleConfigChange = (field: string, value: string | boolean) => {
     setNewConnection((prev) => ({
       ...prev,
       config: {
@@ -112,10 +123,18 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
   const handleTestConnection = async () => {
     setTestResult(null)
     setDialogError(null)
+
+    // Check if a valid type is selected
+    if (!newConnection.type) {
+      setDialogError("Please select a connection type.");
+      return; 
+    }
+
     setIsTestingConnection(true)
 
     try {
-      const result = await testConnection(newConnection)
+      // Type is guaranteed to be valid ConnectionType here
+      const result = await testConnection(newConnection as { type: ConnectionType; [key: string]: any })
       setTestResult(result)
     } catch (err) {
       console.error("Failed to test connection:", err)
@@ -136,11 +155,18 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
       return
     }
 
+    // Check if a valid type is selected
+    if (!newConnection.type) {
+      setDialogError("Please select a connection type.");
+      return; 
+    }
+
     setDialogError(null)
     setIsCreatingConnection(true)
 
     try {
-      const result = await createConnection(newConnection)
+      // Type is guaranteed to be valid ConnectionType here
+      const result = await createConnection(newConnection as { name: string; type: ConnectionType; [key: string]: any })
       if (result) {
         resetForm()
         setPage("list")
@@ -179,10 +205,10 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
 
   const getConnectionTypeIcon = (type: string) => {
     switch (type) {
-      case "grafana":
-        return <LineChart className="h-5 w-5 text-primary" />
       case "github":
         return <Github className="h-5 w-5 text-primary" />
+      case "jira":
+        return <Database className="h-5 w-5 text-primary" />
       default:
         return <Database className="h-5 w-5 text-muted-foreground" />
     }
@@ -291,6 +317,31 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
 
         <div className="grid gap-4">
           <div className="grid gap-2">
+            <Label htmlFor="type">Connection Type</Label>
+            <select
+              id="type"
+              value={newConnection.type}
+              onChange={(e) => {
+                setNewConnection((prev) => ({ 
+                  ...prev, 
+                  type: e.target.value as ConnectionType, 
+                  config: {} 
+                }));
+                setTestResult(null);
+                setDialogError(null);
+              }}
+              className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 bg-white"
+              disabled={availableTypes.length === 0}
+            >
+              <option value="" disabled hidden>Select Type...</option>
+              {availableTypes.map(type => (
+                <option key={type} value={type}>
+                  {type.charAt(0).toUpperCase() + type.slice(1)}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="grid gap-2">
             <Label htmlFor="name">Connection Name</Label>
             <Input
               id="name"
@@ -300,68 +351,19 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
               className="w-full"
             />
           </div>
-          <div className="grid gap-2">
-            <Label htmlFor="type">Connection Type</Label>
-            <select
-              id="type"
-              value={newConnection.type}
-              onChange={(e) => handleInputChange("type", e.target.value as ConnectionType)}
-              className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 bg-white"
-            >
-              <option value="grafana">Grafana</option>
-              <option value="github">GitHub</option>
-            </select>
-          </div>
-
-          {/* Dynamic config fields based on connection type */}
-          {newConnection.type === "grafana" && (
-            <div className="space-y-4">
-              <div className="grid gap-2">
-                <Label htmlFor="url">URL</Label>
-                <Input
-                  id="url"
-                  value={newConnection.config?.url || ""}
-                  onChange={(e) => handleConfigChange("url", e.target.value)}
-                  placeholder="https://your-grafana-instance.com"
-                />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="api_key">API Key</Label>
-                <Input
-                  id="api_key"
-                  type="password"
-                  value={newConnection.config?.api_key || ""}
-                  onChange={(e) => handleConfigChange("api_key", e.target.value)}
-                  placeholder="Enter API key"
-                />
-              </div>
-            </div>
-          )}
 
           {newConnection.type === "github" && (
-            <div className="space-y-4">
-              <div className="grid gap-2">
-                <Label htmlFor="github_personal_access_token">Personal Access Token</Label>
-                <Input
-                  id="github_personal_access_token"
-                  type="password"
-                  value={newConnection.config?.github_personal_access_token || ""}
-                  onChange={(e) => handleConfigChange("github_personal_access_token", e.target.value)}
-                  placeholder="ghp_..."
-                />
-                <p className="text-xs text-muted-foreground mt-1">
-                  Create a token with repo and workflow permissions at{" "}
-                  <a
-                    href="https://github.com/settings/tokens"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-primary hover:underline"
-                  >
-                    github.com/settings/tokens
-                  </a>
-                </p>
-              </div>
-            </div>
+            <GitHubConnectionForm 
+              config={newConnection.config}
+              onConfigChange={handleConfigChange}
+            />
+          )}
+
+          {newConnection.type === "jira" && (
+             <JiraConnectionForm 
+              config={newConnection.config}
+              onConfigChange={handleConfigChange}
+            />
           )}
 
           {testResult && (
