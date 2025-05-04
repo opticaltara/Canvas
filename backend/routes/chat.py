@@ -21,6 +21,7 @@ from pydantic_ai.messages import (
     ModelResponse,
     UserPromptPart,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from backend.ai.chat_agent import (
@@ -29,7 +30,7 @@ from backend.ai.chat_agent import (
     to_chat_message,
 )
 from backend.db.chat_db import ChatDatabase
-from backend.db.database import get_db
+from backend.db.database import get_db, get_async_db_session
 from backend.services.notebook_manager import NotebookManager, get_notebook_manager
 from backend.services.connection_manager import ConnectionManager, get_connection_manager
 from backend.services.redis_client import get_redis_client
@@ -399,7 +400,8 @@ async def post_message(
     session_id: str, # Keep session_id for context/logging if needed
     prompt: str = Form(...),
     chat_db: ChatDatabase = Depends(get_chat_db),
-    db: Session = Depends(get_db), # Added db dependency
+    # Use AsyncSession dependency for async manager call
+    db: AsyncSession = Depends(get_async_db_session), 
     chat_agent: ChatAgentService = Depends(get_chat_agent_for_session)
 ) -> StreamingResponse:
     """
@@ -417,12 +419,11 @@ async def post_message(
     # Fetch and Summarize Cell History
     cell_history_context = None
     try:
-        # Access notebook_id directly from the injected & initialized agent
         notebook_manager = chat_agent.notebook_manager
-        notebook = notebook_manager.get_notebook(db=db, notebook_id=UUID(chat_agent.notebook_id)) # Pass db
+        # Await the async manager call
+        notebook = await notebook_manager.get_notebook(db=db, notebook_id=UUID(chat_agent.notebook_id)) 
         if notebook and notebook.cell_order:
             recent_cell_ids = notebook.cell_order[-MAX_CELL_HISTORY:]
-            # Use model_dump() which is standard in Pydantic v2
             recent_cells_dicts = [notebook.cells[cell_id].model_dump() 
                                   for cell_id in recent_cell_ids 
                                   if cell_id in notebook.cells] 
@@ -432,11 +433,10 @@ async def post_message(
             else:
                  cell_history_context = "Found notebook but no recent cells to summarize."
         elif notebook:
-             # Log the status, but don't set it as context to prepend
              chat_logger.debug(f"Notebook {notebook.id} found, but it has no cells.")
-             cell_history_context = None # Explicitly set to None if no cells
+             cell_history_context = None 
 
-        if cell_history_context: # Only log if there's actual context to log
+        if cell_history_context:
             chat_logger.debug(f"Generated cell history context for session {session_id}:\\n{cell_history_context}")
     except (KeyError, ValueError) as e: # Catch potential UUID conversion error too
         notebook_id_for_log = chat_agent.notebook_id if chat_agent and chat_agent.notebook_id else "<UNKNOWN>"

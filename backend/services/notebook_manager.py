@@ -3,17 +3,21 @@ Notebook Manager Service
 """
 
 import logging
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set
 from uuid import UUID, uuid4
 
+from fastapi import Depends, Request
 from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import get_settings
 from backend.core.notebook import Notebook, NotebookMetadata, Cell, CellType, CellStatus, DependencyGraph
 from backend.core.cell import Cell, CellType, CellStatus, CellResult
 from backend.core.types import ToolCallID
 from backend.db.repositories import NotebookRepository
+from backend.core.execution import ExecutionQueue, CellExecutor
 
 
 # Configure logging
@@ -31,16 +35,17 @@ class CorrelationIdFilter(logging.Filter):
 logger.addFilter(CorrelationIdFilter())
 
 # Type hint for session dependency
-DbSession = Session
+DbSession = Session # Restore alias temporarily for sync methods
 
-def get_notebook_manager():
-    """Factory function to get a NotebookManager instance."""
-    # global _notebook_manager_instance
-    # if _notebook_manager_instance is None:
-    #     _notebook_manager_instance = NotebookManager()
-    # return _notebook_manager_instance
-    # Return a new instance each time
-    return NotebookManager()
+def get_notebook_manager(request: Request) -> "NotebookManager":
+    """Dependency function to get the NotebookManager instance from app state."""
+    # Check if manager exists in state (it should if lifespan ran correctly)
+    if not hasattr(request.app.state, 'notebook_manager') or not request.app.state.notebook_manager:
+        # This case should ideally not happen if lifespan setup is correct
+        logger.error("NotebookManager not found in application state. Lifespan setup might be incorrect.")
+        # Raise an internal server error or handle appropriately
+        raise RuntimeError("NotebookManager service not available")
+    return request.app.state.notebook_manager
 
 
 class NotebookManager:
@@ -48,18 +53,23 @@ class NotebookManager:
     Service layer for managing notebooks.
     Handles interactions between API/agents and the database repository.
     Database session is injected per method call.
+    Now accepts ExecutionQueue and CellExecutor for handling queuing.
     """
-    def __init__(self):
+    def __init__(self, execution_queue: Optional[ExecutionQueue] = None, cell_executor: Optional[CellExecutor] = None):
         correlation_id = str(uuid4())
         self.settings = get_settings()
         self.notify_callback: Optional[Callable] = None
+        self.execution_queue = execution_queue
+        self.cell_executor = cell_executor
         
-        # REMOVED: Session and Repository initialization moved to methods
-        # session_generator = get_db()
-        # self.db: Session = next(session_generator)
-        # self.repository = NotebookRepository(self.db)
-        
-        logger.info("NotebookManager instance created", extra={'correlation_id': correlation_id})
+        logger.info(
+            "NotebookManager instance created", 
+            extra={
+                'correlation_id': correlation_id,
+                'has_execution_queue': execution_queue is not None,
+                'has_cell_executor': cell_executor is not None
+            }
+        )
     
     def set_notify_callback(self, callback: Callable) -> None:
         """
@@ -70,110 +80,78 @@ class NotebookManager:
         """
         self.notify_callback = callback
     
-    def create_notebook(self, db: DbSession, name: str, description: Optional[str] = None, metadata: Optional[Dict] = None) -> Notebook:
-        """Create a new notebook"""
+    async def create_notebook(self, db: AsyncSession, name: str, description: Optional[str] = None, metadata: Optional[Dict] = None) -> Notebook:
+        """Create a new notebook (async)"""
         correlation_id = str(uuid4())
         logger.info(f"Creating new notebook with name '{name}'", extra={'correlation_id': correlation_id})
-        
-        # Instantiate repository locally
-        repository = NotebookRepository(db)
-
-        # Create notebook in database
-        db_notebook = repository.create_notebook(
+        repository = NotebookRepository(db) 
+        # Await async repo call
+        db_notebook_created = await repository.create_notebook(
             title=name,
             description=description,
             created_by=metadata.get("created_by") if metadata else None,
             tags=metadata.get("tags", []) if metadata else []
         )
-        
-        # Get data as dictionary from to_dict
-        notebook_data = db_notebook.to_dict()
-        
-        # Create notebook model 
-        notebook = self._db_notebook_to_model(db_notebook) # Use helper
-
-        logger.info(f"Successfully created notebook {notebook.id}", extra={'correlation_id': correlation_id})
+        # Fetch the notebook again using get_notebook to ensure relationships are loaded
+        # Pass the ID of the newly created notebook
+        notebook = await self.get_notebook(db, UUID(str(db_notebook_created.id)))
+        logger.info(f"Successfully created and re-fetched notebook {notebook.id}", extra={'correlation_id': correlation_id})
         return notebook
     
-    def get_notebook(self, db: DbSession, notebook_id: UUID) -> Notebook:
-        """Get a notebook by ID"""
-        # Instantiate repository locally
+    async def get_notebook(self, db: AsyncSession, notebook_id: UUID) -> Notebook:
+        """Get a notebook by ID (async)"""
         repository = NotebookRepository(db)
-        db_notebook = repository.get_notebook(str(notebook_id))
+        # Await async repo call
+        db_notebook = await repository.get_notebook(str(notebook_id))
         if not db_notebook:
             logger.error(f"Notebook {notebook_id} not found")
             raise KeyError(f"Notebook {notebook_id} not found")
-        
-        # Convert to model
-        notebook = self._db_notebook_to_model(db_notebook)
+        notebook = self._db_notebook_to_model(db_notebook) # Conversion is sync
         logger.info(f"Retrieved notebook {notebook_id}")
         return notebook
     
-    def list_notebooks(self, db: DbSession) -> List[Notebook]:
-        """Get a list of all notebooks"""
-        # Instantiate repository locally
+    async def list_notebooks(self, db: AsyncSession) -> List[Notebook]:
+        """Get a list of all notebooks (async)"""
         repository = NotebookRepository(db)
-        db_notebooks = repository.list_notebooks()
+        # Await async repo call
+        db_notebooks = await repository.list_notebooks()
+        # Conversion is sync
         return [self._db_notebook_to_model(db_notebook) for db_notebook in db_notebooks]
     
-    def save_notebook(self, db: DbSession, notebook_id: UUID, notebook: Notebook) -> None:
-        """
-        Save the complete state of a Notebook object to the database.
-        This includes tool call records, cell links, cell order, and timestamps.
-
-        Args:
-            db: The database session.
-            notebook_id: The ID of the notebook to save.
-            notebook: The Notebook object containing the state to save.
-            
-        Raises:
-            KeyError: If the notebook is not found (potentially by repository methods).
-            Exception: If repository methods fail.
-        """
+    async def save_notebook(self, db: AsyncSession, notebook_id: UUID, notebook: Notebook) -> None:
+        """Save the complete state of a Notebook object (async)."""
         correlation_id = str(uuid4())
         logger.info(f"Saving full state for notebook {notebook_id}", extra={'correlation_id': correlation_id})
-        
         try:
-            # Instantiate repository locally
             repository = NotebookRepository(db)
-
-            # 3. Save Cell Order
+            # Assuming repository methods called within save are async if needed
+            # e.g., if update_cell_order becomes async:
             if notebook.cell_order:
-                # Assuming repository has a method like update_cell_order
-                # This method needs to be implemented in NotebookRepository
                 str_cell_order = [str(cell_id) for cell_id in notebook.cell_order]
-                logger.debug(f"[{correlation_id}] Saving cell order: {str_cell_order}")
-                # repository.update_cell_order(str(notebook_id), str_cell_order)
-                # Placeholder log until repository method is implemented:
-                logger.info(f"[{correlation_id}] Placeholder: Would save cell order.")
-            else:
-                 logger.debug(f"[{correlation_id}] No cell order provided to save.")
-                 
-            # 4. Update Notebook Timestamp
-            # Assuming repository has update_notebook_timestamp or similar
-            logger.debug(f"[{correlation_id}] Updating notebook timestamp...")
-            # repository.update_notebook_timestamp(str(notebook_id))
-            # Placeholder log until repository method is implemented:
-            logger.info(f"[{correlation_id}] Placeholder: Would update notebook timestamp.")
+                # await repository.update_cell_order(str(notebook_id), str_cell_order)
+                logger.info(f"[{correlation_id}] Placeholder: Would save cell order (async).")
+            # if update_notebook_timestamp becomes async:
+            # await repository.update_notebook_timestamp(str(notebook_id))
+            # For now, directly update timestamp if needed (assuming repo._update... is async)
+            await repository._update_notebook_timestamp(str(notebook_id))
+            logger.info(f"[{correlation_id}] Updated notebook timestamp (async).")
 
             logger.info(f"Successfully completed save operations for notebook {notebook_id}", extra={'correlation_id': correlation_id})
-
         except Exception as e:
             logger.error(f"Error saving full state for notebook {notebook_id}: {e}", extra={'correlation_id': correlation_id}, exc_info=True)
-            # Re-raise the exception to be handled by the caller
             raise
     
-    def delete_notebook(self, db: DbSession, notebook_id: UUID) -> None:
-        """Delete a notebook"""
-        # Instantiate repository locally
+    async def delete_notebook(self, db: AsyncSession, notebook_id: UUID) -> None:
+        """Delete a notebook (async)"""
         repository = NotebookRepository(db)
-        success = repository.delete_notebook(str(notebook_id))
+        # Await async repo call
+        success = await repository.delete_notebook(str(notebook_id))
         if not success:
             logger.error(f"Cannot delete notebook {notebook_id}: not found")
             raise KeyError(f"Notebook {notebook_id} not found")
         logger.info(f"Successfully deleted notebook {notebook_id}")
     
-    def create_cell(self, db: DbSession, notebook_id: UUID, cell_type: CellType, content: str, 
+    async def create_cell(self, db: AsyncSession, notebook_id: UUID, cell_type: CellType, content: str, 
                     tool_call_id: ToolCallID,
                     tool_name: Optional[str] = None,
                     tool_arguments: Optional[Dict[str, Any]] = None,
@@ -185,20 +163,16 @@ class NotebookManager:
                     result: Optional[CellResult] = None,
                     status: Optional[CellStatus] = None
                     ) -> Cell:
-        """Create a new cell in a notebook"""
-        # Instantiate repository locally
+        """Create a new cell in a notebook (async)"""
         repository = NotebookRepository(db)
-        
-        # Get notebook to determine position if needed (uses its own repository instance)
-        # Note: This might fetch the notebook twice if called right after get_notebook.
-        # Could optimize later if performance becomes an issue.
-        notebook_for_pos = self.get_notebook(db, notebook_id)
+        # Await potentially async get_notebook call
+        notebook_for_pos = await self.get_notebook(db, notebook_id)
         
         if position is None:
             position = len(notebook_for_pos.cells)
         
-        # Create cell in database
-        db_cell = repository.create_cell(
+        # Await async repo call
+        db_cell = await repository.create_cell(
             notebook_id=str(notebook_id),
             cell_type=cell_type.value,
             content=content,
@@ -218,252 +192,406 @@ class NotebookManager:
         )
         
         if not db_cell:
-            raise KeyError(f"Failed to create cell in notebook {notebook_id}")
+            raise ValueError(f"Failed to create cell in notebook {notebook_id}")
         
-        # Add dependencies using the repository
         if dependencies:
-            cell_id_str = str(db_cell.id)
+            cell_id_str = str(db_cell.id) # Access ID after await
             for dep_id in dependencies:
                 try:
-                    # Assuming add_dependency handles string UUIDs
-                    repository.add_dependency(dependent_id=cell_id_str, dependency_id=str(dep_id))
+                    # Await async repo call
+                    await repository.add_dependency(dependent_id=cell_id_str, dependency_id=str(dep_id))
                 except Exception as dep_err:
                     logger.error(f"Failed to add dependency {dep_id} to cell {cell_id_str}: {dep_err}", exc_info=True)
-                    # Continue creating cell, but log error
 
-        # Fetch the cell again to include dependencies (if repo doesn't return them)
-        # Or modify _db_cell_to_model to accept the initial dependencies list
-        db_cell_with_deps = repository.get_cell(str(db_cell.id))
+        # Await async repo call
+        db_cell_with_deps = await repository.get_cell(str(db_cell.id))
         if not db_cell_with_deps:
             logger.error(f"Failed to re-fetch cell {db_cell.id} after creation and adding dependencies.")
-            # Fallback to original db_cell if re-fetch fails
-            db_cell_with_deps = db_cell 
+            db_cell_with_deps = db_cell # Fallback
  
-        # Convert to model
-        cell = self._db_cell_to_model(db_cell_with_deps)
+        cell = self._db_cell_to_model(db_cell_with_deps) # Conversion is sync
         
         logger.info(f"Created cell {cell.id} in notebook {notebook_id}")
         return cell
     
-    def get_cell(self, db: DbSession, notebook_id: UUID, cell_id: UUID) -> Cell:
-        """Get a cell by ID"""
-        # Instantiate repository locally
+    async def get_cell(self, db: AsyncSession, notebook_id: UUID, cell_id: UUID) -> Cell:
+        """Get a cell by ID (async)"""
         repository = NotebookRepository(db)
-        db_cell = repository.get_cell(str(cell_id))
-        if not db_cell:
-            logger.error(f"Cell {cell_id} not found")
-            raise KeyError(f"Cell {cell_id} not found")
-        
-        # Optional: Verify cell belongs to notebook_id
-        if str(db_cell.notebook_id) != str(notebook_id):
-             logger.error(f"Cell {cell_id} does not belong to notebook {notebook_id}")
-             raise KeyError(f"Cell {cell_id} not found in notebook {notebook_id}")
+        # Await async repo call
+        db_cell = await repository.get_cell(str(cell_id))
+        if not db_cell or str(db_cell.notebook_id) != str(notebook_id):
+            logger.error(f"Cell {cell_id} not found in notebook {notebook_id}")
+            raise KeyError(f"Cell {cell_id} not found in notebook {notebook_id}")
+        return self._db_cell_to_model(db_cell) # Conversion is sync
 
-        # Convert to model
-        cell = self._db_cell_to_model(db_cell)
-        logger.info(f"Retrieved cell {cell_id}")
-        return cell
-    
-    def update_cell_content(self, db: DbSession, notebook_id: UUID, cell_id: UUID, content: str) -> Cell:
-        """Update a cell's content"""
-        # Instantiate repository locally
+    async def update_cell_content(self, db: AsyncSession, notebook_id: UUID, cell_id: UUID, content: str) -> Cell:
+        """Update the content of a cell (async)"""
+        correlation_id = str(uuid4())
+        log_extra = {'correlation_id': correlation_id, 'notebook_id': str(notebook_id), 'cell_id': str(cell_id)}
+        logger.info(f"Updating content for cell {cell_id}", extra=log_extra)
+        
         repository = NotebookRepository(db)
-        
-        # Optional: Verify cell belongs to notebook before updating
-        # db_cell_check = repository.get_cell(str(cell_id))
-        # if not db_cell_check or str(db_cell_check.notebook_id) != str(notebook_id):
-        #     logger.error(f"Cell {cell_id} not found in notebook {notebook_id} for update.")
-        #     raise KeyError(f"Cell {cell_id} not found in notebook {notebook_id}")
-
-        # Update in database
-        db_cell = repository.update_cell(
-            str(cell_id),
-            content=content
+        # Await async repo call
+        updated_cell_data = await repository.update_cell(
+            cell_id=str(cell_id),
+            updates={'content': content}
         )
         
-        if not db_cell:
-            logger.error(f"Cell {cell_id} not found")
+        if not updated_cell_data:
+            logger.error(f"Cell {cell_id} not found for content update", extra=log_extra)
             raise KeyError(f"Cell {cell_id} not found")
+            
+        updated_cell_model = self._db_cell_to_model(updated_cell_data)
         
-        # Mark as stale (also uses the repository)
-        repository.mark_cell_stale(str(cell_id))
+        logger.info(f"Successfully updated content for cell {cell_id}", extra=log_extra)
         
-        # Fetch the updated cell again to reflect changes
-        updated_db_cell = repository.get_cell(str(cell_id))
-        if not updated_db_cell:
-             # Should not happen if update succeeded, but handle defensively
-             logger.error(f"Could not re-fetch cell {cell_id} after update.")
-             raise KeyError(f"Could not re-fetch cell {cell_id} after update.")
+        # Await async manager call
+        stale_dependents = await self.mark_dependents_stale(db, notebook_id, cell_id)
+        logger.info(f"Marked {len(stale_dependents)} dependents of cell {cell_id} as stale")
+        
+        # Notify clients about the change (including potentially stale dependents)
+        if self.notify_callback:
+            # We might want a specific notification type for content + stale updates
+            # For now, just send the updated cell data
+            await self.notify_callback(notebook_id, updated_cell_model.model_dump())
+            # Consider sending updates for stale cells too
+            # for stale_id in stale_dependents:
+            #     stale_cell = self.get_cell(db, notebook_id, stale_id)
+            #     asyncio.create_task(self.notify_callback(notebook_id, stale_cell.model_dump()))
+                
+        return updated_cell_model
 
-        cell = self._db_cell_to_model(updated_db_cell)
-        logger.info(f"Updated content for cell {cell_id}")
-        return cell
-    
-    def delete_cell(self, db: DbSession, notebook_id: UUID, cell_id: UUID) -> None:
-        """Delete a cell"""
-        # Instantiate repository locally
+    async def delete_cell(self, db: AsyncSession, notebook_id: UUID, cell_id: UUID) -> None:
+        """Delete a cell from a notebook (async)"""
         repository = NotebookRepository(db)
-
-        # Optional: Verify cell belongs to notebook before deleting
-        # db_cell_check = repository.get_cell(str(cell_id))
-        # if not db_cell_check or str(db_cell_check.notebook_id) != str(notebook_id):
-        #     logger.error(f"Cell {cell_id} not found in notebook {notebook_id} for deletion.")
-        #     raise KeyError(f"Cell {cell_id} not found in notebook {notebook_id}")
-
-        success = repository.delete_cell(str(cell_id))
+        # Await async repo call
+        success = await repository.delete_cell(str(cell_id))
         if not success:
-            logger.error(f"Cell {cell_id} not found")
+            logger.error(f"Cannot delete cell {cell_id}: not found")
             raise KeyError(f"Cell {cell_id} not found")
+        logger.info(f"Successfully deleted cell {cell_id} from notebook {notebook_id}")
         
-        logger.info(f"Deleted cell {cell_id}")
+        # TODO: Update notebook cell_order and dependency graph
+        # This requires fetching the notebook, modifying it, and potentially saving
+        # For now, just logging the deletion.
+        
+        # Notify clients (might need a specific 'cell_deleted' type)
+        if self.notify_callback:
+             # Send a simple notification indicating deletion
+             await self.notify_callback(notebook_id, {"id": str(cell_id), "deleted": True})
+             
+
+    async def update_cell_status(self, db: AsyncSession, notebook_id: UUID, cell_id: UUID, status: CellStatus, correlation_id: Optional[str] = None) -> None:
+        """Update the status of a cell (async) and add to queue if needed."""
+        correlation_id = correlation_id or str(uuid4())
+        log_extra = {'correlation_id': correlation_id, 'notebook_id': str(notebook_id), 'cell_id': str(cell_id), 'new_status': status.value}
+        logger.info(f"Updating status for cell {cell_id} to {status.value}", extra=log_extra)
+
+        try:
+            repository = NotebookRepository(db)
+            # Await async repo call
+            updated_cell_data = await repository.update_cell(
+                cell_id=str(cell_id),
+                updates={'status': status.value}
+            )
+            if not updated_cell_data:
+                logger.error(f"Cell {cell_id} not found for status update", extra=log_extra)
+                raise KeyError(f"Cell {cell_id} not found")
+
+            logger.info(f"Successfully updated status for cell {cell_id} to {status.value} in DB", extra=log_extra)
+
+            # Get the full cell model after update
+            updated_cell_model = self._db_cell_to_model(updated_cell_data)
+
+            # *** Add to Execution Queue if status is QUEUED ***
+            if status == CellStatus.QUEUED:
+                if self.execution_queue and self.cell_executor:
+                    logger.info(f"Adding cell {cell_id} to execution queue", extra=log_extra)
+                    try:
+                        await self.execution_queue.add_cell(notebook_id, cell_id, self.cell_executor)
+                        logger.info(f"Successfully added cell {cell_id} to execution queue", extra=log_extra)
+                    except Exception as q_err:
+                         logger.error(f"Failed to add cell {cell_id} to execution queue: {q_err}", extra=log_extra, exc_info=True)
+                         # Decide if we should revert status or just log the error
+                         # For now, just log and continue with notification
+                else:
+                    logger.warning(
+                        f"ExecutionQueue or CellExecutor not available in NotebookManager. Cannot queue cell {cell_id}.", 
+                        extra=log_extra
+                    )
+
+            # Notify clients about the change via WebSocket
+            if self.notify_callback:
+                # Use asyncio.create_task if calling from sync context, but this method is async
+                await self.notify_callback(notebook_id, updated_cell_model.model_dump()) 
+                logger.debug("WebSocket notification sent for cell status update", extra=log_extra)
+            else:
+                 logger.warning("notify_callback not set in NotebookManager. WebSocket update skipped.", extra=log_extra)
+
+        except KeyError as e:
+            logger.error(f"Resource not found during cell status update: {e}", extra=log_extra)
+            raise # Re-raise KeyError for API layer to handle (404)
+        except Exception as e:
+            logger.error(f"Error updating cell status for {cell_id}: {e}", extra=log_extra, exc_info=True)
+            raise # Re-raise other exceptions for API layer to handle (500)
     
-    def add_dependency(self, db: DbSession, notebook_id: UUID, dependent_id: UUID, dependency_id: UUID) -> None:
-        """Add a dependency between cells"""
-        # Instantiate repository locally
+    async def add_dependency(self, db: AsyncSession, notebook_id: UUID, dependent_id: UUID, dependency_id: UUID) -> None:
+        """Add a dependency between two cells (async)"""
         repository = NotebookRepository(db)
-        # Optional: Validate cells belong to the notebook?
-        success = repository.add_dependency(str(dependent_id), str(dependency_id))
-        if not success:
-            logger.error(f"Failed to add dependency between cells {dependent_id} and {dependency_id}")
-            raise KeyError(f"Failed to add dependency between cells {dependent_id} and {dependency_id}")
+        # Await async repo call
+        success = await repository.add_dependency(str(dependent_id), str(dependency_id))
+        logger.info(f"Added dependency from {dependency_id} to {dependent_id} in notebook {notebook_id}")
         
-        logger.info(f"Added dependency: {dependent_id} depends on {dependency_id}")
-    
-    def remove_dependency(self, db: DbSession, notebook_id: UUID, dependent_id: UUID, dependency_id: UUID) -> None:
-        """Remove a dependency between cells"""
-        # Instantiate repository locally
+        # TODO: Update Notebook model state if needed
+        
+    async def remove_dependency(self, db: AsyncSession, notebook_id: UUID, dependent_id: UUID, dependency_id: UUID) -> None:
+        """Remove a dependency between two cells (async)"""
+        # Instantiate repository locally (Repository now expects AsyncSession)
         repository = NotebookRepository(db)
-        # Optional: Validate cells belong to the notebook?
-        success = repository.remove_dependency(str(dependent_id), str(dependency_id))
-        if not success:
-            logger.error(f"Failed to remove dependency between cells {dependent_id} and {dependency_id}")
-            raise KeyError(f"Failed to remove dependency between cells {dependent_id} and {dependency_id}")
+        # Await the async repository method
+        success = await repository.remove_dependency(str(dependent_id), str(dependency_id))
+        if success:
+            logger.info(f"Removed dependency from {dependency_id} to {dependent_id} in notebook {notebook_id}")
+        else:
+            # Repository logs if dependency wasn't found
+            logger.warning(f"Attempted to remove non-existent dependency from {dependency_id} to {dependent_id} in notebook {notebook_id}")
         
-        logger.info(f"Removed dependency: {dependent_id} no longer depends on {dependency_id}")
-    
-    def set_cell_result(self, db: DbSession, notebook_id: UUID, cell_id: UUID, result: Any, error: Optional[str] = None, 
+        # TODO: Update Notebook model state if needed (consider if this should be async too)
+
+    async def set_cell_result(self, db: AsyncSession, notebook_id: UUID, cell_id: UUID, result: Any, error: Optional[str] = None, 
                         execution_time: float = 0.0) -> None:
-        """Set the execution result for a cell"""
-        # Instantiate repository locally
-        repository = NotebookRepository(db)
-        # Optional: Validate cell belongs to the notebook?
-        db_cell = repository.set_cell_result(
-            str(cell_id),
-            content=result,
-            error=error,
-            execution_time=execution_time
-        )
+        """Set the result of a cell execution (async)"""
+        correlation_id = str(uuid4())
+        final_status = CellStatus.ERROR if error else CellStatus.SUCCESS
+        log_extra = {
+            'correlation_id': correlation_id, 
+            'notebook_id': str(notebook_id), 
+            'cell_id': str(cell_id), 
+            'final_status': final_status.value,
+            'has_error': error is not None,
+            'execution_time_sec': execution_time
+        }
+        logger.info(f"Setting result for cell {cell_id}", extra=log_extra)
         
-        if not db_cell:
-            logger.error(f"Cell {cell_id} not found")
-            raise KeyError(f"Cell {cell_id} not found")
-        
-        logger.info(f"Set result for cell {cell_id}")
-    
-    def mark_dependents_stale(self, db: DbSession, notebook_id: UUID, cell_id: UUID) -> Set[UUID]:
-        """Mark all cells that depend on this cell as stale"""
-        # Instantiate repository locally
-        repository = NotebookRepository(db)
-        # Optional: Validate cell belongs to the notebook?
-        # Get dependents from database
-        db_dependents = repository.get_dependents(str(cell_id))
-        if not db_dependents:
-            return set()
-        
-        # Mark each dependent as stale
-        stale_cells = set()
-        for db_dependent in db_dependents:
-            dependent_id = repository._ensure_str_id(db_dependent.id) # Use repo helper
-            if dependent_id:
-                # Use the same repository instance for marking stale
-                repository.mark_cell_stale(dependent_id) 
-                stale_cells.add(UUID(dependent_id))
-        
-        logger.info(f"Marked {len(stale_cells)} dependents of cell {cell_id} as stale")
-        return stale_cells
+        try:
+            repository = NotebookRepository(db)
+            
+            # Prepare updates dictionary
+            updates = {
+                'status': final_status.value,
+                'result_content': result, # Assuming result can be serialized
+                'result_error': error,
+                'result_execution_time': execution_time,
+                # Update timestamp automatically handled by repo or model?
+                # 'updated_at': datetime.now(timezone.utc) # Let repo handle this if possible
+            }
+            
+            # Await async repo call
+            updated_cell_data = await repository.update_cell(
+                cell_id=str(cell_id),
+                updates=updates
+            )
+            
+            if not updated_cell_data:
+                 logger.error(f"Cell {cell_id} not found when trying to set result", extra=log_extra)
+                 raise KeyError(f"Cell {cell_id} not found")
+                 
+            updated_cell_model = self._db_cell_to_model(updated_cell_data)
+            logger.info(f"Successfully set result for cell {cell_id}", extra=log_extra)
+            
+             # Notify clients about the change
+            if self.notify_callback:
+                await self.notify_callback(notebook_id, updated_cell_model.model_dump())
+                logger.debug("WebSocket notification sent for cell result update", extra=log_extra)
+            else:
+                 logger.warning("notify_callback not set. WebSocket update skipped.", extra=log_extra)
+                 
+        except KeyError as e:
+            logger.error(f"Resource not found when setting cell result: {e}", extra=log_extra)
+            raise
+        except Exception as e:
+            logger.error(f"Error setting cell result for {cell_id}: {e}", extra=log_extra, exc_info=True)
+            # Attempt to mark the cell as error in DB if result setting failed mid-way
+            try:
+                error_update = {
+                    'status': CellStatus.ERROR.value,
+                    'result_error': f"Internal error setting result: {str(e)}"
+                }
+                await repository.update_cell(cell_id=str(cell_id), updates=error_update)
+            except Exception as inner_e:
+                 logger.critical(f"Failed to mark cell {cell_id} as ERROR after outer error: {inner_e}", extra=log_extra)
+            raise # Re-raise original exception
 
-    def reorder_cells(self, db: DbSession, notebook_id: UUID, cell_order: List[UUID]) -> None:
-        """Reorder cells in a notebook"""
-        # Instantiate repository locally
-        repository = NotebookRepository(db)
-        success = repository.reorder_cells(str(notebook_id), [str(c_id) for c_id in cell_order])
-        if not success:
-             logger.error(f"Failed to reorder cells in notebook {notebook_id}")
-             raise ValueError(f"Failed to reorder cells in notebook {notebook_id}") # Or specific error
+    async def mark_dependents_stale(self, db: AsyncSession, notebook_id: UUID, cell_id: UUID) -> Set[UUID]:
+        """Mark all direct and indirect dependents of a cell as stale (async)"""
+        correlation_id = str(uuid4())
+        log_extra = {'correlation_id': correlation_id, 'notebook_id': str(notebook_id), 'cell_id': str(cell_id)}
+        logger.info(f"Marking dependents of cell {cell_id} as stale", extra=log_extra)
+        
+        try:
+            repository = NotebookRepository(db)
+            # Await async manager call
+            notebook = await self.get_notebook(db, notebook_id) 
+            dependency_graph = notebook.dependency_graph
+            
+            if not dependency_graph:
+                logger.warning("No dependency graph found for notebook {notebook_id}. Cannot mark stale.")
+                return set()
+            
+            # Get all dependents (direct and indirect)
+            all_dependents = dependency_graph.get_all_dependents(cell_id)
+            
+            stale_ids = set()
+            if all_dependents:
+                logger.info(f"Found dependents to mark stale: {all_dependents}", extra=log_extra)
+                for dep_id in all_dependents:
+                    try:
+                        # Await async repo call
+                        current_dep_cell = await repository.get_cell(str(dep_id))
+                        current_status = getattr(current_dep_cell, 'status', None)
+                        if current_dep_cell is not None and current_status != CellStatus.STALE.value:
+                            # Await async repo call
+                            await repository.update_cell(
+                                cell_id=str(dep_id),
+                                updates={'status': CellStatus.STALE.value}
+                            )
+                            stale_ids.add(dep_id)
+                            logger.debug(f"Marked dependent cell {dep_id} as stale", extra=log_extra)
+                        elif current_dep_cell is None: 
+                             logger.warning(f"Dependent cell {dep_id} not found during stale marking.", extra=log_extra)
+                             
+                    except Exception as e:
+                        logger.error(f"Error marking dependent cell {dep_id} as stale: {e}", extra=log_extra, exc_info=True)
+                        # Continue trying to mark others
+                        
+            logger.info(f"Finished marking dependents. Marked {len(stale_ids)} cells as stale.", extra=log_extra)
+            return stale_ids
+            
+        except KeyError:
+             logger.warning(f"Notebook {notebook_id} not found when trying to mark dependents stale.", extra=log_extra)
+             return set()
+        except Exception as e:
+            logger.error(f"Error marking dependents stale for cell {cell_id}: {e}", extra=log_extra, exc_info=True)
+            return set() # Return empty set on error
 
-        logger.info(f"Reordered cells in notebook {notebook_id}")
-    
-    # Helper methods _db_notebook_to_model and _db_cell_to_model do not need DB access directly
-    # They operate on data already fetched from the DB
+    async def reorder_cells(self, db: AsyncSession, notebook_id: UUID, cell_order: List[UUID]) -> None:
+        """Reorder cells in a notebook (async)"""
+        repository = NotebookRepository(db)
+        str_cell_order = [str(cell_id) for cell_id in cell_order]
+        # Await async repo call (if/when implemented)
+        # success = await repository.reorder_cells(str(notebook_id), str_cell_order)
+        logger.warning(f"Skipping repository.reorder_cells for notebook {notebook_id} (Async version). Cell order might not be persisted.")
+        logger.info(f"Reordered cells for notebook {notebook_id} (Persistence skipped)")
+        
+        # Notify clients (might need a specific 'reorder' type)
+        if self.notify_callback:
+             # Send the new order, or perhaps the whole notebook state?
+             await self.notify_callback(notebook_id, {"type": "cell_reorder", "order": str_cell_order})
+
     def _db_notebook_to_model(self, db_notebook) -> Notebook:
-        notebook_data = db_notebook.to_dict()
+        """Convert DB Notebook object to Pydantic Notebook model"""
+        # Fetch cells associated with the notebook
+        db_cells = db_notebook.cells # Access the relationship
         
-        # Initialize with an empty cells dictionary
-        # The frontend will fetch cell details via the /cells endpoint
-        cells = {}
+        # Convert cells first (includes fetching/setting dependencies)
+        cells_dict = {str(db_cell.id): self._db_cell_to_model(db_cell) for db_cell in db_cells}
+        
+        # Reconstruct cell_order from position attribute (if necessary)
+        # Or rely on a separate cell_order field in the DB Notebook model
+        # Assuming db_notebook has a cell_order attribute (e.g., List[str])
+        cell_order_uuids = []
+        if hasattr(db_notebook, 'cell_order') and db_notebook.cell_order:
+            try:
+                cell_order_uuids = [UUID(cell_id_str) for cell_id_str in db_notebook.cell_order]
+            except (ValueError, TypeError) as e:
+                 logger.error(f"Error parsing cell_order for notebook {db_notebook.id}: {e}. Falling back to position sort.", exc_info=True)
+                 # Fallback to sorting by position if order is invalid or missing
+                 sorted_cells = sorted(db_cells, key=lambda c: c.position or 0)
+                 cell_order_uuids = [UUID(c.id) for c in sorted_cells]
+        else:
+             # Fallback if no cell_order field exists
+             sorted_cells = sorted(db_cells, key=lambda c: c.position or 0)
+             cell_order_uuids = [UUID(c.id) for c in sorted_cells]
+             
+        # *** Correctly build dependency graph ***
+        dependency_graph = DependencyGraph() # Initialize empty graph
+        for cell_model in cells_dict.values():
+            dependency_graph.add_cell(cell_model) # Add cell first
+            for dep_id in cell_model.dependencies:
+                # Ensure the dependency cell also exists in the dict before adding edge
+                if str(dep_id) in cells_dict:
+                    dependency_graph.add_dependency(cell_model.id, dep_id)
+                else:
+                    logger.warning(f"Dependency {dep_id} for cell {cell_model.id} not found in current notebook cells.")
 
-        # Retrieve cell order directly from the notebook_data (which gets it from sorted cells)
-        cell_order_ids = notebook_data.get("cell_order", [])
-        
-        # Convert dependency graph lists to sets
-        dependents_set = {UUID(k): set(UUID(d) for d in v) for k, v in notebook_data["dependency_graph"]["dependents"].items()}
-        dependencies_set = {UUID(k): set(UUID(d) for d in v) for k, v in notebook_data["dependency_graph"]["dependencies"].items()}
-        
         return Notebook(
-            id=UUID(notebook_data["id"]),
+            id=UUID(db_notebook.id),
+            created_at=db_notebook.created_at,
+            updated_at=db_notebook.updated_at,
             metadata=NotebookMetadata(
-                title=notebook_data["metadata"]["title"],
-                description=notebook_data["metadata"]["description"],
-                created_by=notebook_data["metadata"]["created_by"],
-                created_at=datetime.fromisoformat(notebook_data["metadata"]["created_at"]) if notebook_data["metadata"]["created_at"] else datetime.now(timezone.utc),
-                updated_at=datetime.fromisoformat(notebook_data["metadata"]["updated_at"]) if notebook_data["metadata"]["updated_at"] else datetime.now(timezone.utc),
-                tags=notebook_data["metadata"]["tags"]
+                title=db_notebook.title,
+                description=db_notebook.description or "",
+                created_by=db_notebook.created_by,
+                tags=db_notebook.tags or []
             ),
-             cells=cells, # Pass the empty dictionary
-             cell_order=[UUID(cell_id) for cell_id in cell_order_ids],
-             # Ensure dependency graph is also correctly converted
-             dependency_graph=DependencyGraph(
-                 dependents=dependents_set, # Use the set version
-                 dependencies=dependencies_set # Use the set version
-             )
+            cells=cells_dict,
+            cell_order=cell_order_uuids, # Use the previously determined order
+            dependency_graph=dependency_graph # Use the built graph
         )
 
     def _db_cell_to_model(self, db_cell) -> Cell:
-        cell_dict = db_cell.to_dict()
-        
-        result = None
-        if cell_dict["result"] is not None:
-            result = CellResult(
-                content=cell_dict["result"]["content"],
-                error=cell_dict["result"]["error"],
-                execution_time=cell_dict["result"]["execution_time"],
-                timestamp=datetime.fromisoformat(cell_dict["result"]["timestamp"]) if cell_dict["result"]["timestamp"] else datetime.now(timezone.utc)
-            )
-        
-        cell = Cell(
-            id=UUID(cell_dict["id"]),
-            type=CellType(cell_dict["type"]),
-            content=cell_dict["content"],
-            result=result,
-            status=CellStatus(cell_dict["status"]),
-            created_at=datetime.fromisoformat(cell_dict["created_at"]) if cell_dict["created_at"] else datetime.now(timezone.utc),
-            updated_at=datetime.fromisoformat(cell_dict["updated_at"]) if cell_dict["updated_at"] else datetime.now(timezone.utc),
-            connection_id=cell_dict["connection_id"],
-            metadata=cell_dict["metadata"],
-            settings=cell_dict["settings"],
-            # Add new tool fields from dict (assuming they exist in db_cell.to_dict() output)
-            tool_call_id=cell_dict.get("tool_call_id"), 
-            tool_name=cell_dict.get("tool_name"),
-            tool_arguments=cell_dict.get("tool_arguments")
+        """Convert DB Cell object to Pydantic Cell model"""
+        # Handle potential string representation of UUID for tool_call_id
+        tool_call_id_uuid = None
+        if db_cell.tool_call_id:
+            try:
+                tool_call_id_uuid = UUID(db_cell.tool_call_id)
+            except ValueError:
+                 logger.warning(f"Invalid UUID format for tool_call_id: {db_cell.tool_call_id} in cell {db_cell.id}")
+                 # Assign a new one or handle as appropriate
+                 tool_call_id_uuid = uuid4() # Example: assign a new one
+        else:
+             # If null/empty in DB, generate a new one (cells should have this)
+             logger.warning(f"Missing tool_call_id for cell {db_cell.id}, generating a new one.")
+             tool_call_id_uuid = uuid4()
+             
+        # Get dependencies (assuming db_cell has a 'dependencies' relationship)
+        dependencies_uuids = set()
+        if hasattr(db_cell, 'dependencies') and db_cell.dependencies:
+            dependencies_uuids = {UUID(dep.id) for dep in db_cell.dependencies}
+        else:
+            # If relationship not loaded or empty, log a warning maybe
+            # logger.debug(f"No dependencies found or loaded for cell {db_cell.id}")
+            pass
+
+        # Construct CellResult if result data exists
+        result_model = None
+        if db_cell.status in [CellStatus.SUCCESS.value, CellStatus.ERROR.value]:
+            # Only create result object if there's content or an error
+            if db_cell.result_content is not None or db_cell.result_error is not None:
+                 result_model = CellResult(
+                    content=db_cell.result_content,
+                    error=db_cell.result_error,
+                    execution_time=db_cell.result_execution_time or 0.0,
+                    # Use cell's updated_at as a proxy for result timestamp if needed
+                    timestamp=db_cell.updated_at or datetime.now(timezone.utc) 
+                 )
+
+        return Cell(
+            id=UUID(db_cell.id),
+            notebook_id=UUID(db_cell.notebook_id),
+            type=CellType(db_cell.type),
+            content=db_cell.content,
+            tool_call_id=tool_call_id_uuid, 
+            tool_name=db_cell.tool_name,
+            tool_arguments=db_cell.tool_arguments,
+            connection_id=db_cell.connection_id,
+            status=CellStatus(db_cell.status or CellStatus.IDLE.value), # Default to IDLE if status is null
+            dependencies=dependencies_uuids, # Ensure this is set
+            result=result_model,
+            metadata=db_cell.cell_metadata or {},
+            settings=db_cell.settings or {},
+            created_at=db_cell.created_at,
+            updated_at=db_cell.updated_at,
+            position=db_cell.position
         )
-        
-        # Add dependencies and dependents
-        for dep_id in cell_dict["dependencies"]:
-            cell.dependencies.add(UUID(dep_id))
-        
-        for dep_id in cell_dict["dependents"]:
-            cell.dependents.add(UUID(dep_id))
-            
-        # tool_call_ids might need loading here if not handled by relationship/to_dict
-        
-        return cell

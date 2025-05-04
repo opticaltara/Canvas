@@ -219,7 +219,8 @@ export const useCanvasStore = create<NotebookState>()(
 
           if (index >= 0) {
             console.log("🔧 Updating existing cell in store:", cellData.id)
-            updatedCells[index] = { ...cellData }
+            // Merge incoming data with existing cell data
+            updatedCells[index] = { ...updatedCells[index], ...cellData }; 
           } else {
             console.log("🔧 Adding new cell to store:", cellData.id, cellData.type)
             // Add animation flag for new cells

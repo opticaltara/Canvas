@@ -32,7 +32,7 @@ const SummarizationCell: React.FC<SummarizationCellProps> = ({ cell, onDelete })
   }
 
   return (
-    <Card className="mb-4 border-l-4 border-purple-400 bg-purple-50/30">
+    <Card className="mb-4 border-l-4 border-purple-400 bg-purple-50/30 mx-8">
       <CardHeader className="py-2 px-4 flex flex-row justify-between items-center">
         <div className="flex items-center space-x-2">
           <CardTitle className="text-sm font-medium text-purple-800">AI Summary</CardTitle>

@@ -162,13 +162,16 @@ class ConnectionManager:
                             "id": conn_dict["id"],
                             "name": conn_dict["name"],
                             "type": conn_dict["type"],
-                            "is_default": conn_dict["is_default"],
+                            # Check against the cached default connections
+                            "is_default": self.default_connections.get(conn_dict["type"]) == conn_dict["id"],
                             "config": redacted_config
                         })
                     except Exception as redact_err:
                          logger.error(f"Error redacting config for connection {conn.id} ({conn.type}): {redact_err}", exc_info=True)
+                         # Also use the cache logic here for consistency
                          response_list.append({
-                             "id": conn.id, "name": conn.name, "type": conn.type, "is_default": conn.is_default,
+                             "id": conn.id, "name": conn.name, "type": conn.type, 
+                             "is_default": self.default_connections.get(str(conn.type)) == conn.id,
                              "config": {"error": "Failed to redact configuration"}
                          })
 

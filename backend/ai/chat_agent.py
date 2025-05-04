@@ -265,8 +265,9 @@ class ChatAgentService:
         # Setup Investigation Agent (ai_agent)
         chat_agent_logger.info(f"Initializing AIAgent for notebook {self.notebook_id} with sources: {self._available_data_source_types}")
         self.ai_agent = AIAgent(
+            notebook_manager=self.notebook_manager,
             notebook_id=self.notebook_id,
-            available_data_sources=self._available_data_source_types or [] # Pass the fetched list
+            available_data_sources=self._available_data_source_types or []
         )
 
         chat_agent_logger.info(f"ChatAgentService for notebook {self.notebook_id} initialized successfully.")

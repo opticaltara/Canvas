@@ -2,15 +2,20 @@ import asyncio
 import json
 import os
 import time
-from typing import Dict, Set
+from typing import Dict, Set, Tuple
 from uuid import UUID, uuid4
 from pathlib import Path
 from contextlib import asynccontextmanager
+import logging
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 import redis.asyncio as redis
+from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.responses import Response, FileResponse
 
 from backend.config import get_settings
 from backend.core.execution import CellExecutor, ExecutionQueue
@@ -23,6 +28,10 @@ from backend.services.notebook_manager import NotebookManager
 from backend.db.chat_db import ChatDatabase
 from backend.core.logging import setup_logging, get_logger
 from backend.services.connection_handlers.registry import get_all_handler_types
+from backend.websockets import WebSocketManager, get_ws_manager
+from backend.db.database import init_db
+from backend.db.models import Base
+from backend.routes import notebooks, connections
 
 # Initialize loggers
 app_loggers = setup_logging()
@@ -38,18 +47,19 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Startup and shutdown event handler
+    Manage application startup and shutdown events.
+    - Initialize database connection
+    - Initialize services with correct dependencies
+    - Start background tasks (like execution queue)
+    - Clean up resources on shutdown
     """
-    app_logger.info("Application startup initiated")
+    app_logger.info(f"Application starting up in environment: {settings.environment}")
     
-    # Initialize shared state
-    app.state.chat_agents = {} # Cache for active ChatAgentService instances
-    app.state.redis = None # Initialize redis state
-    app.state.chat_db = None # Initialize chat_db state
-    app.state.notebook_manager = NotebookManager() # Initialize notebook manager
-    app.state.connection_manager = ConnectionManager() # Initialize connection manager
-    app.state.execution_queue = ExecutionQueue() # Initialize execution queue
-    app_logger.info("Initialized shared application state attributes.")
+    # --- Clear initial incorrect state setup ---
+    app.state.chat_agents = {} 
+    app.state.redis = None 
+    app.state.chat_db = None 
+    app_logger.info("Initialized basic shared application state attributes.")
     
     # Import connection handlers to trigger registration
     try:
@@ -67,28 +77,26 @@ async def lifespan(app: FastAPI):
     data_dir.mkdir(exist_ok=True)
     app_logger.info(f"Ensured data directory exists at {data_dir.absolute()}")
     
-    # Initialize database
+    # --- Initialize database ---
     app_logger.info("Initializing database tables")
     try:
-        from backend.db.database import init_db
         await init_db()
-        app_logger.info("Database tables initialized successfully")
+        app_logger.info("Database initialized (tables checked/created).")
     except Exception as e:
-        app_logger.error(f"Failed to initialize database tables: {str(e)}", exc_info=True)
-        raise
+        app_logger.error(f"Database initialization failed: {e}", exc_info=True)
+        raise 
     
-    # Initialize chat database
+    # --- Initialize chat database ---
     app_logger.info("Initializing chat database connection")
     try:
-        # Create the chat database connection
-        chat_db_ctx = ChatDatabase.connect(data_dir)
+        chat_db_ctx = ChatDatabase.connect(Path("data")) # Use Path object
         app.state.chat_db = await chat_db_ctx.__aenter__()
         app_logger.info("Chat database initialized successfully")
     except Exception as e:
         app_logger.error(f"Failed to initialize chat database: {str(e)}", exc_info=True)
         raise
     
-    # Initialize Redis client
+    # --- Initialize Redis client ---
     app_logger.info("Initializing Redis connection")
     try:
         redis_client = await redis.from_url(
@@ -97,65 +105,101 @@ async def lifespan(app: FastAPI):
             encoding="utf-8",
             decode_responses=True
         )
-        await redis_client.ping() # Verify connection
+        await redis_client.ping() 
         app.state.redis = redis_client
         app_logger.info("Redis connection pool created and attached to app state.")
     except redis.RedisError as e:
         app_logger.error(f"Failed to initialize Redis connection: {str(e)}", exc_info=True)
-        # Depending on requirements, you might want to raise here to prevent startup
-        app.state.redis = None # Ensure state is None if failed
-        # raise # Uncomment to prevent startup if Redis is critical
-    except Exception as e: # Catch other potential errors
+        app.state.redis = None
+    except Exception as e: 
         app_logger.error(f"An unexpected error occurred during Redis initialization: {str(e)}", exc_info=True)
         app.state.redis = None
-        # raise # Uncomment to prevent startup
+
+    # --- Correctly Initialize Core Services (Singletons in app.state) ---
+    connection_manager = ConnectionManager()
+    app.state.connection_manager = connection_manager
+    app_logger.info("ConnectionManager initialized.")
+
+    execution_queue = ExecutionQueue()
+    app.state.execution_queue = execution_queue # Assign BEFORE using it
+    app_logger.info("ExecutionQueue initialized.")
     
-    # Pass managers to the executor if needed (or configure executor differently)
-    # Example: app.state.execution_queue.set_managers(app.state.notebook_manager, app.state.connection_manager)
+    cell_executor = CellExecutor(notebook_manager=None, connection_manager=connection_manager)
+    app.state.cell_executor = cell_executor
+    app_logger.info("CellExecutor initialized (without NotebookManager initially).")
+
+    notebook_manager = NotebookManager(
+        execution_queue=execution_queue, 
+        cell_executor=cell_executor
+    )
+    app.state.notebook_manager = notebook_manager
+    app_logger.info("NotebookManager initialized and linked with ExecutionQueue and CellExecutor.")
     
-    # Create task for cell execution
-    app_logger.info("Starting cell execution worker")
+    cell_executor.notebook_manager = notebook_manager
+    app_logger.info("CellExecutor updated with NotebookManager reference.")
+    
+    app_logger.info("Application services initialization completed")
+    
+    # --- Initialize WebSocket Manager & Set Callback ---
+    ws_manager = WebSocketManager()
+    app.state.ws_manager = ws_manager
+    app_logger.info("WebSocketManager initialized.")
+
+    async def notify_clients(notebook_id: UUID, cell_data: Dict):
+        app_logger.debug(f"Notify callback triggered for notebook {notebook_id}, cell {cell_data.get('id')}")
+        if hasattr(app.state, 'ws_manager') and app.state.ws_manager: 
+            await app.state.ws_manager.broadcast(notebook_id, {"type": "cell_update", "data": cell_data})
+        else:
+            app_logger.error("WebSocketManager not found in app.state during notify call")
+
+    if hasattr(app.state, 'notebook_manager') and app.state.notebook_manager:
+        app.state.notebook_manager.set_notify_callback(notify_clients)
+        app_logger.info("Set notify_callback for NotebookManager.")
+    else:
+        app_logger.error("NotebookManager not found in app.state when setting notify callback.")
+
+    # --- Start Execution Queue Processing (AFTER setup) --- 
+    app_logger.info("Starting ExecutionQueue processing.")
     try:
-        # Pass the queue from app.state to the task
-        app.state.execution_task = asyncio.create_task(
-            app.state.execution_queue.start(),
-            name="cell_execution_worker"
-        )
-        app_logger.info("Cell execution worker started")
+        # Use the queue instance already assigned to app.state
+        await app.state.execution_queue.start() 
+        app_logger.info("ExecutionQueue processing started successfully.")
     except Exception as e:
-        app_logger.error(f"Failed to start cell execution worker: {str(e)}", exc_info=True)
-        raise
-    
-    app_logger.info("Application startup completed")
-    
+        app_logger.error(f"Failed to start ExecutionQueue processing: {e}", exc_info=True)
+        raise 
+
+    # --- Initialize Chat Agents Cache ---
+    app.state.chat_agents = {} 
+    app_logger.info("Chat agents cache initialized.")
+
+    app_logger.info("Application startup fully completed")
+
     yield
     
-    # Shutdown
+    # --- Shutdown ---
     app_logger.info("Application shutdown initiated")
     
-    # Cancel the cell execution task
-    if hasattr(app.state, "execution_task"):
-        app_logger.info("Cancelling cell execution worker")
+    # --- Stop Execution Queue --- 
+    # Remove explicit task cancellation
+    if hasattr(app.state, 'execution_queue') and app.state.execution_queue:
+        app_logger.info("Stopping execution queue...")
         try:
-            app.state.execution_task.cancel()
-            try:
-                await app.state.execution_task
-            except asyncio.CancelledError:
-                pass
-            app_logger.info("Cell execution worker cancelled")
+             await app.state.execution_queue.stop()
+             app_logger.info("Execution queue stopped.")
         except Exception as e:
-            app_logger.error(f"Error cancelling cell execution worker: {str(e)}", exc_info=True)
+             app_logger.error(f"Error stopping execution queue: {e}", exc_info=True)
     
-    # Close chat database connection
-    if hasattr(app.state, "chat_db"):
+    # --- Close chat database connection ---
+    if hasattr(app.state, "chat_db") and app.state.chat_db:
         app_logger.info("Closing chat database connection")
         try:
-            await app.state.chat_db._asyncify(app.state.chat_db.con.close)
+            # Assuming _asyncify exists or adapt if needed
+            await app.state.chat_db._asyncify(app.state.chat_db.con.close) 
             app_logger.info("Chat database connection closed")
         except Exception as e:
             app_logger.error(f"Error closing chat database connection: {str(e)}", exc_info=True)
     
-    # Close Redis connection
+    # --- Close Redis connection ---
     if hasattr(app.state, "redis") and app.state.redis:
         app_logger.info("Closing Redis connection pool")
         try:
@@ -164,7 +208,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             app_logger.error(f"Error closing Redis connection pool: {str(e)}", exc_info=True)
     
-    # Clear agent cache on shutdown (optional, helps release resources)
+    # --- Clear agent cache ---
     if hasattr(app.state, "chat_agents"):
          app_logger.info(f"Clearing chat agent cache ({len(app.state.chat_agents)} instances).")
          app.state.chat_agents.clear()
@@ -249,8 +293,7 @@ async def log_requests(request: Request, call_next):
         )
         raise
 
-# Initialize execution queue
-execution_queue = ExecutionQueue()
+# Remove old global queue init: # execution_queue = ExecutionQueue()
 
 @app.get("/api/health")
 def health_check():

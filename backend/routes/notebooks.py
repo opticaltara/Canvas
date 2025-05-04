@@ -5,15 +5,17 @@ Notebook API Endpoints
 import logging
 from typing import Dict, List, Optional
 from uuid import UUID
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from backend.core.cell import CellType, CellStatus
 from backend.core.types import ToolCallID
 from backend.services.notebook_manager import NotebookManager, get_notebook_manager
-from backend.db.database import get_db
+from backend.db.database import get_db, get_async_db_session
 from backend.websockets import WebSocketManager, get_ws_manager
 from backend.services.connection_manager import ConnectionManager, get_connection_manager
 from backend.db.repositories import NotebookRepository
@@ -76,7 +78,7 @@ class CellReorder(BaseModel):
 @router.get("/")
 async def list_notebooks(
     notebook_manager: NotebookManager = Depends(get_notebook_manager),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db_session)
 ) -> List[Dict]:
     """
     Get a list of all notebooks
@@ -85,7 +87,7 @@ async def list_notebooks(
         List of notebook metadata
     """
     route_logger.info("Listing all notebooks")
-    notebooks = notebook_manager.list_notebooks(db)
+    notebooks = await notebook_manager.list_notebooks(db)
     route_logger.info(f"Found {len(notebooks)} notebooks")
     return [nb.model_dump() for nb in notebooks]
 
@@ -94,7 +96,7 @@ async def list_notebooks(
 async def create_notebook(
     notebook_data: NotebookCreate,
     notebook_manager: NotebookManager = Depends(get_notebook_manager),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db_session)
 ) -> Dict:
     """
     Create a new notebook
@@ -107,7 +109,7 @@ async def create_notebook(
     """
     route_logger.info(f"Creating new notebook with title: {notebook_data.title}")
     try:
-        notebook = notebook_manager.create_notebook(
+        notebook = await notebook_manager.create_notebook(
             db=db,
             name=notebook_data.title,
             description=notebook_data.description,
@@ -124,7 +126,7 @@ async def create_notebook(
 async def get_notebook(
     notebook_id: UUID,
     notebook_manager: NotebookManager = Depends(get_notebook_manager),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db_session)
 ) -> Dict:
     """
     Get a notebook by ID
@@ -137,7 +139,7 @@ async def get_notebook(
     """
     route_logger.info(f"Fetching notebook with ID: {notebook_id}")
     try:
-        notebook = notebook_manager.get_notebook(db, notebook_id)
+        notebook = await notebook_manager.get_notebook(db, notebook_id)
         route_logger.info(f"Successfully retrieved notebook: {notebook_id}")
         return notebook.model_dump()
     except KeyError:
@@ -153,7 +155,7 @@ async def update_notebook(
     notebook_id: UUID,
     notebook_data: NotebookUpdate,
     notebook_manager: NotebookManager = Depends(get_notebook_manager),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db_session)
 ) -> Dict:
     """
     Update a notebook
@@ -167,7 +169,7 @@ async def update_notebook(
     """
     route_logger.info(f"Updating notebook: {notebook_id}")
     try:
-        notebook = notebook_manager.get_notebook(db, notebook_id)
+        notebook = await notebook_manager.get_notebook(db, notebook_id)
         
         # Update fields if provided
         if notebook_data.title is not None:
@@ -185,7 +187,7 @@ async def update_notebook(
                     setattr(notebook.metadata, key, value)
         
         # Save the notebook
-        notebook_manager.save_notebook(db=db, notebook_id=notebook_id, notebook=notebook)
+        await notebook_manager.save_notebook(db=db, notebook_id=notebook_id, notebook=notebook)
         route_logger.info(f"Successfully updated notebook: {notebook_id}")
         
         return notebook.model_dump()
@@ -201,7 +203,7 @@ async def update_notebook(
 async def delete_notebook(
     notebook_id: UUID,
     notebook_manager: NotebookManager = Depends(get_notebook_manager),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db_session)
 ) -> None:
     """
     Delete a notebook
@@ -211,7 +213,7 @@ async def delete_notebook(
     """
     route_logger.info(f"Deleting notebook: {notebook_id}")
     try:
-        notebook_manager.delete_notebook(db, notebook_id)
+        await notebook_manager.delete_notebook(db, notebook_id)
         route_logger.info(f"Successfully deleted notebook: {notebook_id}")
     except KeyError:
         route_logger.error(f"Notebook not found for deletion: {notebook_id}")
@@ -228,7 +230,7 @@ async def create_cell(
     tool_call_id: ToolCallID,
     notebook_manager: NotebookManager = Depends(get_notebook_manager),
     connection_manager: ConnectionManager = Depends(get_connection_manager),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db_session)
 ) -> Dict:
     """
     Create a new cell in a notebook
@@ -259,7 +261,7 @@ async def create_cell(
                 pass 
     
     try:
-        cell = notebook_manager.create_cell(
+        cell = await notebook_manager.create_cell(
             db=db,
             notebook_id=notebook_id,
             cell_type=cell_data.cell_type,
@@ -272,9 +274,9 @@ async def create_cell(
         )
         
         # Fetch the notebook state after cell creation to pass to save_notebook
-        notebook = notebook_manager.get_notebook(db, notebook_id)
+        notebook = await notebook_manager.get_notebook(db, notebook_id)
         # Save the notebook
-        notebook_manager.save_notebook(db=db, notebook_id=notebook_id, notebook=notebook)
+        await notebook_manager.save_notebook(db=db, notebook_id=notebook_id, notebook=notebook)
         route_logger.info(f"Created cell {cell.id} in notebook {notebook_id}")
         
         return cell.model_dump()
@@ -292,9 +294,7 @@ async def create_cell(
 @router.get("/{notebook_id}/cells", response_model=List[Dict])
 async def list_cells(
     notebook_id: UUID,
-    # Remove notebook_manager dependency as we'll use the repository directly
-    # notebook_manager: NotebookManager = Depends(get_notebook_manager),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db_session)
 ) -> List[Dict]:
     """
     List all cells in a notebook
@@ -307,22 +307,55 @@ async def list_cells(
     """
     route_logger.info(f"Listing cells for notebook: {notebook_id}")
     try:
-        # Instantiate repository directly
         repository = NotebookRepository(db)
         
-        # Use the new repository method to get cells
-        db_cells = repository.list_cells_by_notebook(str(notebook_id))
+        # Await the async repository method
+        db_cells = await repository.list_cells_by_notebook(str(notebook_id))
         
-        # Convert db cell objects to dictionaries
-        # Assuming Cell model has a to_dict() method
-        cells_data = [cell.to_dict() for cell in db_cells]
-        
+        # Manually convert Cell model attributes to dictionary
+        # Assuming necessary attributes exist on the SQLAlchemy Cell model
+        cells_data = []
+        for cell in db_cells:
+            # Corrected: Explicit None checks for defaulting
+            result_dict = None
+            if cell.result_content is not None or cell.result_error is not None:
+                 result_timestamp = cell.result_timestamp if cell.result_timestamp is not None else cell.updated_at
+                 result_timestamp = result_timestamp if result_timestamp is not None else datetime.now(timezone.utc)
+                 result_dict = {
+                      "content": cell.result_content,
+                      "error": cell.result_error,
+                      "execution_time": cell.result_execution_time if cell.result_execution_time is not None else 0.0,
+                      "timestamp": result_timestamp.isoformat()
+                 }
+
+            # Use getattr for relationship access just in case it's not loaded
+            dependencies_list = getattr(cell, 'dependencies', [])
+            dependency_ids = [str(dep.id) for dep in dependencies_list if hasattr(dep, 'id')]
+            
+            created_at_ts = cell.created_at if cell.created_at is not None else datetime.now(timezone.utc)
+            updated_at_ts = cell.updated_at if cell.updated_at is not None else datetime.now(timezone.utc)
+
+            cells_data.append({
+                "id": str(cell.id),
+                "notebook_id": str(cell.notebook_id),
+                "type": cell.type,
+                "content": cell.content if cell.content is not None else "",
+                "tool_call_id": str(cell.tool_call_id) if cell.tool_call_id is not None else None,
+                "tool_name": cell.tool_name,
+                "tool_arguments": cell.tool_arguments if cell.tool_arguments is not None else {},
+                "connection_id": cell.connection_id,
+                "status": cell.status if cell.status is not None else CellStatus.IDLE.value,
+                "dependencies": dependency_ids,
+                "result": result_dict,
+                "metadata": cell.cell_metadata if cell.cell_metadata is not None else {},
+                "settings": cell.settings if cell.settings is not None else {},
+                "created_at": created_at_ts.isoformat(),
+                "updated_at": updated_at_ts.isoformat(),
+                "position": cell.position
+            })
+            
         route_logger.info(f"Found {len(cells_data)} cells in notebook {notebook_id}")
         return cells_data
-    # Update the exception handling if necessary (KeyError might not be raised here anymore)
-    # except KeyError:
-    #     route_logger.error(f"Notebook not found: {notebook_id}")
-    #     raise HTTPException(status_code=404, detail=f"Notebook {notebook_id} not found")
     except Exception as e:
         route_logger.error(f"Error listing cells for notebook {notebook_id}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to list cells")
@@ -333,7 +366,7 @@ async def get_cell(
     notebook_id: UUID,
     cell_id: UUID,
     notebook_manager: NotebookManager = Depends(get_notebook_manager),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db_session)
 ) -> Dict:
     """
     Get a specific cell from a notebook
@@ -347,7 +380,7 @@ async def get_cell(
     """
     route_logger.info(f"Fetching cell {cell_id} from notebook {notebook_id}")
     try:
-        cell = notebook_manager.get_cell(db, notebook_id, cell_id)
+        cell = await notebook_manager.get_cell(db, notebook_id, cell_id)
         route_logger.info(f"Cell fetched successfully: {cell_id}")
         return cell.model_dump()
     except KeyError:
@@ -364,7 +397,7 @@ async def update_cell(
     cell_id: UUID,
     cell_data: CellUpdate,
     notebook_manager: NotebookManager = Depends(get_notebook_manager),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db_session)
 ) -> Dict:
     """
     Update a cell in a notebook
@@ -380,18 +413,18 @@ async def update_cell(
     route_logger.info(f"Updating cell {cell_id} in notebook {notebook_id}")
     updated_cell = None
     try:
-        cell = notebook_manager.get_cell(db, notebook_id, cell_id)
+        cell = await notebook_manager.get_cell(db, notebook_id, cell_id)
 
         route_logger.info(f"Cell: {cell}")
         
         # Update content if provided
         if cell_data.content is not None:
             route_logger.info(f"Updating content for cell {cell_id}")
-            updated_cell = notebook_manager.update_cell_content(db, notebook_id, cell_id, cell_data.content)
+            updated_cell = await notebook_manager.update_cell_content(db, notebook_id, cell_id, cell_data.content)
         
         # If no updates were performed, fetch the current cell state
         if updated_cell is None:
-            updated_cell = notebook_manager.get_cell(db, notebook_id, cell_id)
+            updated_cell = await notebook_manager.get_cell(db, notebook_id, cell_id)
 
         route_logger.info(f"Successfully updated cell {cell_id}")
         return updated_cell.model_dump()
@@ -408,7 +441,7 @@ async def delete_cell(
     notebook_id: UUID,
     cell_id: UUID,
     notebook_manager: NotebookManager = Depends(get_notebook_manager),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db_session)
 ) -> None:
     """
     Delete a cell from a notebook
@@ -419,7 +452,7 @@ async def delete_cell(
     """
     route_logger.info(f"Deleting cell {cell_id} from notebook {notebook_id}")
     try:
-        notebook_manager.delete_cell(db, notebook_id, cell_id)
+        await notebook_manager.delete_cell(db, notebook_id, cell_id)
         route_logger.info(f"Successfully deleted cell {cell_id}")
     except KeyError:
         route_logger.error(f"Cell {cell_id} not found for deletion in notebook {notebook_id}")
@@ -440,7 +473,7 @@ async def add_dependency(
     notebook_id: UUID,
     dependency_data: DependencyCreate,
     notebook_manager: NotebookManager = Depends(get_notebook_manager),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db_session)
 ) -> Dict:
     """
     Add a dependency relationship between cells
@@ -454,14 +487,16 @@ async def add_dependency(
     """
     route_logger.info(f"Adding dependency in notebook {notebook_id}: {dependency_data.dependent_id} -> {dependency_data.dependency_id}")
     try:
-        notebook = notebook_manager.get_notebook(db, notebook_id)
-        notebook.add_dependency(
+        notebook = await notebook_manager.get_notebook(db, notebook_id)
+        await notebook_manager.add_dependency(
+            db=db,
+            notebook_id=notebook_id,
             dependent_id=dependency_data.dependent_id,
             dependency_id=dependency_data.dependency_id
         )
         
         # Save the notebook
-        notebook_manager.save_notebook(db=db, notebook_id=notebook_id, notebook=notebook)
+        await notebook_manager.save_notebook(db=db, notebook_id=notebook_id, notebook=notebook)
         route_logger.info("Successfully added dependency")
         
         return {
@@ -482,7 +517,7 @@ async def remove_dependency(
     notebook_id: UUID,
     dependency_data: DependencyCreate,
     notebook_manager: NotebookManager = Depends(get_notebook_manager),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db_session)
 ) -> Dict:
     """
     Remove a dependency relationship between cells
@@ -496,14 +531,16 @@ async def remove_dependency(
     """
     route_logger.info(f"Removing dependency in notebook {notebook_id}: {dependency_data.dependent_id} -> {dependency_data.dependency_id}")
     try:
-        notebook = notebook_manager.get_notebook(db, notebook_id)
-        notebook.remove_dependency(
+        notebook = await notebook_manager.get_notebook(db, notebook_id)
+        await notebook_manager.remove_dependency(
+            db=db,
+            notebook_id=notebook_id,
             dependent_id=dependency_data.dependent_id,
             dependency_id=dependency_data.dependency_id
         )
         
         # Save the notebook
-        notebook_manager.save_notebook(db=db, notebook_id=notebook_id, notebook=notebook)
+        await notebook_manager.save_notebook(db=db, notebook_id=notebook_id, notebook=notebook)
         route_logger.info("Successfully removed dependency")
         
         return {
@@ -524,7 +561,7 @@ async def execute_cell(
     notebook_id: UUID,
     cell_id: UUID,
     notebook_manager: NotebookManager = Depends(get_notebook_manager),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db_session)
 ) -> Dict:
     """
     Queue a cell for execution
@@ -538,31 +575,29 @@ async def execute_cell(
     """
     route_logger.info(f"Queueing cell {cell_id} for execution in notebook {notebook_id}")
     try:
-        notebook = notebook_manager.get_notebook(db, notebook_id)
-        cell = notebook.get_cell(cell_id)
-        
-        # Update cell status to queued
-        cell.status = CellStatus.QUEUED
-        route_logger.info(f"Updated cell {cell_id} status to QUEUED")
-        
-        # Save the notebook
-        notebook_manager.save_notebook(db=db, notebook_id=notebook_id, notebook=notebook)
+        # Fetch the specific cell using the manager for validation (ignore result)
+        _ = await notebook_manager.get_cell(db, notebook_id, cell_id)
+
+        # Update cell status to queued using the new manager method (asynchronous)
+        await notebook_manager.update_cell_status(db, notebook_id, cell_id, CellStatus.QUEUED)
+
         route_logger.info(f"Successfully queued cell {cell_id} for execution")
-        
-        # Note: The actual execution would be handled by the execution service
-        # which would pick up the queued cell from the execution queue
-        
+
         return {
             "message": "Cell queued for execution",
             "cell_id": str(cell_id),
-            "status": cell.status
+            "status": CellStatus.QUEUED.value
         }
-    except KeyError:
-        route_logger.error(f"Notebook not found: {notebook_id}")
-        raise HTTPException(status_code=404, detail=f"Notebook {notebook_id} not found")
-    except ValueError as e:
-        route_logger.error(f"Error queueing cell {cell_id} for execution: {str(e)}")
-        raise HTTPException(status_code=404, detail=str(e))
+    except KeyError as e:
+        # Handle errors raised by get_cell or update_cell_status (if cell/notebook not found)
+        detail = str(e).strip("\' ") # Ensure stripping quotes correctly
+        error_message = f"Resource not found: {detail}"
+        route_logger.error(f"Resource not found for execution request: {detail}")
+        raise HTTPException(status_code=404, detail=error_message)
+    except Exception as e:
+        # Catch other potential errors
+         route_logger.error(f"Unexpected error queueing cell {cell_id}: {str(e)}", exc_info=True)
+         raise HTTPException(status_code=500, detail="Internal server error processing cell execution request")
 
 
 @router.post("/{notebook_id}/reorder", status_code=200, response_model=Dict)
@@ -570,7 +605,7 @@ async def reorder_cells(
     notebook_id: UUID,
     reorder_data: CellReorder,
     notebook_manager: NotebookManager = Depends(get_notebook_manager),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db_session)
 ) -> Dict:
     """
     Reorder cells in a notebook
@@ -585,7 +620,7 @@ async def reorder_cells(
     route_logger.info(f"Reordering cells in notebook: {notebook_id}")
     try:
         cell_order_uuids = [UUID(cell_id) for cell_id in reorder_data.cell_order]
-        notebook_manager.reorder_cells(db, notebook_id, cell_order_uuids)
+        await notebook_manager.reorder_cells(db, notebook_id, cell_order_uuids)
         route_logger.info(f"Cells reordered successfully for notebook: {notebook_id}")
         return {"message": "Cells reordered successfully"}
     except KeyError:

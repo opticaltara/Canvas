@@ -2,7 +2,7 @@
 
 import type React from "react"
 import { useState, useEffect } from "react"
-import { PlayIcon, ChevronDownIcon, ChevronUpIcon, ExternalLinkIcon, GitCommitIcon, FileDiffIcon, CopyIcon, CheckIcon, Trash2Icon, Download, FolderIcon, FileIcon } from "lucide-react"
+import { PlayIcon, ChevronDownIcon, ChevronUpIcon, ExternalLinkIcon, GitCommitIcon, FileDiffIcon, CopyIcon, CheckIcon, Trash2Icon, Download, FolderIcon, FileIcon, MessageSquare, GitPullRequest, CheckCircle, XCircle, Clock, AlertCircleIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -12,6 +12,9 @@ import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import ReactMarkdown from 'react-markdown'
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
+import oneLight from 'react-syntax-highlighter/dist/esm/styles/prism'
 
 // Import connection store
 import { useConnectionStore } from "@/app/store/connectionStore"
@@ -44,8 +47,12 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
     result_error: cell.result?.error,
   }));
 
+  if (cell.result?.error) {
+      console.log(`[GitHubCell ${cell.id}] Backend error detected. Skipping render. Error:`, cell.result.error);
+      return null; // Don't render the cell if there was a backend execution error
+  }
+
   const [showToolCalls, setShowToolCalls] = useState(false)
-  const [showMetadata, setShowMetadata] = useState(false)
   const [toolForms, setToolForms] = useState<ToolForm[]>([{ toolName: "", toolArgs: {} }])
   const [activeToolIndex, setActiveToolIndex] = useState(0)
   const [isResultExpanded, setIsResultExpanded] = useState(true)
@@ -91,6 +98,32 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
       return "Invalid Date"; // Return a placeholder if formatting fails
     }
   }
+
+  // Helper to get language for syntax highlighting
+  const getLanguageFromFilename = (filename: string): string | undefined => {
+    const extension = filename.split('.').pop()?.toLowerCase();
+    // Add or ensure common languages are present
+    switch (extension) {
+      case 'js': case 'jsx': return 'javascript';
+      case 'ts': case 'tsx': return 'typescript';
+      case 'py': return 'python';
+      case 'java': return 'java';
+      case 'kt': case 'kts': return 'kotlin';
+      case 'swift': return 'swift';
+      case 'cpp': case 'cxx': case 'cc': case 'hpp': case 'hxx': case 'hh': return 'cpp';
+      case 'c': case 'h': return 'c';
+      case 'json': return 'json';
+      case 'md': return 'markdown';
+      case 'rb': return 'ruby';
+      case 'go': return 'go';
+      case 'php': return 'php';
+      case 'html': return 'html';
+      case 'css': return 'css';
+      case 'sh': case 'bash': return 'bash';
+      case 'diff': return 'diff'; // Add diff language
+      default: return undefined; // Let SyntaxHighlighter guess or handle plain text
+    }
+  };
 
   // Copy to clipboard utility
   const copyToClipboard = (text: string, id: string) => {
@@ -550,13 +583,67 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
                                             </AccordionTrigger>
                                             <AccordionContent className="px-0 pb-0">
                                                 {file.patch ? (
-                                                    <pre className="text-xs p-2 bg-gray-50 border-t overflow-x-auto max-h-60 font-mono">{file.patch}</pre>
-                                                ) : (
-                                                    <div className="text-xs p-2 text-gray-500 italic border-t">Patch not available.</div>
-                                                )}
-                                            </AccordionContent>
-                                        </AccordionItem>
-                                    )
+                                                    <div className="text-xs bg-gray-50 border-t overflow-x-auto max-h-80 font-mono">
+                                                      {file.patch.split('\\n').map((line: string, lineIndex: number) => {
+                                                        let style: React.CSSProperties = { whiteSpace: 'pre-wrap', display: 'block', paddingLeft: '0.5rem', paddingRight: '0.5rem' };
+                                                        let content = line;
+                                                        let prefix = '';
+                                                        const language = getLanguageFromFilename(file.filename) || 'diff'; // Default to diff for highlighting + / -
+
+                                                        if (line.startsWith('+')) {
+                                                          style.backgroundColor = 'rgba(217, 249, 157, 0.4)'; // Light green
+                                                          content = line.substring(1);
+                                                          prefix = '+ ';
+                                                        } else if (line.startsWith('-')) {
+                                                          style.backgroundColor = 'rgba(254, 202, 202, 0.4)'; // Light red
+                                                          content = line.substring(1);
+                                                          prefix = '- ';
+                                                        } else if (line.startsWith('@@')) {
+                                                           style.backgroundColor = '#e5e7eb'; // Gray background for headers
+                                                           style.color = '#4b5563';
+                                                           content = line;
+                                                           prefix = '';
+                                                        } else if (line.startsWith(' ')) {
+                                                          // Context line, remove leading space for highlighting
+                                                          content = line.substring(1);
+                                                          prefix = '  '; // Keep indentation visual
+                                                        } else {
+                                                          // Handle empty lines or lines without standard prefixes
+                                                          content = line;
+                                                          prefix = '  ';
+                                                        }
+
+                                                        // Skip highlighting for header lines or empty content
+                                                        const shouldHighlight = !line.startsWith('@@') && content.trim().length > 0;
+
+                                                        return (
+                                                          <div key={lineIndex} style={style} className="flex">
+                                                             <span className="w-6 flex-shrink-0 text-right pr-2 text-gray-400">{prefix}</span>
+                                                             <div className="flex-grow">
+                                                               {shouldHighlight ? (
+                                                                  <SyntaxHighlighter
+                                                                    language={language}
+                                                                    style={oneLight}
+                                                                    customStyle={{ background: 'transparent', padding: 0, margin: 0, overflow: 'visible', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
+                                                                    wrapLines={true}
+                                                                    lineProps={{style: {display: 'block'}}} // Ensure line breaks within highlighter
+                                                                  >
+                                                                    {content}
+                                                                  </SyntaxHighlighter>
+                                                                ) : (
+                                                                  <span style={{color: style.color}}>{content}</span> // Render headers/empty lines plainly
+                                                                )}
+                                                             </div>
+                                                          </div>
+                                                        );
+                                                      })}
+                                                   </div>
+                                               ) : (
+                                                   <div className="text-xs p-2 text-gray-500 italic border-t">Patch not available.</div>
+                                               )}
+                                           </AccordionContent>
+                                       </AccordionItem>
+                                   )
                                 })}
                             </Accordion>
                         </div>
@@ -821,9 +908,10 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
                 }
                 
                 const decodedContent = fileData.encoding === 'base64' && fileData.content ? atob(fileData.content) : fileData.content || "(No content)";
-                // TODO: Lift state for show/hide toggle
                 const contentPreview = decodedContent.substring(0, 300); // Show a preview
                 const contentId = `file-content-${cell.id}`;
+                const [showFullContent, setShowFullContent] = useState(false); // State for show/hide
+                const language = getLanguageFromFilename(fileData.name || fileData.path || '');
 
                 displayContent = (
                     <div className="space-y-3 text-xs">
@@ -877,22 +965,15 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
                         <div className="mt-3">
                             <div className="flex justify-between items-center mb-1">
                                 <h5 className="text-xs font-medium">File Content {fileData.encoding === 'base64' ? '(Base64 Decoded)' : ''}</h5>
-                                {/* TODO: Implement state lifting for show/hide toggle */}
                             </div>
-                            <pre
-                                className={`text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200 overflow-auto max-h-60`}
-                            >
+                            <SyntaxHighlighter
+                                language={language}
+                                style={oneLight} // Use the imported style
+                                customStyle={{ maxHeight: showFullContent ? 'none' : '240px', overflowY: 'auto', margin: 0, fontSize: '0.75rem', border: '1px solid #e5e7eb', borderRadius: '0.25rem', padding: '0.375rem' }}
+                                wrapLines={true}
+                                lineProps={{style: {whiteSpace: 'pre-wrap', wordBreak: 'break-all'}}} >
                                 {`${contentPreview}${decodedContent.length > 300 ? '\\n...' : ''}`}
-                            </pre>
-                            <Button
-                                variant="ghost"
-                                size="sm"
-                                className="text-xs h-auto px-1.5 py-0.5 mt-1 text-gray-600 hover:text-gray-900"
-                                onClick={() => copyToClipboard(decodedContent, contentId)}
-                            >
-                                {copiedStates[contentId] ? <CheckIcon className="h-3 w-3 mr-1 text-green-600" /> : <CopyIcon className="h-3 w-3 mr-1" />}
-                                Copy Decoded Content
-                            </Button>
+                            </SyntaxHighlighter>
                         </div>
                     </div>
                 );
@@ -915,324 +996,581 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
                 </div>
             );
         }
-    } else if (toolName === 'get_me' && !toolResult.error && toolResult.content) {
+    } else if (toolName === 'get_issue' && !toolResult.error && toolResult.content) {
         try {
-            let userData: any;
-             // Use helper to get JSON text
-             const jsonText = getJsonTextContent(toolResult);
-             if (jsonText) {
-                 userData = JSON.parse(jsonText);
-             } else {
-                  // Fallback: Assume toolResult.content is the data directly
-                 console.warn("Parsing get_me result from potentially direct content structure.");
-                 userData = toolResult.content;
-             }
-
-
-            if (typeof userData !== 'object' || userData === null) {
-                throw new Error("Expected a user object.");
-            }
-
-            displayContent = (
-                <div className="flex items-start space-x-3 text-xs">
-                    {userData.avatar_url && (
-                        <img src={userData.avatar_url} alt={`${userData.login} avatar`} className="h-12 w-12 rounded-full border" />
-                    )}
-                    <div className="flex-grow">
-                        <div className="flex items-baseline space-x-1.5">
-                            <h4 className="text-base font-semibold">{userData.name || userData.login}</h4>
-                            {userData.login && (
-                                <a href={userData.html_url} target="_blank" rel="noopener noreferrer" className="text-gray-500 hover:text-blue-600 hover:underline">
-                                    (@{userData.login})
-                                </a>
-                            )}
-                        </div>
-                        {userData.bio && <p className="mt-0.5 text-gray-700 text-xs">{userData.bio}</p>}
-                        <div className="mt-1.5 flex items-center space-x-3 text-gray-600 text-xs">
-                            <span>
-                                <span className="font-medium">{userData.public_repos ?? '-'}</span> Public Repos
-                            </span>
-                            <span>
-                                <span className="font-medium">{userData.followers ?? '-'}</span> Followers
-                            </span>
-                            <span>
-                                <span className="font-medium">{userData.following ?? '-'}</span> Following
-                            </span>
-                        </div>
-                        <p className="mt-1 text-gray-500 text-xs">
-                            GitHub member since {formatDate(userData.created_at)}
-                        </p>
-                    </div>
-                </div>
-            );
-
-        } catch (e) {
-            console.error("Error parsing or rendering get_me result:", e);
-             // Use helper to get raw content for error display
-             const errorDisplay = getRawContentForError(toolResult);
-
-            displayContent = (
-                <div className="text-red-700 text-xs">
-                    <p className="font-medium mb-1">Error rendering user profile:</p>
-                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
-                    <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
-                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
-                </div>
-            );
-        }
-    } else if (toolName === 'list_branches' && !toolResult.error && toolResult.content) {
-        try {
-            let branchesData: any[];
-            // Use helper to get JSON text
+            let issueData: any;
             const jsonText = getJsonTextContent(toolResult);
             if (jsonText) {
-                branchesData = JSON.parse(jsonText);
-            } else if (Array.isArray(toolResult.content)) {
-                // Fallback: Assume toolResult.content is the array directly
-                console.warn("Parsing list_branches result from potentially direct content structure (array).");
-                branchesData = toolResult.content;
+                 issueData = JSON.parse(jsonText);
             } else {
-                throw new Error("Expected an array of branches or a JSON string representing it.");
+                 console.warn("Parsing get_issue result from potentially direct content structure.");
+                 issueData = toolResult.content;
+            }
+            if (typeof issueData !== 'object' || issueData === null || !issueData.id) {
+                throw new Error("Invalid issue data format.");
             }
 
-
-            if (!Array.isArray(branchesData)) {
-                throw new Error("Expected an array of branches after parsing.");
-            }
-
-            if (branchesData.length === 0) {
-                displayContent = <p className="text-xs text-gray-600">No branches found for this repository.</p>;
-            } else {
-                displayContent = (
-                    <div className="overflow-x-auto border rounded-md">
-                        <table className="min-w-full divide-y divide-gray-200 text-xs">
-                            <thead className="bg-gray-50">
-                                <tr>
-                                    <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Branch Name</th>
-                                    <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Latest Commit</th>
-                                    <th className="px-3 py-1.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Protected</th>
-                                </tr>
-                            </thead>
-                            <tbody className="bg-white divide-y divide-gray-200">
-                                {branchesData.map((branch: any) => (
-                                    <tr key={branch.name}>
-                                        <td className="px-3 py-1.5 whitespace-nowrap font-medium text-gray-800">{branch.name}</td>
-                                        <td className="px-3 py-1.5 whitespace-nowrap font-mono">
-                                            {branch.commit?.url ? (
-                                                <a href={branch.commit.url.replace("api.github.com/repos", "github.com").replace("/commits/", "/commit/")} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
-                                                    {branch.commit.sha?.substring(0, 7)}
-                                                </a>
-                                            ) : (
-                                                <span>{branch.commit?.sha?.substring(0, 7) || '-'}</span>
-                                            )}
-                                        </td>
-                                        <td className="px-3 py-1.5 whitespace-nowrap">
-                                            {branch.protected ? (
-                                                <Badge variant="secondary" className="text-xs px-1.5 py-0.5 bg-orange-100 text-orange-800 border-orange-200">Protected</Badge>
-                                            ) : (
-                                                <span className="text-gray-600">-</span>
-                                            )}
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                );
-            }
-
-        } catch (e) {
-            console.error("Error parsing or rendering list_branches result:", e);
-            // Use helper to get raw content for error display
-             const errorDisplay = getRawContentForError(toolResult);
+            const issueId = `issue-${cell.id}`;
 
             displayContent = (
+                <div className="space-y-3 text-xs">
+                    {/* Header: Title, Number, State, Links */}
+                    <div className="flex justify-between items-start mb-1">
+                        <h4 className="text-base font-semibold mr-2 flex-grow">{issueData.title} (#{issueData.number})</h4>
+                        <div className="flex items-center space-x-1 flex-shrink-0">
+                            <Badge variant={issueData.state === 'open' ? 'default' : 'secondary'} className={`capitalize text-xs px-1.5 py-0.5 ${issueData.state === 'open' ? 'bg-green-100 text-green-800 border-green-200' : 'bg-purple-100 text-purple-800 border-purple-200'}`}>
+                               {issueData.state}
+                            </Badge>
+                            {issueData.html_url && (
+                                <a href={issueData.html_url} target="_blank" rel="noopener noreferrer">
+                                    <Button variant="outline" size="sm" className="text-xs h-auto px-1.5 py-0.5">
+                                        <ExternalLinkIcon className="h-3 w-3 mr-1" /> GitHub
+                                    </Button>
+                                </a>
+                            )}
+                         </div>
+                    </div>
+
+                    {/* Author & Dates */}
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between text-xs text-gray-600 gap-1">
+                         {renderUser(issueData.user, issueData.created_at, "opened this issue")}
+                         <span className="text-gray-500">Updated {formatDate(issueData.updated_at)}</span>
+                    </div>
+
+                     {/* Labels */}
+                    {renderLabels(issueData.labels)}
+
+                     {/* Body */}
+                     {issueData.body && (
+                         <div className="mt-3 border rounded-md p-2 bg-gray-50">
+                             <h5 className="text-xs font-medium mb-1">Description</h5>
+                             <div className="prose prose-sm max-w-none text-xs">
+                                 <ReactMarkdown>{issueData.body}</ReactMarkdown>
+                             </div>
+                         </div>
+                     )}
+
+                    {/* Metadata Table */}
+                     <div className="overflow-x-auto border rounded-md">
+                         <table className="min-w-full divide-y divide-gray-200 text-xs">
+                             <tbody className="bg-white divide-y divide-gray-200">
+                                 <tr><td className="px-3 py-1.5 font-medium text-gray-500 w-1/4">ID</td><td className="px-3 py-1.5 text-gray-800">{issueData.id}</td></tr>
+                                 <tr><td className="px-3 py-1.5 font-medium text-gray-500">Comments</td><td className="px-3 py-1.5 text-gray-800">{issueData.comments}</td></tr>
+                                 <tr><td className="px-3 py-1.5 font-medium text-gray-500">Author Association</td><td className="px-3 py-1.5 text-gray-800">{issueData.author_association}</td></tr>
+                                 <tr><td className="px-3 py-1.5 font-medium text-gray-500">Locked</td><td className="px-3 py-1.5 text-gray-800">{issueData.locked ? 'Yes' : 'No'}</td></tr>
+                                 <tr><td className="px-3 py-1.5 font-medium text-gray-500">Reactions</td><td className="px-3 py-1.5 text-gray-800">{issueData.reactions?.total_count ?? 0}</td></tr>
+                             </tbody>
+                         </table>
+                     </div>
+                 </div>
+            );
+        } catch (e) {
+            console.error("Error parsing or rendering get_issue result:", e);
+            const errorDisplay = getRawContentForError(toolResult);
+            displayContent = (
                 <div className="text-red-700 text-xs">
-                    <p className="font-medium mb-1">Error rendering branch list:</p>
+                    <p className="font-medium mb-1">Error rendering issue details:</p>
                     <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
                     <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
                     <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
                 </div>
             );
         }
-    } else {
-        // Default case for tools without specific rendering or for errors
-        if (toolResult.error) {
-            // Error display logic
+    } else if (toolName === 'get_issue_comments' && !toolResult.error && toolResult.content) {
+        try {
+             let commentsData: any[];
+             const jsonText = getJsonTextContent(toolResult);
+              if (jsonText) {
+                 commentsData = JSON.parse(jsonText);
+             } else {
+                 console.warn("Parsing get_issue_comments result from potentially direct content structure.");
+                 commentsData = toolResult.content;
+             }
+             if (!Array.isArray(commentsData)) throw new Error("Expected an array of comments.");
+
+             if (commentsData.length === 0) {
+                 displayContent = <p className="text-xs text-gray-600">No comments found for this issue.</p>;
+             } else {
+                  displayContent = (
+                      <div className="space-y-4">
+                          {commentsData.map((comment: any, index: number) => (
+                              <div key={comment.id || index} className="border rounded-md overflow-hidden">
+                                  <div className="bg-gray-50 px-2 py-1.5 border-b flex justify-between items-center">
+                                      {renderUser(comment.user, comment.created_at, "commented on")}
+                                      <code className="text-xs bg-gray-100 px-1 py-0.5 rounded truncate ml-2" title={comment.path}>{comment.path}</code>
+                                      {/* GitHub Link */}
+                                  </div>
+                                   {comment.diff_hunk && (
+                                      <pre className="text-xs p-2 bg-gray-100 border-b overflow-x-auto max-h-40 font-mono">{comment.diff_hunk}</pre>
+                                  )}
+                                  <div className="p-2 text-xs prose prose-sm max-w-none">
+                                      <ReactMarkdown>{comment.body}</ReactMarkdown>
+                                  </div>
+                                  {/* Reactions */}
+                              </div>
+                          ))}
+                      </div>
+                  );
+              }
+        } catch (e) {
+            console.error("Error parsing or rendering get_issue_comments result:", e);
+            const errorDisplay = getRawContentForError(toolResult);
             displayContent = (
                 <div className="text-red-700 text-xs">
-                    <p className="font-medium mb-1">Error:</p>
-                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200 overflow-x-auto">{(()=>{
-                        try {
-                            // Use toolResult.error directly
-                            return String(toolResult.error);
-                        } catch {
-                            // Fallback if string conversion fails (shouldn't happen for string)
-                            return "Could not display error content.";
-                        }
-                    })()}</pre>
+                    <p className="font-medium mb-1">Error rendering issue comments:</p>
+                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
+                    <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
+                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
                 </div>
-            )
-        } else if (toolResult.content) {
-            let finalContent: any = null;
-            let isJson = false;
-
-            // Step 1: Get the core content, trying to unwrap if necessary
-            const jsonText = getJsonTextContent(toolResult);
-            if (jsonText !== null) {
-                // Try to parse this text as JSON
-                try {
-                    finalContent = JSON.parse(jsonText);
-                    isJson = true;
-                } catch {
-                    // It wasn't JSON, keep it as a string
-                    finalContent = jsonText;
-                    isJson = false;
-                }
-            } else {
-                 // Fallback: Assume toolResult.content is the data directly
-                 console.warn("Parsing default/unknown tool result from potentially direct content structure.");
-                 finalContent = toolResult.content;
-                 // Consider it JSON-like if it's an object (for formatting purposes)
-                 isJson = typeof finalContent === 'object' && finalContent !== null;
-            }
-
-
-            // Step 2: Render the content
-            if (isJson) {
-                // Render as formatted JSON
-                displayContent = (
-                    <pre className="text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200 overflow-x-auto">
-                        {JSON.stringify(finalContent, null, 2)}
-                    </pre>
-                );
-            } else {
-                // Render as preformatted text
-                displayContent = (
-                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200 overflow-x-auto">
-                        {String(finalContent)}
-                    </pre>
-                );
-            }
-        } else {
-            displayContent = <span className="text-gray-500 italic text-xs">No result content available.</span>
+            );
         }
-    }
+    } else if (toolName === 'get_pull_request' && !toolResult.error && toolResult.content) {
+        try {
+            let prData: any;
+             const jsonText = getJsonTextContent(toolResult);
+            if (jsonText) {
+                 prData = JSON.parse(jsonText);
+            } else {
+                 console.warn("Parsing get_pull_request result from potentially direct content structure.");
+                 prData = toolResult.content;
+            }
+             if (typeof prData !== 'object' || prData === null || !prData.id) {
+                 throw new Error("Invalid pull request data format.");
+            }
 
-    const cardBorderColor = toolResult.error ? "border-red-200" : "border-green-200";
-    const cardBgColor = toolResult.error ? "bg-red-50" : "bg-green-50";
+            const prId = `pr-${cell.id}`;
+            let stateBadgeVariant: "default" | "secondary" | "outline" = "default";
+            let stateBadgeColor = "bg-green-100 text-green-800 border-green-200"; // Open
+            if (prData.state === 'closed') {
+                if (prData.merged) {
+                    stateBadgeVariant = "secondary";
+                    stateBadgeColor = "bg-purple-100 text-purple-800 border-purple-200"; // Merged
+                 } else {
+                    stateBadgeVariant = "outline";
+                    stateBadgeColor = "bg-red-100 text-red-800 border-red-200"; // Closed (not merged)
+                 }
+             }
 
-    return (
-       <Card className={`mt-3 border ${cardBorderColor} ${!isResultExpanded ? cardBgColor : ''}`}>
-         <CardHeader className={`flex flex-row items-center justify-between p-2 ${!isResultExpanded ? '' : cardBgColor}`}>
-           <CardTitle className="text-sm font-semibold">
-             Execution Result {shortSha ? `for ${shortSha}` : ''}
-           </CardTitle>
-           <Button
-             variant="ghost"
-             size="sm"
-             onClick={() => setIsResultExpanded(!isResultExpanded)}
-             className="text-xs"
-           >
-             {isResultExpanded ? (
-               <>
-                 <ChevronUpIcon className="h-4 w-4 mr-1" /> Hide
-               </>
-             ) : (
-               <>
-                 <ChevronDownIcon className="h-4 w-4 mr-1" /> Show
-               </>
-             )}
-           </Button>
-         </CardHeader>
-         {isResultExpanded && (
-           <CardContent className="p-2 border-t">
-             <div className="mt-1 rounded overflow-x-auto max-h-[450px]">
-               {displayContent}
-             </div>
-           </CardContent>
-         )}
-       </Card>
-    )
-  }
+             displayContent = (
+                 <div className="space-y-3 text-xs">
+                    {/* Header: Title, Number, State, Links */}
+                     <div className="flex justify-between items-start mb-1">
+                         <h4 className="text-base font-semibold mr-2 flex-grow">{prData.title} (#{prData.number})</h4>
+                         <div className="flex items-center space-x-1 flex-shrink-0">
+                             <Badge variant={stateBadgeVariant} className={`capitalize text-xs px-1.5 py-0.5 ${stateBadgeColor}`}>
+                                 {prData.merged ? 'Merged' : prData.state}
+                             </Badge>
+                             {prData.html_url && (
+                                 <a href={prData.html_url} target="_blank" rel="noopener noreferrer">
+                                     <Button variant="outline" size="sm" className="text-xs h-auto px-1.5 py-0.5">
+                                         <ExternalLinkIcon className="h-3 w-3 mr-1" /> GitHub
+                                     </Button>
+                                 </a>
+                             )}
+                         </div>
+                     </div>
+                     {/* Author & Dates */}
+                     <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between text-xs text-gray-600 gap-1 flex-wrap">
+                         {renderUser(prData.user, prData.created_at, `wants to merge ${prData.commits} commit(s) into`)}
+                          <code className="text-xs bg-gray-100 px-1 py-0.5 rounded">{prData.base?.label}</code> from <code className="text-xs bg-gray-100 px-1 py-0.5 rounded">{prData.head?.label}</code>
+                     </div>
+                     {prData.merged && prData.merged_by && renderUser(prData.merged_by, prData.merged_at, "merged")}
+                     {prData.closed_at && !prData.merged && <span className="text-xs text-gray-500">Closed on {formatDate(prData.closed_at)}</span>}
 
-  // Render metadata (like allRepositories)
-  const renderMetadata = () => {
-    if (!cell.metadata) return null
+                    {/* Body */}
+                     {prData.body && (
+                         <div className="mt-3 border rounded-md p-2 bg-gray-50">
+                             <h5 className="text-xs font-medium mb-1">Description</h5>
+                             <div className="prose prose-sm max-w-none text-xs">
+                                 <ReactMarkdown>{prData.body}</ReactMarkdown>
+                             </div>
+                         </div>
+                     )}
 
-    return (
-      <div className="mt-3">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setShowMetadata(!showMetadata)}
-          className="mb-1.5 text-xs border-green-300 hover:bg-green-100"
-        >
-          {showMetadata ? (
-            <>
-              <ChevronUpIcon className="h-3 w-3 mr-1" />
-              Hide Metadata
-            </>
-          ) : (
-            <>
-              <ChevronDownIcon className="h-3 w-3 mr-1" />
-              Show Metadata
-            </>
-          )}
-        </Button>
+                     {/* Stats & Metadata */}
+                     <div className="flex flex-wrap gap-x-3 gap-y-1 items-center text-xs text-gray-700">
+                         <Badge variant="secondary" className="whitespace-nowrap px-1.5 py-0.5 text-xs">{prData.commits || 0} Commits</Badge>
+                         <Badge variant="secondary" className="whitespace-nowrap px-1.5 py-0.5 text-xs">{prData.changed_files || 0} Files Changed</Badge>
+                         <Badge variant="outline" className="border-green-300 text-green-700 whitespace-nowrap px-1.5 py-0.5 text-xs">+{prData.additions} additions</Badge>
+                         <Badge variant="outline" className="border-red-300 text-red-700 whitespace-nowrap px-1.5 py-0.5 text-xs">-{prData.deletions} deletions</Badge>
+                         <span className="whitespace-nowrap">{prData.comments || 0} Comments</span>
+                         <span className="whitespace-nowrap">{prData.review_comments || 0} Review Comments</span>
+                     </div>
 
-        {showMetadata && (
-          <Card className="border-green-200 bg-white">
-            <CardContent className="p-2">
-              {cell.metadata.allRepositories && (
-                <div>
-                  <h4 className="text-xs font-medium mb-1.5">All Repositories</h4>
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-200">
-                      <thead className="bg-gray-50">
-                        <tr>
-                          <th className="px-2 py-1 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                            Name
-                          </th>
-                          <th className="px-2 py-1 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                            Last Push
-                          </th>
-                          <th className="px-2 py-1 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                            Status
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody className="bg-white divide-y divide-gray-200 text-xs">
-                        {cell.metadata.allRepositories.map((repo: any, index: number) => (
-                          <tr key={index} className={index % 2 === 0 ? "bg-white" : "bg-gray-50"}>
-                            <td className="px-2 py-1 whitespace-nowrap">{repo.name}</td>
-                            <td className="px-2 py-1 whitespace-nowrap">{formatDate(repo.pushed_at)}</td>
-                            <td className="px-2 py-1 whitespace-nowrap">
-                              {repo.status || (repo.lastCommitDate ? "Has commits" : "Unknown")}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                     {/* Reviewers */}
+                     {(prData.requested_reviewers?.length > 0 || prData.requested_teams?.length > 0) && (
+                         <div className="text-xs">
+                             <h5 className="font-medium mb-1">Reviewers</h5>
+                             <div className="flex flex-wrap gap-2">
+                                 {prData.requested_reviewers.map((reviewer: any) => renderUser(reviewer))}
+                                 {prData.requested_teams.map((team: any) => (
+                                     <span key={team.id} className="flex items-center space-x-1 text-gray-600">
+                                         {/* Add a team icon if desired */}
+                                         <span>{team.name}</span>
+                                     </span>
+                                 ))}
+                             </div>
+                         </div>
+                     )}
+                 </div>
+             );
+        } catch (e) {
+            console.error("Error parsing or rendering get_pull_request result:", e);
+            const errorDisplay = getRawContentForError(toolResult);
+            displayContent = (
+                <div className="text-red-700 text-xs">
+                    <p className="font-medium mb-1">Error rendering pull request details:</p>
+                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
+                    <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
+                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
                 </div>
-              )}
+            );
+        }
+    } else if (toolName === 'get_pull_request_comments' && !toolResult.error && toolResult.content) {
+        try {
+             let commentsData: any[];
+             // ... (parse JSON similar to get_issue_comments)
+             const jsonText = getJsonTextContent(toolResult);
+              if (jsonText) {
+                 commentsData = JSON.parse(jsonText);
+             } else {
+                 console.warn("Parsing get_pull_request_comments result from potentially direct content structure.");
+                 commentsData = toolResult.content;
+             }
+             if (!Array.isArray(commentsData)) throw new Error("Expected an array of comments.");
 
-              {Object.entries(cell.metadata)
-                .filter(([key]) => key !== "allRepositories")
-                .map(([key, value]) => (
-                  <div key={key} className="mt-2">
-                    <h4 className="text-xs font-medium mb-1">{key}</h4>
-                    <pre className="text-xs bg-gray-50 p-1.5 rounded overflow-x-auto">
-                      {JSON.stringify(value, null, 2)}
-                    </pre>
+             if (commentsData.length === 0) {
+                 displayContent = <p className="text-xs text-gray-600">No review comments found for this pull request.</p>;
+             } else {
+                  displayContent = (
+                      <div className="space-y-4">
+                          {commentsData.map((comment: any, index: number) => (
+                              <div key={comment.id || index} className="border rounded-md overflow-hidden">
+                                  <div className="bg-gray-50 px-2 py-1.5 border-b flex justify-between items-center">
+                                      {renderUser(comment.user, comment.created_at, "commented on")}
+                                      <code className="text-xs bg-gray-100 px-1 py-0.5 rounded truncate ml-2" title={comment.path}>{comment.path}</code>
+                                      {/* GitHub Link */}
+                                  </div>
+                                   {comment.diff_hunk && (
+                                      <pre className="text-xs p-2 bg-gray-100 border-b overflow-x-auto max-h-40 font-mono">{comment.diff_hunk}</pre>
+                                  )}
+                                  <div className="p-2 text-xs prose prose-sm max-w-none">
+                                      <ReactMarkdown>{comment.body}</ReactMarkdown>
+                                  </div>
+                                  {/* Reactions */}
+                              </div>
+                          ))}
+                      </div>
+                  );
+              }
+        } catch (e) {
+            console.error("Error parsing or rendering get_pull_request_comments result:", e);
+            const errorDisplay = getRawContentForError(toolResult);
+            displayContent = (
+                <div className="text-red-700 text-xs">
+                    <p className="font-medium mb-1">Error rendering pull request comments:</p>
+                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
+                    <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
+                    <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
+                </div>
+            );
+        }
+    } else if (toolName === 'get_pull_request_files' && !toolResult.error && toolResult.content) {
+         try {
+             let filesData: any[];
+              // ... (parse JSON similar to get_issue_comments)
+             const jsonText = getJsonTextContent(toolResult);
+              if (jsonText) {
+                 filesData = JSON.parse(jsonText);
+             } else {
+                 console.warn("Parsing get_pull_request_files result from potentially direct content structure.");
+                 filesData = toolResult.content;
+             }
+             if (!Array.isArray(filesData)) throw new Error("Expected an array of files.");
+
+              if (filesData.length === 0) {
+                 displayContent = <p className="text-xs text-gray-600">No changed files found for this pull request.</p>;
+             } else {
+                 // Reuse the commit files rendering logic (Accordion)
+                  displayContent = (
+                      <div>
+                          <h5 className="text-xs font-medium mb-1.5">{filesData.length} changed files:</h5>
+                          <Accordion type="single" collapsible className="w-full border rounded-md">
+                              {filesData.map((file: any, index: number) => {
+                                  const fileId = `pr-file-${cell.id}-${index}`;
+                                  if (!file) return null;
+                                  // Simplified status badge logic compared to commit
+                                  let badgeVariant: "default" | "destructive" | "outline" = "outline";
+                                  let badgeClass = 'border-blue-300 text-blue-700 bg-blue-50'; // Modified
+                                  if (file.status === 'added') { badgeVariant = 'default'; badgeClass = 'border-green-300 text-green-700 bg-green-50'; }
+                                  if (file.status === 'removed') { badgeVariant = 'destructive'; badgeClass = 'border-red-300'; }
+                                  if (file.status === 'renamed') { badgeVariant = 'outline'; badgeClass = 'border-yellow-300 text-yellow-700 bg-yellow-50'; }
+
+                                  return (
+                                      <AccordionItem value={`item-${index}`} key={file.sha || index}>
+                                          <AccordionTrigger className="text-xs px-2 py-1.5 hover:bg-gray-50">
+                                               {/* Reuse AccordionTrigger layout from get_commit */}
+                                                <div className="flex flex-col md:flex-row justify-between items-start md:items-center w-full gap-1">
+                                                     <div className="flex items-center space-x-1.5 truncate mr-4 flex-shrink min-w-0">
+                                                         <Badge variant={badgeVariant} className={`text-xs px-1 py-0 leading-tight flex-shrink-0 ${badgeClass}`}>
+                                                             {file.status}
+                                                         </Badge>
+                                                         <span className="font-mono truncate text-xs" title={file.filename}>{file.filename}</span>
+                                                     </div>
+                                                     <div className="flex items-center space-x-1.5 flex-shrink-0 pl-6 md:pl-0">
+                                                         <span className="text-green-600 text-xs">+{file.additions}</span>
+                                                         <span className="text-red-600 text-xs">-{file.deletions}</span>
+                                                         {/* Copy Patch Button */}
+                                                         {/* External Link Button */}
+                                                     </div>
+                                                 </div>
+                                          </AccordionTrigger>
+                                          <AccordionContent className="px-0 pb-0">
+                                              {file.patch ? (
+                                                  <div className="text-xs bg-gray-50 border-t overflow-x-auto max-h-80 font-mono">
+                                                      {file.patch.split('\\n').map((line: string, lineIndex: number) => {
+                                                        let style: React.CSSProperties = { whiteSpace: 'pre-wrap', display: 'block', paddingLeft: '0.5rem', paddingRight: '0.5rem' };
+                                                        let content = line;
+                                                        let prefix = '';
+                                                        const language = getLanguageFromFilename(file.filename) || 'diff'; // Default to diff for highlighting + / -
+
+                                                        if (line.startsWith('+')) {
+                                                          style.backgroundColor = 'rgba(217, 249, 157, 0.4)'; // Light green
+                                                          content = line.substring(1);
+                                                          prefix = '+ ';
+                                                        } else if (line.startsWith('-')) {
+                                                          style.backgroundColor = 'rgba(254, 202, 202, 0.4)'; // Light red
+                                                          content = line.substring(1);
+                                                          prefix = '- ';
+                                                        } else if (line.startsWith('@@')) {
+                                                           style.backgroundColor = '#e5e7eb'; // Gray background for headers
+                                                           style.color = '#4b5563';
+                                                           content = line;
+                                                           prefix = '';
+                                                        } else if (line.startsWith(' ')) {
+                                                          // Context line, remove leading space for highlighting
+                                                          content = line.substring(1);
+                                                          prefix = '  '; // Keep indentation visual
+                                                        } else {
+                                                          // Handle empty lines or lines without standard prefixes
+                                                          content = line;
+                                                          prefix = '  ';
+                                                        }
+
+                                                        // Skip highlighting for header lines or empty content
+                                                        const shouldHighlight = !line.startsWith('@@') && content.trim().length > 0;
+
+                                                        return (
+                                                          <div key={lineIndex} style={style} className="flex">
+                                                             <span className="w-6 flex-shrink-0 text-right pr-2 text-gray-400">{prefix}</span>
+                                                             <div className="flex-grow">
+                                                               {shouldHighlight ? (
+                                                                  <SyntaxHighlighter
+                                                                    language={language}
+                                                                    style={oneLight}
+                                                                    customStyle={{ background: 'transparent', padding: 0, margin: 0, overflow: 'visible', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
+                                                                    wrapLines={true}
+                                                                    lineProps={{style: {display: 'block'}}} // Ensure line breaks within highlighter
+                                                                  >
+                                                                    {content}
+                                                                  </SyntaxHighlighter>
+                                                                ) : (
+                                                                  <span style={{color: style.color}}>{content}</span> // Render headers/empty lines plainly
+                                                                )}
+                                                             </div>
+                                                          </div>
+                                                        );
+                                                      })}
+                                                   </div>
+                                               ) : (
+                                                   <div className="text-xs p-2 text-gray-500 italic border-t">Patch not available.</div>
+                                               )}
+                                           </AccordionContent>
+                                       </AccordionItem>
+                                   )
+                              })}
+                          </Accordion>
+                      </div>
+                 );
+              }
+         } catch (e) {
+            console.error("Error parsing or rendering get_pull_request_files result:", e);
+             const errorDisplay = getRawContentForError(toolResult);
+             displayContent = (
+                 <div className="text-red-700 text-xs">
+                     <p className="font-medium mb-1">Error rendering pull request files:</p>
+                     <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
+                     <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
+                     <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
+                 </div>
+             );
+         }
+     } else if (toolName === 'get_me' && !toolResult.error && toolResult.content) {
+         try {
+             let userData: any;
+              // Use helper to get JSON text
+              const jsonText = getJsonTextContent(toolResult);
+              if (jsonText) {
+                  userData = JSON.parse(jsonText);
+              } else {
+                   // Fallback: Assume toolResult.content is the data directly
+                  console.warn("Parsing get_me result from potentially direct content structure.");
+                  userData = toolResult.content;
+              }
+
+
+              if (typeof userData !== 'object' || userData === null) {
+                  throw new Error("Expected a user object.");
+              }
+
+              displayContent = (
+                  <div className="flex items-start space-x-3 text-xs">
+                      {userData.avatar_url && (
+                          <img src={userData.avatar_url} alt={`${userData.login} avatar`} className="h-12 w-12 rounded-full border" />
+                      )}
+                      <div className="flex-grow">
+                          <div className="flex items-baseline space-x-1.5">
+                              <h4 className="text-base font-semibold">{userData.name || userData.login}</h4>
+                              {userData.login && (
+                                  <a href={userData.html_url} target="_blank" rel="noopener noreferrer" className="text-gray-500 hover:text-blue-600 hover:underline">
+                                      (@{userData.login})
+                                  </a>
+                              )}
+                          </div>
+                          {userData.bio && <p className="mt-0.5 text-gray-700 text-xs">{userData.bio}</p>}
+                          <div className="mt-1.5 flex items-center space-x-3 text-gray-600 text-xs">
+                              <span>
+                                  <span className="font-medium">{userData.public_repos ?? '-'}</span> Public Repos
+                              </span>
+                              <span>
+                                  <span className="font-medium">{userData.followers ?? '-'}</span> Followers
+                              </span>
+                              <span>
+                                  <span className="font-medium">{userData.following ?? '-'}</span> Following
+                              </span>
+                          </div>
+                          <p className="mt-1 text-gray-500 text-xs">
+                              GitHub member since {formatDate(userData.created_at)}
+                          </p>
+                      </div>
                   </div>
-                ))}
-            </CardContent>
-          </Card>
-        )}
-      </div>
-    )
+              );
+
+          } catch (e) {
+              console.error("Error parsing or rendering get_me result:", e);
+               // Use helper to get raw content for error display
+               const errorDisplay = getRawContentForError(toolResult);
+
+              displayContent = (
+                  <div className="text-red-700 text-xs">
+                      <p className="font-medium mb-1">Error rendering user profile:</p>
+                      <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{String(e)}</pre>
+                      <p className="font-medium mt-1.5 mb-1">Raw Result Content:</p>
+                      <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200">{errorDisplay}</pre>
+                  </div>
+              );
+          }
+      } else {
+          // Default case for tools without specific rendering or for errors
+          if (toolResult.error) {
+              // Error display logic
+              displayContent = (
+                  <div className="text-red-700 text-xs">
+                      <p className="font-medium mb-1">Error:</p>
+                      <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200 overflow-x-auto">{(()=>{
+                          try {
+                              // Try to parse if it looks like JSON, otherwise stringify
+                              const errorContent = toolResult.error;
+                               if (typeof errorContent === 'string' && errorContent.trim().startsWith('{')) return JSON.stringify(JSON.parse(errorContent), null, 2);
+                               return String(errorContent);
+                          } catch {
+                              // Fallback if string conversion fails (shouldn't happen for string)
+                              return String(toolResult.error); // Show raw error string
+                          }
+                      })()}</pre>
+                  </div>
+              )
+          } else if (toolResult.content) {
+              let finalContent: any = null;
+              let isJson = false;
+
+              // Step 1: Get the core content, trying to unwrap if necessary
+              const jsonText = getJsonTextContent(toolResult);
+              if (jsonText !== null) {
+                  // Try to parse this text as JSON
+                  try {
+                      finalContent = JSON.parse(jsonText);
+                      isJson = true;
+                  } catch {
+                      // It wasn't JSON, keep it as a string
+                      finalContent = jsonText;
+                      isJson = false;
+                  }
+              } else {
+                   // Fallback: Assume toolResult.content is the data directly
+                   console.warn("Parsing default/unknown tool result from potentially direct content structure.");
+                   finalContent = toolResult.content;
+                   // Consider it JSON-like if it's an object (for formatting purposes)
+                   isJson = typeof finalContent === 'object' && finalContent !== null;
+              }
+
+
+              // Step 2: Render the content
+              if (isJson) {
+                  // Render as formatted JSON
+                  displayContent = (
+                      <pre className="text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200 overflow-x-auto">
+                          {JSON.stringify(finalContent, null, 2)}
+                      </pre>
+                  );
+              } else {
+                  // Render as preformatted text
+                  displayContent = (
+                      <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200 overflow-x-auto">
+                          {String(finalContent)}
+                      </pre>
+                  );
+              }
+          } else {
+              displayContent = <span className="text-gray-500 italic text-xs">No result content available.</span>
+          }
+      }
+
+      const cardBorderColor = toolResult.error ? "border-red-200" : "border-green-200";
+      const cardBgColor = toolResult.error ? "bg-red-50" : "bg-green-50";
+
+      return (
+         <Card className={`mt-3 border ${cardBorderColor} ${!isResultExpanded ? cardBgColor : ''}`}>
+           <CardHeader className={`flex flex-row items-center justify-between p-2 ${!isResultExpanded ? '' : cardBgColor}`}>
+             <CardTitle className="text-sm font-semibold">
+               Execution Result {shortSha ? `for ${shortSha}` : ''}
+             </CardTitle>
+             <Button
+               variant="ghost"
+               size="sm"
+               onClick={() => setIsResultExpanded(!isResultExpanded)}
+               className="text-xs"
+             >
+               {isResultExpanded ? (
+                 <>
+                   <ChevronUpIcon className="h-4 w-4 mr-1" /> Hide
+                 </>
+               ) : (
+                 <>
+                   <ChevronDownIcon className="h-4 w-4 mr-1" /> Show
+                 </>
+               )}
+             </Button>
+           </CardHeader>
+           {isResultExpanded && (
+             <CardContent className="p-2 border-t">
+               <div className="mt-1 rounded overflow-x-auto max-h-[450px]">
+                 {displayContent}
+               </div>
+             </CardContent>
+           )}
+         </Card>
+      )
   }
 
   // Render the tool form tabs (Now only ever one tab)
@@ -1263,8 +1601,72 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
     )
   }
 
+  // --- START: Helper for rendering User Avatars/Links ---
+  const renderUser = (user: any, date?: string, actionText?: string) => {
+      if (!user) return null;
+      const userId = `user-${cell.id}-${user.login}`;
+      return (
+           <div className="flex items-center space-x-1.5 text-xs text-gray-600">
+             <TooltipProvider delayDuration={100}>
+               <Tooltip>
+                 <TooltipTrigger asChild>
+                   <a href={user.html_url} target="_blank" rel="noopener noreferrer" className="flex items-center">
+                     {user.avatar_url && <img src={user.avatar_url} alt={user.login} className="h-4 w-4 rounded-full inline-block mr-1"/>}
+                     <span className="font-medium text-gray-800 hover:underline">{user.login}</span>
+                   </a>
+                 </TooltipTrigger>
+                 <TooltipContent>
+                   <p>{user.type}: {user.login}</p>
+                 </TooltipContent>
+               </Tooltip>
+             </TooltipProvider>
+             {actionText && <span>{actionText}</span>}
+             {date && <span>on {formatDate(date)}</span>}
+           </div>
+      );
+  }
+  // --- END: Helper for rendering User Avatars/Links ---
+
+  // --- START: Helper for rendering Labels ---
+  const renderLabels = (labels: any[]) => {
+     if (!labels || labels.length === 0) return null;
+     return (
+        <div className="flex flex-wrap gap-1 mt-1.5">
+           {labels.map((label: any) => (
+             <Badge
+               key={label.id}
+               variant="outline"
+               className="text-xs px-1.5 py-0.5 font-normal border"
+               // Basic contrast logic - might need refinement
+               style={{
+                 backgroundColor: `#${label.color}`,
+                 color: isColorDark(`#${label.color}`) ? '#ffffff' : '#000000',
+                 borderColor: `#${label.color}`
+               }}
+             >
+               {label.name}
+             </Badge>
+           ))}
+        </div>
+     );
+  }
+  const isColorDark = (hexColor: string): boolean => {
+    try {
+      const color = hexColor.substring(1); // Remove #
+      const r = parseInt(color.substring(0, 2), 16);
+      const g = parseInt(color.substring(2, 4), 16);
+      const b = parseInt(color.substring(4, 6), 16);
+      // HSP equation from http://alienryderflex.com/hsp.html
+      const hsp = Math.sqrt(0.299 * (r * r) + 0.587 * (g * g) + 0.114 * (b * b));
+      return hsp < 127.5; // Below 127.5 is considered dark
+    } catch {
+      return false; // Default to light if parsing fails
+    }
+  };
+  // --- END: Helper for rendering Labels ---
+
   return (
-    <div className="border rounded-md overflow-hidden mb-3 max-w-7xl mx-auto">
+    <div className="border rounded-md overflow-hidden mb-3 mx-8">
       <div className="bg-green-100 border-b border-green-200 p-2 flex justify-between items-center">
         <div className="flex items-center">
           {/* Use cell content as the title, which we set to "GitHub Tool: tool_name" */}
@@ -1312,8 +1714,19 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
             <CardContent className="p-3">
               {renderToolFormTabs()}
 
-              {/* Render inputs for the single active tool */}
-              {toolForms[0] && renderToolFormInputs(toolForms[0])}
+              {/* Render inputs for the single active tool within a collapsible accordion */}
+              {toolForms[0] && (
+                <Accordion type="single" collapsible className="w-full">
+                  <AccordionItem value="tool-args" className="border-b-0"> {/* Remove bottom border */}
+                    <AccordionTrigger className="text-xs font-medium py-2 hover:no-underline">
+                      Tool Arguments
+                    </AccordionTrigger>
+                    <AccordionContent className="pt-2">
+                      {renderToolFormInputs(toolForms[0])}
+                    </AccordionContent>
+                  </AccordionItem>
+                </Accordion>
+              )}
             </CardContent>
           </Card>
         </div>
@@ -1353,7 +1766,6 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
         {cell.result && (
           <div>
             {renderResultData()}
-            {renderMetadata()}
           </div>
         )}
       </div>

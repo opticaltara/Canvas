@@ -567,13 +567,13 @@ export default function CanvasPage() {
         <>
           <div className="mb-8">
             <div className="flex justify-between items-center border-b pb-4 mb-4">
-              <div className="flex-1">
+              <div className="flex items-center flex-1 mr-4">
                 {isEditing ? (
                   <div className="flex items-center">
                     <Input
                       value={editedName}
                       onChange={(e) => setEditedName(e.target.value)}
-                      className="text-3xl font-bold max-w-md"
+                      className="text-3xl font-bold"
                       onBlur={handleNameChange}
                       onKeyDown={(e) => e.key === "Enter" && handleNameChange()}
                       autoFocus
@@ -587,6 +587,23 @@ export default function CanvasPage() {
                     {notebook?.name || notebook?.metadata?.title || "Untitled Notebook"}
                   </h1>
                 )}
+                <div className="ml-4 flex items-center flex-shrink-0">
+                  <div
+                    className={`w-2 h-2 rounded-full mr-2 ${
+                      wsStatus === "connected" ? "bg-green-500" : wsStatus === "connecting" ? "bg-yellow-500" : "bg-red-500"
+                    }`}
+                  ></div>
+                  <span className="text-xs text-gray-500 mr-4">
+                    {wsStatus === "connected" ? "Connected" : wsStatus === "connecting" ? "Connecting..." : "Disconnected"}
+                  </span>
+
+                  {isInvestigationRunning && (
+                    <div className="flex items-center">
+                      <div className="animate-spin h-3 w-3 border-2 border-purple-500 rounded-full border-t-transparent mr-2"></div>
+                      <span className="text-xs text-purple-700">{currentStatus || "Investigation in progress..."}</span>
+                    </div>
+                  )}
+                </div>
               </div>
               <div className="flex items-center space-x-2">
                 <Button
@@ -599,47 +616,6 @@ export default function CanvasPage() {
                   Run All
                 </Button>
               </div>
-            </div>
-
-            <div className="mt-2 flex items-center">
-              <div
-                className={`w-2 h-2 rounded-full mr-2 ${
-                  wsStatus === "connected" ? "bg-green-500" : wsStatus === "connecting" ? "bg-yellow-500" : "bg-red-500"
-                }`}
-              ></div>
-              <span className="text-xs text-gray-500">
-                {wsStatus === "connected" ? "Connected" : wsStatus === "connecting" ? "Connecting..." : "Disconnected"}
-              </span>
-
-              {isInvestigationRunning && (
-                <div className="ml-4 flex items-center">
-                  <div className="animate-spin h-3 w-3 border-2 border-purple-500 rounded-full border-t-transparent mr-2"></div>
-                  <span className="text-xs text-purple-700">{currentStatus || "Investigation in progress..."}</span>
-                </div>
-              )}
-            </div>
-
-            <div className="mt-2 mb-4">
-              {isEditingDesc ? (
-                <div>
-                  <Textarea
-                    value={editedDescription}
-                    onChange={(e) => setEditedDescription(e.target.value)}
-                    className="text-sm text-gray-500 min-h-[60px]"
-                    onBlur={handleDescriptionChange}
-                    onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleDescriptionChange()}
-                    autoFocus
-                    placeholder="Add a description..."
-                  />
-                </div>
-              ) : (
-                <p
-                  className="text-gray-500 text-sm cursor-pointer hover:text-gray-700"
-                  onClick={() => setIsEditingDesc(true)}
-                >
-                  {notebook.description || notebook.metadata?.description || "Add a description..."}
-                </p>
-              )}
             </div>
           </div>
 

@@ -81,4 +81,10 @@ def get_db() -> Iterator[Session]:
         yield db
     finally:
         db.close()
-        logger.info("Synchronous session closed", extra={'correlation_id': 'N/A'}) 
+        logger.info("Synchronous session closed", extra={'correlation_id': 'N/A'})
+
+# New dependency function using the async context manager
+async def get_async_db_session() -> AsyncIterator[AsyncSession]:
+    """FastAPI dependency to provide an AsyncSession."""
+    async with get_db_session() as session:
+        yield session 

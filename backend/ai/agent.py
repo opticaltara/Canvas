@@ -38,8 +38,9 @@ from backend.core.query_result import (
 )
 from backend.ai.chat_tools import NotebookCellTools, CreateCellParams
 from backend.core.notebook import Notebook
-from backend.services.notebook_manager import get_notebook_manager
+from backend.services.notebook_manager import NotebookManager
 from backend.db.database import get_db
+from backend.db.database import get_db_session
 from backend.services.connection_manager import ConnectionManager, get_connection_manager
 from backend.ai.events import (
     EventType,
@@ -213,6 +214,7 @@ class AIAgent:
         self,
         notebook_id: str,
         available_data_sources: List[str],
+        notebook_manager: NotebookManager,
         mcp_server_map: Optional[Dict[str, MCPServerHTTP]] = None,
         connection_manager: Optional[ConnectionManager] = None
     ):
@@ -228,6 +230,7 @@ class AIAgent:
         self.notebook_id = notebook_id
         self.available_data_sources = available_data_sources
         self.connection_manager = connection_manager or get_connection_manager()
+        self.notebook_manager = notebook_manager
         
         # Log the received MCP server map and available sources
         ai_logger.info(f"AIAgent for notebook {self.notebook_id} initialized with available data sources: {self.available_data_sources}")
@@ -555,9 +558,7 @@ class AIAgent:
         Yields:
             Event model instances representing status updates
         """
-        db_gen = get_db()
-        db: Session = next(db_gen)
-        try:
+        async with get_db_session() as db:
             if not cell_tools:
                 raise ValueError("cell_tools is required for creating cells")
                 
@@ -565,11 +566,10 @@ class AIAgent:
             if not notebook_id_str:
                 raise ValueError("notebook_id is required for creating cells")
             
-            # Fetch the actual Notebook object - needed for dependency graph and records
-            notebook_manager = get_notebook_manager() 
+            # Fetch the actual Notebook object using the stored manager
             try:
                 notebook_uuid = UUID(notebook_id_str)
-                notebook: Notebook = notebook_manager.get_notebook(db=db, notebook_id=notebook_uuid) # Pass db and use keyword arg
+                notebook: Notebook = await self.notebook_manager.get_notebook(db=db, notebook_id=notebook_uuid)
             except ValueError:
                 ai_logger.error(f"Invalid notebook_id format: {notebook_id_str}")
                 raise ValueError(f"Invalid notebook_id format: {notebook_id_str}")
@@ -913,25 +913,13 @@ Investigation Findings:
             # Now yield the final completion status after attempting summarization
             yield InvestigationCompleteEvent() # Use model
 
-        finally:
-            # --- IMPORTANT: Save the notebook state --- 
+            # --- IMPORTANT: Save the notebook state (now inside the async with block) --- 
             if 'notebook' in locals() and notebook is not None:
                 try:
-                    notebook_manager = get_notebook_manager() # Ensure manager is available
-                    # Call save_notebook assuming its signature will be updated to accept these args
-                    # The linter will likely complain based on the current no-op implementation
-                    notebook_manager.save_notebook(db=db, notebook_id=notebook.id, notebook=notebook)
+                    await self.notebook_manager.save_notebook(db=db, notebook_id=notebook.id, notebook=notebook)
                     ai_logger.info(f"Successfully initiated save for notebook {notebook.id} state after investigation.")
                 except Exception as save_err:
                     ai_logger.error(f"Failed to initiate save for notebook {notebook.id} state after investigation: {save_err}", exc_info=True)
-            # --- End Save Notebook --- 
-            
-            try:
-                next(db_gen) # Close the session
-            except StopIteration:
-                pass # Expected
-            except Exception as e:
-                ai_logger.error(f"Error closing database session in AIAgent.investigate: {e}", exc_info=True)
         
 
     async def create_investigation_plan(self, query: str, notebook_id: Optional[str] = None, message_history: List[ModelMessage] = []) -> InvestigationPlanModel:
