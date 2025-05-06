@@ -320,7 +320,9 @@ export default function CanvasSidebar() {
               {!isCollapsed && "New Canvas"}
             </Button>
           </DialogTrigger>
-          <DialogContent>
+          <DialogContent 
+            className="bg-white"
+          >
             <DialogHeader>
               <DialogTitle>Create New Canvas</DialogTitle>
               <DialogDescription>Create a new canvas to start your analysis.</DialogDescription>

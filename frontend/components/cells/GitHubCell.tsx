@@ -1,6 +1,6 @@
 "use client"
 
-import type React from "react"
+import React from "react"
 import { useState, useEffect } from "react"
 import { PlayIcon, ChevronDownIcon, ChevronUpIcon, ExternalLinkIcon, GitCommitIcon, FileDiffIcon, CopyIcon, CheckIcon, Trash2Icon, Download, FolderIcon, FileIcon, MessageSquare, GitPullRequest, CheckCircle, XCircle, Clock, AlertCircleIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -24,7 +24,7 @@ import type { Cell } from "@/store/types"
 interface GitHubCellProps {
   // Use the imported Cell type
   cell: Cell 
-  onExecute: (cellId: string, params?: any) => void
+  onExecute: (cellId: string) => void
   onUpdate: (cellId: string, content: string, metadata?: Record<string, any>) => void
   onDelete: (cellId: string) => void
   isExecuting: boolean
@@ -35,7 +35,7 @@ interface ToolForm {
   toolArgs: Record<string, any>
 }
 
-const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDelete, isExecuting }): React.ReactNode => {
+const GitHubCellComponent: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDelete, isExecuting }): React.ReactNode => {
   // Log the cell prop received by the component
   console.log(`[GitHubCell ${cell.id}] Render with cell prop:`, JSON.stringify({ 
     id: cell.id, 
@@ -62,26 +62,27 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
   const toolDefinitions = useConnectionStore((state) => state.toolDefinitions.github);
   const toolLoadingStatus = useConnectionStore((state) => state.toolLoadingStatus.github);
 
-  // Initialize the tool form based on cell data when the cell data changes
+  // Initialize/Reset the tool form state ONLY when the cell identity changes.
   useEffect(() => {
-    // Use tool_name and tool_arguments directly from the cell object
-    if (cell.tool_name && cell.tool_arguments) {
+    const incomingToolName = cell.tool_name;
+    const incomingToolArgs = cell.tool_arguments;
+
+    if (incomingToolName && incomingToolArgs) {
+      console.log(`[GitHubCell ${cell.id}] useEffect [id changed]: Initializing/Resetting form state from props.`);
       const initialForm: ToolForm = {
-        toolName: cell.tool_name,
-        toolArgs: { ...cell.tool_arguments }, // Ensure a copy
-      }
-      setToolForms([initialForm]) // Set the state with a single form array
-      setActiveToolIndex(0)
-      console.log("GitHubCell initialized from cell data:", initialForm)
+        toolName: incomingToolName,
+        toolArgs: { ...incomingToolArgs }, // Ensure a copy
+      };
+      setToolForms([initialForm]);
+      setActiveToolIndex(0);
     } else {
-      // Fallback if tool info is missing (should ideally not happen for agent-generated cells)
-      console.warn("GitHubCell missing tool_name/tool_arguments in cell data for cell:", cell.id)
-      // Consider a more generic or empty default state
-      setToolForms([{ toolName: "", toolArgs: {} }]) 
-      setActiveToolIndex(0)
+      // Fallback if tool info is missing
+      console.warn(`[GitHubCell ${cell.id}] useEffect [id changed]: Tool info missing in cell prop, setting empty state.`);
+      setToolForms([{ toolName: "", toolArgs: {} }]);
+      setActiveToolIndex(0);
     }
-    // Dependency array ensures this runs when the cell's tool info potentially changes
-  }, [cell.tool_name, cell.tool_arguments, cell.id]) // Use direct cell properties
+    // Dependency array: Only run when the cell identity changes.
+  }, [cell.id]); // Use cell.id as the primary dependency
 
   // Format date to be more readable
   const formatDate = (dateString: string) => {
@@ -154,23 +155,17 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
       }
     }
     setToolForms(updatedForms)
-
-    // Persist changes to metadata immediately
-    const currentForm = updatedForms[toolIndex];
-    onUpdate(cell.id, cell.content, { toolName: currentForm.toolName, toolArgs: currentForm.toolArgs });
   }
 
   // Execute the cell with the current tool forms
   const executeWithToolForms = () => {
-    // Create execution parameters with the tool forms
-    const params = {
-      tools: toolForms.map((form) => ({
-        name: form.toolName,
-        args: form.toolArgs,
-      })),
+    // ADDED: Update cell with current arguments before execution
+    const currentForm = toolForms[activeToolIndex];
+    if (currentForm) {
+        onUpdate(cell.id, cell.content, { toolName: currentForm.toolName, toolArgs: currentForm.toolArgs });
     }
-
-    onExecute(cell.id, params)
+    // END ADDED
+    onExecute(cell.id)
   }
 
   // --- Modified: Render tool form inputs dynamically based on JSON Schema --- 
@@ -417,9 +412,15 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
             if (jsonText) {
                  commitData = JSON.parse(jsonText);
             } else {
-                 // Fallback: Assume toolResult.content is the data directly
-                 console.warn("Parsing get_commit result from potentially direct content structure.");
-                 commitData = toolResult.content;
+                 // Fallback: If getJsonTextContent failed, attempt to use content directly
+                 // Check if it's already an object (post JSON serialization from backend)
+                 if (typeof toolResult.content === 'object' && toolResult.content !== null) {
+                     console.warn("[get_commit] Parsing direct object content.");
+                     commitData = toolResult.content; 
+                 } else {
+                      // If it's not an object, we cannot proceed
+                      throw new Error("Commit data is not in expected format (JSON string or object).");
+                 }
                  // Basic validation if it's an object
                  if (typeof commitData !== 'object' || commitData === null || !commitData.sha) {
                      throw new Error("Direct content is not a valid commit object.");
@@ -671,9 +672,13 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
             if (jsonText) {
                commitsList = JSON.parse(jsonText);
             } else {
-               // Fallback: Assume toolResult.content is the data directly
-               console.warn("Parsing list_commits result from potentially direct content structure.");
-               commitsList = toolResult.content;
+               // Fallback: Check if content is already an array
+               if (Array.isArray(toolResult.content)) {
+                   console.warn("[list_commits] Parsing direct array content.");
+                   commitsList = toolResult.content;
+               } else {
+                   throw new Error("Commit list data is not in expected format (JSON string or array).");
+               }
             }
 
             if (!Array.isArray(commitsList)) {
@@ -763,9 +768,13 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
             if (jsonText) {
                  searchData = JSON.parse(jsonText);
             } else {
-                 // Fallback: Assume toolResult.content is the data directly
-                 console.warn("Parsing search_repositories result from potentially direct content structure.");
-                 searchData = toolResult.content;
+                 // Fallback: Check if content is already an object
+                 if (typeof toolResult.content === 'object' && toolResult.content !== null) {
+                     console.warn("[search_repositories] Parsing direct object content.");
+                     searchData = toolResult.content;
+                 } else {
+                      throw new Error("Search data is not in expected format (JSON string or object).");
+                 }
             }
 
             const totalCount = searchData.total_count;
@@ -841,9 +850,13 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
             if (jsonText) {
                  parsedData = JSON.parse(jsonText);
             } else {
-                 // Fallback: Assume toolResult.content is the data directly
-                 console.warn("Parsing get_file_contents result from potentially direct content structure.");
-                 parsedData = toolResult.content;
+                 // Fallback: Check if content is already an object or array
+                 if (typeof toolResult.content === 'object' && toolResult.content !== null) {
+                     console.warn("[get_file_contents] Parsing direct object/array content.");
+                     parsedData = toolResult.content;
+                 } else {
+                     throw new Error("File/Directory data is not in expected format (JSON string or object/array).");
+                 }
             }
 
             // Check if the result is an array (directory listing) or an object (single file)
@@ -1003,8 +1016,13 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
             if (jsonText) {
                  issueData = JSON.parse(jsonText);
             } else {
-                 console.warn("Parsing get_issue result from potentially direct content structure.");
-                 issueData = toolResult.content;
+                 // Fallback: Check if content is already an object
+                 if (typeof toolResult.content === 'object' && toolResult.content !== null) {
+                     console.warn("[get_issue] Parsing direct object content.");
+                     issueData = toolResult.content;
+                 } else {
+                     throw new Error("Issue data is not in expected format (JSON string or object).");
+                 }
             }
             if (typeof issueData !== 'object' || issueData === null || !issueData.id) {
                 throw new Error("Invalid issue data format.");
@@ -1083,8 +1101,13 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
               if (jsonText) {
                  commentsData = JSON.parse(jsonText);
              } else {
-                 console.warn("Parsing get_issue_comments result from potentially direct content structure.");
-                 commentsData = toolResult.content;
+                 // Fallback: Check if content is already an array
+                 if (Array.isArray(toolResult.content)) {
+                     console.warn("[get_issue_comments] Parsing direct array content.");
+                     commentsData = toolResult.content;
+                 } else {
+                     throw new Error("Comments data is not in expected format (JSON string or array).");
+                 }
              }
              if (!Array.isArray(commentsData)) throw new Error("Expected an array of comments.");
 
@@ -1131,8 +1154,13 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
             if (jsonText) {
                  prData = JSON.parse(jsonText);
             } else {
-                 console.warn("Parsing get_pull_request result from potentially direct content structure.");
-                 prData = toolResult.content;
+                 // Fallback: Check if content is already an object
+                 if (typeof toolResult.content === 'object' && prData !== null) { // Typo: should be toolResult.content
+                     console.warn("[get_pull_request] Parsing direct object content.");
+                     prData = toolResult.content;
+                 } else {
+                     throw new Error("Pull request data is not in expected format (JSON string or object).");
+                 }
             }
              if (typeof prData !== 'object' || prData === null || !prData.id) {
                  throw new Error("Invalid pull request data format.");
@@ -1234,8 +1262,13 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
               if (jsonText) {
                  commentsData = JSON.parse(jsonText);
              } else {
-                 console.warn("Parsing get_pull_request_comments result from potentially direct content structure.");
-                 commentsData = toolResult.content;
+                 // Fallback: Check if content is already an array
+                 if (Array.isArray(toolResult.content)) {
+                     console.warn("[get_pull_request_comments] Parsing direct array content.");
+                     commentsData = toolResult.content;
+                 } else {
+                     throw new Error("Pull request comments data is not in expected format (JSON string or array).");
+                 }
              }
              if (!Array.isArray(commentsData)) throw new Error("Expected an array of comments.");
 
@@ -1283,8 +1316,13 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
               if (jsonText) {
                  filesData = JSON.parse(jsonText);
              } else {
-                 console.warn("Parsing get_pull_request_files result from potentially direct content structure.");
-                 filesData = toolResult.content;
+                 // Fallback: Check if content is already an array
+                 if (Array.isArray(toolResult.content)) {
+                     console.warn("[get_pull_request_files] Parsing direct array content.");
+                     filesData = toolResult.content;
+                 } else {
+                     throw new Error("Pull request files data is not in expected format (JSON string or array).");
+                 }
              }
              if (!Array.isArray(filesData)) throw new Error("Expected an array of files.");
 
@@ -1413,9 +1451,13 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
               if (jsonText) {
                   userData = JSON.parse(jsonText);
               } else {
-                   // Fallback: Assume toolResult.content is the data directly
-                  console.warn("Parsing get_me result from potentially direct content structure.");
-                  userData = toolResult.content;
+                   // Fallback: Check if content is already an object
+                  if (typeof toolResult.content === 'object' && toolResult.content !== null) {
+                      console.warn("[get_me] Parsing direct object content.");
+                      userData = toolResult.content;
+                  } else {
+                       throw new Error("User data is not in expected format (JSON string or object).");
+                  }
               }
 
 
@@ -1500,39 +1542,36 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
                   // Try to parse this text as JSON
                   try {
                       finalContent = JSON.parse(jsonText);
-                      isJson = true;
+                      // isJson = true; // We'll check the type directly later
                   } catch {
                       // It wasn't JSON, keep it as a string
                       finalContent = jsonText;
-                      isJson = false;
+                      // isJson = false;
                   }
               } else {
                    // Fallback: Assume toolResult.content is the data directly
                    console.warn("Parsing default/unknown tool result from potentially direct content structure.");
                    finalContent = toolResult.content;
-                   // Consider it JSON-like if it's an object (for formatting purposes)
-                   isJson = typeof finalContent === 'object' && finalContent !== null;
               }
 
 
-              // Step 2: Render the content
-              if (isJson) {
-                  // Render as formatted JSON
+              // Step 2: Render the content (Simplified & Safer)
+              if (typeof finalContent === 'object' && finalContent !== null) {
+                  // Always render objects as formatted JSON
                   displayContent = (
                       <pre className="text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200 overflow-x-auto">
                           {JSON.stringify(finalContent, null, 2)}
                       </pre>
                   );
               } else {
-                  // Render as preformatted text
+                  // Render anything else (strings, numbers, booleans, null, undefined) as preformatted text
                   displayContent = (
                       <pre className="whitespace-pre-wrap text-xs font-mono bg-gray-50 p-1.5 rounded border border-gray-200 overflow-x-auto">
-                          {String(finalContent)}
+                          {/* Use String() and handle null/undefined gracefully */}
+                          {String(finalContent ?? '')}
                       </pre>
                   );
               }
-          } else {
-              displayContent = <span className="text-gray-500 italic text-xs">No result content available.</span>
           }
       }
 
@@ -1761,16 +1800,58 @@ const GitHubCell: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpdate, onDe
           </div>
         )}
 
-        {/* Results section - Render if a result exists, regardless of status if loaded initially */}
-        {/* The check for status == 'success' or 'error' primarily applies after execution via WebSocket update */}
-        {cell.result && (
+        {/* Results section - Only render if not queued/running and result exists */}
+        {cell.status !== 'queued' && cell.status !== 'running' && cell.result && (
           <div>
             {renderResultData()}
           </div>
+        )}
+        {/* Optional: Show loading indicator when running/queued */}
+        {(cell.status === 'queued' || cell.status === 'running') && (
+           <div className="p-2 text-xs text-gray-500 flex items-center">
+             <div className="animate-spin h-3 w-3 border-2 border-gray-400 rounded-full border-t-transparent mr-1.5"></div>
+             Processing...
+           </div>
         )}
       </div>
     </div>
   )
 }
 
-export default GitHubCell
+// Memoize with custom comparison to avoid re-render if relevant props unchanged
+const areEqual = (prevProps: GitHubCellProps, nextProps: GitHubCellProps) => {
+  const prevCell = prevProps.cell;
+  const nextCell = nextProps.cell;
+
+  // Quick reference equality check
+  if (prevCell === nextCell && prevProps.isExecuting === nextProps.isExecuting) {
+    return true;
+  }
+
+  // Shallow compare key fields that drive UI
+  const keysToCheck: (keyof typeof prevCell)[] = [
+    "id",
+    "type",
+    "status",
+    "tool_name",
+    "result",
+  ];
+
+  for (const key of keysToCheck) {
+    // Note: result is compared by reference; if backend sends same object instance, still equal
+    if (prevCell[key] !== nextCell[key]) {
+      return false;
+    }
+  }
+
+  // Also ensure isExecuting flag didn't change
+  if (prevProps.isExecuting !== nextProps.isExecuting) {
+    return false;
+  }
+
+  return true;
+};
+
+const GitHubCell = React.memo(GitHubCellComponent, areEqual);
+
+export default GitHubCell;

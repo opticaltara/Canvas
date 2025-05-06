@@ -2,7 +2,7 @@
 
 import { useState } from "react"
 import { Button } from "@/components/ui/button"
-import { Plus, FileText, Github } from "lucide-react"
+import { Plus, FileText, Github, Folder } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 
 interface CellCreationPillsProps {
@@ -46,6 +46,14 @@ export default function CellCreationPills({ onAddCell }: CellCreationPillsProps)
             >
               <Github className="h-4 w-4 mr-2 text-gray-500" />
               <span>Github Tool</span>
+            </Button>
+            <Button
+              variant="ghost"
+              className="flex justify-start items-center px-2 py-1 text-sm hover:bg-blue-50 transition-colors duration-200"
+              onClick={() => handleAddCell("filesystem")}
+            >
+              <Folder className="h-4 w-4 mr-2 text-green-500" />
+              <span>Filesystem</span>
             </Button>
           </div>
         </PopoverContent>

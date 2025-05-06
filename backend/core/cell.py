@@ -57,10 +57,16 @@ class CellType(str, Enum):
         MARKDOWN: Cell containing markdown text
         GITHUB: Cell containing a GitHub query or operation result
         SUMMARIZATION: Cell for summarization results
+        INVESTIGATION_REPORT: Cell containing a structured investigation report
+        FILESYSTEM: Cell representing a filesystem operation
+        PYTHON: Cell containing Python code
     """
     MARKDOWN = "markdown"
     GITHUB = "github"
     SUMMARIZATION = "summarization"
+    INVESTIGATION_REPORT = "investigation_report"
+    FILESYSTEM = "filesystem"
+    PYTHON = "python"
 
 
 class CellResult(BaseModel):

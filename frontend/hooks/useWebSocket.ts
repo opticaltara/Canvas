@@ -3,14 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import { WS_URL } from "@/config/api-config"
 
-// Check if PartySocket is available
-let PartySocket: any
-try {
-  // Dynamic import to avoid issues with SSR
-  PartySocket = require("partysocket")
-} catch (e) {
-  console.log("PartySocket not available, using native WebSocket")
-}
+console.log("Connecting websocket to WS_URL", WS_URL);
 
 export type WebSocketStatus = "connecting" | "connected" | "disconnected" | "error"
 
@@ -38,50 +31,71 @@ export function useWebSocket(notebookId: string) {
     // Connect to the WebSocket endpoint for the notebook
     const wsUrl = `${WS_URL}/ws/notebook/${notebookId}`
 
-    // Use PartySocket if available, otherwise use native WebSocket
-    if (PartySocket) {
+    console.log(`Attempting WebSocket connection to: ${wsUrl}`) // More detailed log
+
+    /* 
+    // Temporarily disable PartySocket check to force native WebSocket
+    if (typeof PartySocket !== 'undefined' && PartySocket) {
       socketRef.current = new PartySocket({
         host: WS_URL.replace(/^(ws|wss):\/\//, ""),
         room: `notebook-${notebookId}`,
       })
-    } else {
+    } else { 
       socketRef.current = new WebSocket(wsUrl)
+    }
+    */
+    // Always use native WebSocket for now
+    // console.log("Forcing native WebSocket connection to:", wsUrl); // Add log
+    try {
+      socketRef.current = new WebSocket(wsUrl)
+    } catch (err) {
+      console.error(`Failed to create WebSocket object for URL: ${wsUrl}`, err);
+      setStatus("error");
+      // Optionally attempt reconnect or other error handling here
+      return; // Exit connect function if creation fails
     }
 
     // Set up event handlers
     const socket = socketRef.current
 
-    socket.onopen = () => {
-      console.log("WebSocket connected")
+    socket.onopen = (event: Event) => {
+      console.log("WebSocket onopen event: Connection established", event)
       setStatus("connected")
-    }
-
-    socket.onmessage = (event) => {
-      try {
-        const message = JSON.parse(event.data) as WebSocketMessage
-        console.log("WebSocket message received:", message)
-        setMessages((prev) => [...prev, message])
-      } catch (error) {
-        console.error("Failed to parse WebSocket message:", error)
+      if (reconnectTimeoutRef.current) { // Clear reconnect timer on successful open
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
       }
     }
 
-    socket.onerror = (error) => {
-      console.error("WebSocket error:", error)
-      setStatus("error")
+    socket.onmessage = (event: MessageEvent) => {
+      try {
+        const message = JSON.parse(event.data) as WebSocketMessage
+        console.log("WebSocket onmessage event: Message received:", message)
+        setMessages((prev) => [...prev, message])
+      } catch (error) {
+        console.error("WebSocket onmessage event: Failed to parse message:", error, "Raw data:", event.data)
+      }
     }
 
-    socket.onclose = () => {
-      console.log("WebSocket disconnected")
-      setStatus("disconnected")
+    socket.onerror = (event: Event) => {
+      console.error("WebSocket onerror event: Error occurred", event)
+      setStatus("error")
+      // Note: onerror is often followed by onclose. Reconnect logic is in onclose.
+    }
 
-      // Attempt to reconnect after a delay
+    socket.onclose = (event: CloseEvent) => {
+      console.log(`WebSocket onclose event: Connection closed. Code: ${event.code}, Reason: '${event.reason}', WasClean: ${event.wasClean}`, event)
+      setStatus("disconnected")
+      socketRef.current = null; // Clear the ref
+
+      // Attempt to reconnect after a delay, only if not closed cleanly or if desired
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current)
       }
 
+      console.log("Attempting WebSocket reconnect in 3 seconds...")
       reconnectTimeoutRef.current = setTimeout(() => {
-        connect()
+        connect() // Call connect again
       }, 3000)
     }
   }, [notebookId])
@@ -115,11 +129,16 @@ export function useWebSocket(notebookId: string) {
 
   // Connect when the component mounts and disconnect when it unmounts
   useEffect(() => {
+    console.log(`[useWebSocket useEffect] Running effect. notebookId: ${notebookId}`); // Use template literal
     if (notebookId) {
+      console.log("[useWebSocket useEffect] notebookId is valid, calling connect..."); // Use double quotes
       connect()
+    } else {
+      console.log("[useWebSocket useEffect] notebookId is invalid, NOT calling connect."); // Use double quotes
     }
 
     return () => {
+      console.log(`[useWebSocket useEffect] Cleanup running. notebookId: ${notebookId}`); // Use template literal
       disconnect()
     }
   }, [connect, disconnect, notebookId])

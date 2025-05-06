@@ -13,7 +13,7 @@ import AIChatToggle from "@/components/AIChatToggle"
 import { api } from "@/api/client"
 import { useToast } from "@/hooks/use-toast"
 import { useInvestigationEvents, type CellCreationParams } from "@/hooks/useInvestigationEvents"
-import { useCanvasStore } from "@/store/canvasStore"
+import { useCanvasStore, type NotebookState } from "@/store/canvasStore"
 import { type Cell, type CellType } from "@/store/types"
 import CellFactory from "@/components/cells/CellFactory"
 
@@ -35,14 +35,17 @@ export default function CanvasPage() {
   const [deletingCellId, setDeletingCellId] = useState<string | null>(null)
   const [isChatPanelOpen, setIsChatPanelOpen] = useState(false)
 
+  const storeCells = useCanvasStore((state) => state.cells)
+  const setStoreActiveNotebook = useCanvasStore((state) => state.setActiveNotebook)
+
   const initialized = useRef(false)
 
   useEffect(() => {
     if (notebookId) {
       console.log("🔑 Setting active notebook ID in store:", notebookId)
-      useCanvasStore.getState().setActiveNotebook(notebookId)
+      setStoreActiveNotebook(notebookId)
     }
-  }, [notebookId])
+  }, [notebookId, setStoreActiveNotebook])
 
   const handleCreateCell = useCallback(
     (params: CellCreationParams) => {
@@ -108,9 +111,6 @@ export default function CanvasPage() {
   );
 
   const handleUpdateCell = useCallback((cellId: string, updates: Partial<CellCreationParams>) => {
-    // This function might need review depending on how updates are triggered.
-    // If updates also come via step_id, similar logic might be needed.
-    // For now, assume it's called with the correct cellId (UUID).
     console.log(`🔄 handleUpdateCell called for Cell ID: ${cellId} with updates:`, updates);
     setCells((prevCells) =>
       prevCells.map((cell): DisplayCell => {
@@ -126,7 +126,10 @@ export default function CanvasPage() {
             notebook_id: cell.notebook_id,
             created_at: cell.created_at,
             updated_at: new Date().toISOString(),
-            metadata: cell.metadata,
+            metadata: {
+              ...cell.metadata,
+              ...updates.metadata,
+            },
           }
           return updatedCell
         }
@@ -198,7 +201,7 @@ export default function CanvasPage() {
           }
         }
 
-        useCanvasStore.getState().setActiveNotebook(notebookId)
+        setStoreActiveNotebook(notebookId)
 
         setLoading(false)
         initialized.current = true
@@ -215,7 +218,7 @@ export default function CanvasPage() {
     }
 
     fetchNotebookData()
-  }, [notebookId, toast])
+  }, [notebookId, toast, setStoreActiveNotebook])
 
   useEffect(() => {
     console.log("🔄 Setting up canvasStore subscription for notebook:", notebookId)
@@ -297,7 +300,7 @@ export default function CanvasPage() {
       console.log("🧹 Cleaning up canvasStore subscription")
       unsubscribe()
     }
-  }, [notebookId, cells])
+  }, [notebookId])
 
   useEffect(() => {
     if (initialized.current && notebookId) {
@@ -321,7 +324,7 @@ export default function CanvasPage() {
         })
       }
     }
-  }, [useCanvasStore.getState().cells, notebookId])
+  }, [notebookId])
 
   useEffect(() => {
     console.log("📊 Cells state changed, current count:", cells.length)
@@ -391,6 +394,9 @@ export default function CanvasPage() {
         case "github":
           defaultContent = "{}"
           break
+        case "filesystem":
+          defaultContent = "list_dir ."
+          break
       }
 
       const apiCellType = type
@@ -451,7 +457,7 @@ export default function CanvasPage() {
     }
   }
 
-  const handleCellContentChange = async (cellId: string, newContent: string) => {
+  const handleCellContentChange = async (cellId: string, newContent: string, metadata?: Record<string, any>) => {
     if (!notebookId) return
 
     try {
@@ -462,11 +468,19 @@ export default function CanvasPage() {
       updatedCells[cellIndex] = {
         ...updatedCells[cellIndex],
         content: newContent,
+        metadata: {
+          ...updatedCells[cellIndex].metadata,
+          ...metadata,
+        },
       }
       setCells(updatedCells)
 
       await api.cells.update(notebookId, cellId, {
         content: newContent,
+        metadata: {
+          ...updatedCells[cellIndex].metadata,
+          ...metadata,
+        },
       })
     } catch (err) {
       console.error("Failed to update cell content:", err)
@@ -488,19 +502,18 @@ export default function CanvasPage() {
       const updatedCells = [...cells]
       updatedCells[cellIndex] = {
         ...updatedCells[cellIndex],
-        status: "running",
+        status: "queued",
+        result: undefined,
       }
       setCells(updatedCells)
 
-      const result = await api.cells.execute(notebookId, cellId)
-
-      const resultCell: DisplayCell = { ...result }
-      updatedCells[cellIndex] = resultCell
-      setCells(updatedCells)
+      const toolArgsFromState = cells[cellIndex].metadata?.toolArgs
+      const requestBody = { tool_arguments: toolArgsFromState || {} }
+      const result = await api.cells.execute(notebookId, cellId, requestBody)
 
       toast({
-        title: "Success",
-        description: "Cell executed successfully.",
+        title: "Cell Queued",
+        description: "Cell has been queued for execution.",
       })
     } catch (err: unknown) {
       console.error("Failed to execute cell:", err)

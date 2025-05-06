@@ -485,3 +485,9 @@ tbody tr:hover {
 .typing-dot:nth-child(3) {
   animation: typingDot 1s infinite 0.4s;
 }
+
+/* Ensure the default overlay doesn't apply or is adjusted */
+/* This might require inspecting Shadcn's Dialog implementation details */
+/* For example, if DialogOverlay is a separate component sibling, we might need */
+/* to target its styles specifically when .create-canvas-dialog is present */
+/* Or, if DialogContent itself has overlay-like background/backdrop styles, override them */

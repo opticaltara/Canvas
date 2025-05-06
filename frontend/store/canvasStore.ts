@@ -3,7 +3,7 @@ import { devtools, persist } from "zustand/middleware"
 import type { Cell, Notebook, WebSocketStatus } from "./types"
 import { api } from "../api/client"
 
-interface NotebookState {
+export interface NotebookState {
   // Current notebook data
   notebook: Notebook | null
   cells: Cell[]
@@ -17,6 +17,10 @@ interface NotebookState {
   // WebSocket state
   wsStatus: WebSocketStatus
   wsMessages: any[]
+
+  // Chat Panel Interaction State - ADDED
+  sendChatMessageFunction: ((message: string) => Promise<void>) | null
+  isSendingChatMessage: boolean // ADDED to prevent race conditions
 
   // Actions
   setActiveNotebook: (notebookId: string) => void
@@ -33,6 +37,10 @@ interface NotebookState {
   handleCellExecutionStarted: (cellId: string) => void
   handleCellExecutionCompleted: (cellId: string) => void
   handleNotebookUpdate: (notebookData: Notebook) => void
+
+  // Chat Panel Interaction Actions - ADDED
+  registerSendChatMessageFunction: (func: ((message: string) => Promise<void>) | null) => void
+  sendSuggestedStepToChat: (message: string) => Promise<void>
 
   // Utility
   isExecuting: (cellId: string) => boolean
@@ -51,6 +59,8 @@ export const useCanvasStore = create<NotebookState>()(
         executingCells: new Set<string>(),
         wsStatus: "disconnected",
         wsMessages: [],
+        sendChatMessageFunction: null, // ADDED Initial state
+        isSendingChatMessage: false, // ADDED Initial state
 
         // Set active notebook
         setActiveNotebook: (notebookId) => {
@@ -201,6 +211,24 @@ export const useCanvasStore = create<NotebookState>()(
 
         // Handle cell update from WebSocket
         handleCellUpdate: (cellData) => {
+          // Utility function for shallow comparison (top-level keys only)
+          const shallowEqual = (objA: any, objB: any) => {
+            if (objA === objB) return true;
+            if (!objA || !objB) return false;
+
+            const keysA = Object.keys(objA);
+            const keysB = Object.keys(objB);
+
+            if (keysA.length !== keysB.length) return false;
+
+            for (const key of keysA) {
+              if (objA[key] !== objB[key]) {
+                return false;
+              }
+            }
+            return true;
+          };
+
           console.log("🔧 handleCellUpdate called with cell:", cellData.id, cellData.type)
           console.log("🔧 Cell notebook_id:", cellData.notebook_id)
           console.log("🔧 Current active notebook ID in store:", get().activeNotebookId)
@@ -218,43 +246,27 @@ export const useCanvasStore = create<NotebookState>()(
           console.log("🔧 Found cell at index:", index)
 
           if (index >= 0) {
+            const mergedCell = { ...updatedCells[index], ...cellData };
+
+            // Skip state update if nothing actually changed to prevent unnecessary re-renders
+            if (shallowEqual(updatedCells[index], mergedCell)) {
+              console.log("🔧 No changes detected for cell", cellData.id, "— skipping state update.");
+              return;
+            }
+
             console.log("🔧 Updating existing cell in store:", cellData.id)
-            // Merge incoming data with existing cell data
-            updatedCells[index] = { ...updatedCells[index], ...cellData }; 
+            // Merge incoming data with existing cell data after change detection
+            updatedCells[index] = mergedCell;
           } else {
             console.log("🔧 Adding new cell to store:", cellData.id, cellData.type)
-            // Add animation flag for new cells
-            updatedCells.push({ ...cellData, isNew: true })
+            updatedCells.push({ ...cellData }) // Just push the new cell data
           }
 
           console.log("🔧 New cells array length:", updatedCells.length)
           console.log("🔧 Is cells array reference changed:", updatedCells !== currentCells)
 
-          // Update the state with the new cells array
+          // Update the state with the new cells array ONCE
           set({ cells: updatedCells })
-
-          // Log cells after update
-          setTimeout(() => {
-            const updatedStoreCells = get().cells
-            console.log(
-              "🔧 Cells in store after update:",
-              updatedStoreCells.map((c) => ({ id: c.id, type: c.type })),
-            )
-            console.log(
-              "🔧 Cell we just added/updated is in store:",
-              updatedStoreCells.some((c) => c.id === cellData.id),
-            )
-          }, 0)
-
-          // Remove the isNew flag after animation completes
-          setTimeout(() => {
-            console.log("🔧 Removing isNew flag from cell:", cellData.id)
-            set((state) => {
-              const cells = state.cells.map((cell) => (cell.id === cellData.id ? { ...cell, isNew: false } : cell))
-              console.log("🔧 Is cells array reference changed after removing isNew:", cells !== state.cells)
-              return { cells }
-            })
-          }, 500)
         },
 
         // Handle cell execution started from WebSocket
@@ -281,6 +293,33 @@ export const useCanvasStore = create<NotebookState>()(
         // Check if a cell is currently executing
         isExecuting: (cellId) => {
           return get().executingCells.has(cellId)
+        },
+
+        // Chat Panel Interaction Actions - ADDED IMPLEMENTATIONS
+        registerSendChatMessageFunction: (func) => {
+          set({ sendChatMessageFunction: func })
+        },
+
+        sendSuggestedStepToChat: async (message) => {
+          const { sendChatMessageFunction, isSendingChatMessage } = get()
+          if (sendChatMessageFunction && !isSendingChatMessage) {
+            set({ isSendingChatMessage: true });
+            try {
+                console.log(`[CanvasStore] Sending suggested step to chat: "${message}"`);
+                await sendChatMessageFunction(message);
+            } catch (error) {
+                console.error("[CanvasStore] Error sending suggested step to chat:", error);
+                // Optionally update state with an error message for the UI
+                set({ error: "Failed to send suggested step to chat." });
+            } finally {
+                set({ isSendingChatMessage: false });
+            }
+          } else if (isSendingChatMessage) {
+             console.warn("[CanvasStore] Chat message sending already in progress. Ignoring suggested step:", message);
+          }
+           else {
+            console.warn("[CanvasStore] No chat message function registered. Cannot send suggested step:", message);
+          }
         },
       }),
       {

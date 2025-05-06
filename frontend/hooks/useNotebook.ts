@@ -5,6 +5,8 @@ import { api, type Notebook, type Cell } from "../api/client"
 import { useWebSocket } from "./useWebSocket"
 
 export function useNotebook(notebookId: string) {
+  console.log('[useNotebook] Initializing hook with notebookId:', notebookId);
+
   const [notebook, setNotebook] = useState<Notebook | null>(null)
   const [cells, setCells] = useState<Cell[]>([])
   const [loading, setLoading] = useState(true)
@@ -13,6 +15,7 @@ export function useNotebook(notebookId: string) {
 
   // WebSocket connection for real-time updates
   const { status: wsStatus, messages: wsMessages } = useWebSocket(notebookId)
+  console.log('[useNotebook] Called useWebSocket. Initial wsStatus:', wsStatus);
 
   // Load notebook and cells
   useEffect(() => {

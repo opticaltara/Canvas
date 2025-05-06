@@ -19,11 +19,13 @@ import {
   Loader2,
   ArrowLeft,
   Github,
+  Folder,
 } from "lucide-react"
 import type { ConnectionType } from "../store/types"
 import { useToast } from "@/hooks/use-toast"
 import GitHubConnectionForm from "./connection-forms/GitHubConnectionForm"
 import JiraConnectionForm from "./connection-forms/JiraConnectionForm"
+import FileSystemConnectionForm from "./connection-forms/FileSystemConnectionForm"
 
 interface DataConnectionsDialogProps {
   isOpen: boolean
@@ -109,7 +111,7 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
     setDialogError(null)
   }
 
-  const handleConfigChange = (field: string, value: string | boolean) => {
+  const handleConfigChange = (field: string, value: string | boolean | string[]) => {
     setNewConnection((prev) => ({
       ...prev,
       config: {
@@ -177,7 +179,28 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
       }
     } catch (err) {
       console.error("Failed to create connection:", err)
-      const errorMessage = err instanceof Error ? err.message : "An unknown error occurred during creation."
+      let errorMessage = "An unknown error occurred during creation.";
+      if (err instanceof Error) {
+          // Check if the error message is JSON (like FastAPI validation error)
+          try {
+            // Attempt to parse the message as JSON
+            const errorDetail = JSON.parse(err.message); 
+            // If successful, format a user-friendly message
+            if (Array.isArray(errorDetail.detail)) {
+              errorMessage = errorDetail.detail.map((d: any) => 
+                `Field '${d.loc.slice(1).join('.')}': ${d.msg}` // Join location path, skip 'body'
+              ).join('; ');
+            } else if (errorDetail.detail) {
+              // Handle cases where detail might be a string
+              errorMessage = String(errorDetail.detail);
+            } else {
+                errorMessage = err.message; // Use original message if parsing fails or format is unexpected
+            }
+          } catch (parseError) {
+            // If parsing fails, it's likely a regular string error message
+            errorMessage = err.message; 
+          }
+      }
       setDialogError(errorMessage)
     } finally {
       setIsCreatingConnection(false)
@@ -209,6 +232,8 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
         return <Github className="h-5 w-5 text-primary" />
       case "jira":
         return <Database className="h-5 w-5 text-primary" />
+      case "filesystem":
+        return <Folder className="h-5 w-5 text-primary" />
       default:
         return <Database className="h-5 w-5 text-muted-foreground" />
     }
@@ -366,6 +391,13 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
             />
           )}
 
+          {newConnection.type === "filesystem" && (
+            <FileSystemConnectionForm
+              config={newConnection.config}
+              onConfigChange={handleConfigChange}
+            />
+          )}
+
           {testResult && (
             <div
               className={`p-3 rounded-md ${
@@ -393,7 +425,7 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
           )}
 
           <div className="flex justify-end space-x-2 mt-4">
-            <Button
+            {/* <Button
               variant="outline"
               onClick={handleTestConnection}
               disabled={isTestingConnection || isCreatingConnection}
@@ -406,7 +438,7 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
               ) : (
                 "Test Connection"
               )}
-            </Button>
+            </Button> */}
             <Button
               onClick={handleCreateConnection}
               disabled={!newConnection.name || !newConnection.type || isTestingConnection || isCreatingConnection}

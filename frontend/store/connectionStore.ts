@@ -123,8 +123,20 @@ export const useConnectionStore = create<ConnectionState>()(
             if (!connectionData.name || !connectionData.type) {
               throw new Error("Connection name and type are required to create.");
             }
+
+            // Destructure name, type, and config from the input
+            const { name, type, config, ...rest } = connectionData;
+
+            // Prepare data for the API client, spreading the config object
+            const dataForApi = {
+              name,
+              type,
+              ...(config || {}), // Spread the contents of config
+              ...rest // Include any other top-level fields if necessary
+            };
+
             // Use type assertion after checks
-            const newConnection = await api.connections.create(connectionData as { name: string; type: string; [key: string]: any });
+            const newConnection = await api.connections.create(dataForApi as { name: string; type: string; [key: string]: any });
 
             // Only update state if creation was successful (newConnection should not be null from the unified API)
             if (newConnection) {

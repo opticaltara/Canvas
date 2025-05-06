@@ -24,6 +24,11 @@ from backend.services.connection_handlers.github_handler import (
 from backend.services.connection_handlers.jira_handler import (
     JiraConnectionCreate, JiraConnectionUpdate, JiraConnectionTest
 )
+# Import filesystem models
+from backend.services.connection_handlers.filesystem_handler import (
+    FileSystemConnectionCreate, FileSystemConnectionUpdate
+    # FileSystemConnectionTest is skipped for now
+)
 # Import function to get registered types and handler getter
 from backend.services.connection_handlers.registry import get_all_handler_types, get_handler
 
@@ -62,20 +67,32 @@ router = APIRouter()
 
 # Union for specific config fields during creation
 CreatePayloadUnion = Annotated[
-    Union[GithubConnectionCreate, JiraConnectionCreate],
+    Union[
+        GithubConnectionCreate, 
+        JiraConnectionCreate,
+        FileSystemConnectionCreate # Add Filesystem create model
+    ],
     Field(discriminator="type")
 ]
 
 # Union for specific config fields during update
 # Note: Update models in handlers allow optional fields
 UpdatePayloadUnion = Annotated[
-    Union[GithubConnectionUpdate, JiraConnectionUpdate],
+    Union[
+        GithubConnectionUpdate, 
+        JiraConnectionUpdate,
+        FileSystemConnectionUpdate # Add Filesystem update model
+    ],
     Field(discriminator="type")
 ]
 
-# Union for specific config fields during testing
+# Union for specific config fields during testing - Filesystem skipped for now
 TestPayloadUnion = Annotated[
-    Union[GithubConnectionTest, JiraConnectionTest],
+    Union[
+        GithubConnectionTest, 
+        JiraConnectionTest
+        # FileSystemConnectionTest is skipped for now
+    ],
     Field(discriminator="type")
 ]
 
@@ -150,11 +167,8 @@ async def list_connection_types() -> List[str]:
     """Get a list of all available connection types."""
     start_time = time.time()
     try:
-        # Get types from the handler registry
         handler_types = get_all_handler_types()
-        # Add other supported types manually if not using handlers (e.g., python)
-        utility_connections = ["python"]
-        connection_types = sorted(list(set(handler_types + utility_connections)))
+        connection_types = sorted(list(set(handler_types)))
         
         process_time = time.time() - start_time
         connection_logger.info(

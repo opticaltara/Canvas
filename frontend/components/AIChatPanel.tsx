@@ -13,6 +13,13 @@ import { ModelSelector } from "@/components/ModelSelector"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 
+// Import the hook and event types
+import { useInvestigationEvents, type InvestigationEvent } from "@/hooks/useInvestigationEvents"
+// Import cell CRUD operations from zustand store
+import { useCanvasStore } from '@/store/canvasStore'
+// Import the Cell type
+import type { Cell } from "@/store/types"
+
 interface AIChatPanelProps {
   isOpen: boolean
   onToggle: () => void
@@ -34,24 +41,108 @@ interface AgentStatus {
   isExpanded: boolean
 }
 
+// --- Define helper function at the top level --- 
+// Helper function to attempt parsing ChatMessage content into an InvestigationEvent
+// This needs to be robust as not all messages are events.
+const parseChatToInvestigationEvent = (message: ChatMessage): InvestigationEvent | null => {
+  if (message.role !== 'model' || !message.content) {
+    return null; // Only model messages with content can be events
+  }
+  try {
+    const parsedContent = JSON.parse(message.content);
+    // Basic check: Does it look like one of our event structures?
+    // Requires 'type' and 'status' fields common to our BaseEvent.
+    if (parsedContent && typeof parsedContent === 'object' && parsedContent.type && parsedContent.status) {
+      // We could add more specific checks here if needed based on event types
+      // For now, assume if it parses and has type/status, it's intended as an event.
+      console.log("[AIChatPanel] Parsed chat content as potential InvestigationEvent:", parsedContent.type)
+      return parsedContent as InvestigationEvent; // Cast, assuming backend sends valid structure
+    }
+  } catch (e) {
+    // Not JSON or doesn't match basic structure, so not an event
+    // console.log("[AIChatPanel] Failed to parse chat content as InvestigationEvent:", message.content.substring(0, 50))
+  }
+  return null; // Not parsable or not a recognized event structure
+};
+
 // Change to default export
 export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState("")
-  const [isLoading, setIsLoading] = useState(false)
+  const [investigationEventStream, setInvestigationEventStream] = useState<InvestigationEvent[]>([])
   const [sessionId, setSessionId] = useState<string | null>(null)
+  const [isLoading, setIsLoading] = useState(false)
+  const [currentModel, setCurrentModel] = useState<Model | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [lastFailedMessage, setLastFailedMessage] = useState<string | null>(null)
+  const [isRetrying, setIsRetrying] = useState(false)
+  const [agentStatuses, setAgentStatuses] = useState<Record<string, AgentStatus>>({})
+
+  const { toast } = useToast()
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
-  const { toast } = useToast()
-  // Update the state to track the last failed message
-  const [lastFailedMessage, setLastFailedMessage] = useState<string | null>(null)
-  // Track if we're retrying a message
-  const [isRetrying, setIsRetrying] = useState(false)
-  // Track the current model
-  const [currentModel, setCurrentModel] = useState<Model | null>(null)
-  // State to track active agent statuses
-  const [agentStatuses, setAgentStatuses] = useState<Record<string, AgentStatus>>({})
+
+  // --- Get cell handlers from Zustand store --- 
+  const handleCellUpdate = useCanvasStore((state) => state.handleCellUpdate);
+  const updateCell = useCanvasStore((state) => state.updateCell);
+  const registerSendChatMessageFunction = useCanvasStore((state) => state.registerSendChatMessageFunction);
+
+  // --- Instantiate the investigation events hook --- 
+  const { 
+    isInvestigationRunning, 
+    currentStatus, 
+    wsStatus // Destructure wsStatus as it's now returned
+  } = useInvestigationEvents({
+    notebookId: notebookId, 
+    // REMOVE: streamedMessages: investigationEventStream, 
+    // Provide the actual cell manipulation functions from Zustand
+    onCreateCell: (params) => {
+        console.log("[AIChatPanel onCreateCell using Zustand] Creating cell:", params.id, params.type);
+        // Map InvestigationEvent CellCreationParams to Zustand's Cell format
+        // Using handleCellUpdate which should handle adding new cells
+        const newCellData = {
+            id: params.id,
+            notebook_id: notebookId, 
+            type: params.type as any, // Cast needed if types mismatch slightly
+            content: params.content,
+            status: params.status as any,
+            result: params.result,
+            error: params.error,
+            metadata: params.metadata,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            // Default position or logic to determine position might be needed
+            position: Date.now(), // Use timestamp for default position? Adjust as needed.
+        };
+        handleCellUpdate(newCellData); // Use handleCellUpdate from Zustand store
+    },
+    onUpdateCell: (cellId, updates) => {
+        console.log("[AIChatPanel onUpdateCell using Zustand] Updating cell:", cellId, updates);
+        // Use handleCellUpdate for updates as well, providing a partial Cell object
+        // Construct a Cell-like object with the id and the updates
+        const partialCellData = {
+            id: cellId,
+            ...updates,
+            // Ensure type compatibility if handleCellUpdate expects a full Cell
+            // For example, add placeholders or fetch existing cell if needed.
+            // However, handleCellUpdate in the store seems designed to merge.
+             updated_at: new Date().toISOString(), // Ensure timestamp is updated
+        } as Partial<Cell> & { id: string }; // Type assertion to guide TS
+        
+        // Cast to 'any' temporarily if type issues persist with handleCellUpdate signature
+        // handleCellUpdate(partialCellData as any);
+        handleCellUpdate(partialCellData as Cell); // Try casting to full Cell, assuming merge logic handles missing fields
+    },
+    onError: (message) => {
+        console.error("[AIChatPanel Investigation Error]:", message);
+        setError(`Investigation Error: ${message}`);
+        toast({
+            variant: "destructive",
+            title: "Investigation Error",
+            description: message,
+        });
+    },
+  });
 
   // Create a chat session when the panel opens
   useEffect(() => {
@@ -107,7 +198,31 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
         if (existingMessages.length > 0) {
           // Process existing messages to potentially populate agent statuses
           processMessagesForAgents(existingMessages)
-          setMessages(existingMessages)
+          // Separate initial messages into chat display and events
+          const initialChatMessages: ChatMessage[] = [];
+          const initialEvents: InvestigationEvent[] = [];
+          existingMessages.forEach(msg => {
+              const event = parseChatToInvestigationEvent(msg);
+              if (event) {
+                  // Check if it's a type that should be processed by the hook
+                  // Add more types here if needed (e.g., step_completed for markdown)
+                  if ([ 
+                      "plan_created", "plan_cell_created", "step_completed", 
+                      "summary_started", "summary_update", "summary_cell_created", 
+                      "summary_cell_error", "github_tool_cell_created", "github_tool_error",
+                      "investigation_complete", "error"
+                    ].includes(event.type)) { 
+                     initialEvents.push(event);
+                  }
+                  // Decide if the original message should *also* be displayed in chat
+                  // For now, let's not display raw event JSON in chat.
+              } else {
+                  // If it's not an event, add it to chat display
+                  initialChatMessages.push(msg);
+              }
+          });
+          setMessages(initialChatMessages);
+          setInvestigationEventStream(initialEvents);
         }
       }
     } catch (error) {
@@ -223,7 +338,7 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
 
     try {
       // Send message to API and handle streaming response
-      await api.chat.sendMessage(sessionId, lastFailedMessage, handleMessageOrEvent)
+      await api.chat.unifiedChat(lastFailedMessage, notebookId, sessionId, handleMessageOrEvent)
 
       // Clear the failed message after successful retry
       setLastFailedMessage(null)
@@ -250,21 +365,6 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
     setCurrentModel(model)
     // We don't need to add a message about model change
     // The current model is already visible in the dropdown
-  }
-
-  // Handle cell creation events - just show a toast notification
-  const handleCellCreation = async (event: CellCreationEvent) => {
-    console.log("AIChatPanel received cell_created event:", event)
-    // Potentially update agent status if cell creation signifies completion
-    if (event.agentType) {
-      setAgentStatuses((prev) => ({
-        ...prev,
-        [event.agentType]: {
-          ...prev[event.agentType],
-          isActive: false, // Assume cell creation completes the agent task for now
-        },
-      }))
-    }
   }
 
   // Helper function to safely parse message content
@@ -320,8 +420,7 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
 
     if ("type" in messageOrEvent && messageOrEvent.type === "cell_created") {
       // Handle cell creation event
-      handleCellCreation(messageOrEvent)
-      // We don't add cell_created events directly to the chat message list
+      // This is now handled by useInvestigationEvents via Zustand store
     } else if ("role" in messageOrEvent) {
       // Handle regular chat message
       const message = messageOrEvent as ChatMessage
@@ -337,35 +436,60 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
         // If it IS chat_agent, continue execution to add to setMessages below
       }
 
-      // --- Add this check --- 
-      // Try parsing the content to see if it's a cell_response
+      // Check if content contains a cell_response
       try {
           const potentialCellResponse = JSON.parse(message.content);
           if (potentialCellResponse && typeof potentialCellResponse === 'object' && potentialCellResponse.type === 'cell_response') {
-              // If it IS a cell_response, don't add it to the chat messages.
-              // It's handled by canvasStore via handleCellCreation in chat.ts
-              // But we still might need to mark the agent as finished if it's a final step.
-              if (message.agent && potentialCellResponse.status_type === 'step_completed') {
-                 setAgentStatuses((prev) => {
-                    if (prev[message.agent!]?.isActive) {
-                      return {
-                        ...prev,
-                        [message.agent!]: {
-                          ...prev[message.agent!],
-                          isActive: false,
-                        },
-                      }
-                    }
-                    return prev
-                  })
+              // It IS a cell_response, process it using the Zustand store action
+              console.log("[AIChatPanel] Processing cell_response:", potentialCellResponse);
+              // Ensure cell_params exists and the TOP-LEVEL cell_id exists
+              if (potentialCellResponse.cell_params && potentialCellResponse.cell_id) {
+                  // Map the cell_params from the event to the structure expected by handleCellUpdate
+                  // handleCellUpdate expects a Cell object (or partial Cell)
+                  const cellDataForStore = {
+                      id: potentialCellResponse.cell_id,
+                      notebook_id: potentialCellResponse.cell_params.notebook_id || notebookId, // Use notebookId from props as fallback
+                      type: potentialCellResponse.cell_params.cell_type as any || 'markdown', // Default type if missing, use 'any' temporarily for type flexibility
+                      content: potentialCellResponse.cell_params.content || '',
+                      status: potentialCellResponse.cell_params.status || 'idle',
+                      result: potentialCellResponse.cell_params.result, // Pass result object
+                      error: potentialCellResponse.cell_params.error,
+                      metadata: potentialCellResponse.cell_params.metadata,
+                      // Ensure timestamps exist, default if necessary
+                      created_at: potentialCellResponse.cell_params.created_at || new Date().toISOString(), 
+                      updated_at: potentialCellResponse.cell_params.updated_at || new Date().toISOString(), 
+                      position: potentialCellResponse.cell_params.position ?? Date.now(), // Use ?? for nullish coalescing, provide default position
+                      dependencies: potentialCellResponse.cell_params.dependencies || [], // Default to empty array
+                      // Add other potential fields from Cell type if needed
+                      connection_id: potentialCellResponse.cell_params.connection_id,
+                      tool_call_id: potentialCellResponse.cell_params.tool_call_id,
+                      tool_name: potentialCellResponse.cell_params.tool_name,
+                      tool_arguments: potentialCellResponse.cell_params.tool_arguments,
+                      settings: potentialCellResponse.cell_params.settings,
+                      step_id: potentialCellResponse.cell_params.step_id, // Ensure step_id is mapped if present
+                  };
+                  console.log("Calling handleCellUpdate with:", cellDataForStore);
+                  // Cast to Cell type; handleCellUpdate in store should handle merging partial data if needed
+                  handleCellUpdate(cellDataForStore as Cell); 
+              } else {
+                  console.error("Received cell_response is missing cell_params or top-level cell_id", potentialCellResponse);
               }
-              return; // Stop processing this message for the main chat list
+
+              // Agent status updates based on cell status might be complex if multiple cells per step.
+              // Consider relying on dedicated agent status events instead of deactivating here.
+              /*
+              if (message.agent && potentialCellResponse.cell_params?.status && ['success', 'error'].includes(potentialCellResponse.cell_params.status)) {
+                 setAgentStatuses((prev) => { ... });
+              }
+              */
+
+              return; // Stop processing this message for the main chat display
           }
       } catch (e) {
           // Not a parsable JSON or not a cell_response, continue processing as a regular message.
-          console.log("Error parsing message content as JSON, treating as regular message:", e);
+          // Error is logged inside the catch block, avoid duplicate logging here.
+          console.log("[AIChatPanel handleMessageOrEvent] Processing as regular message:", message.content.substring(0, 50))
       }
-      // --- End of added check ---
 
       // If not a status message or cell_response, add it to the chat list
       setMessages((prevMessages) => {
@@ -418,44 +542,66 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
 
   // Modify the handleSendMessage function to handle errors better
   const handleSendMessage = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault()
+    e?.preventDefault();
+    const messageToSend = input.trim();
+    if (!messageToSend) return; // Check if message is empty after trimming
 
-    if (!input.trim() || isLoading || !sessionId) return
+    setInput(""); // Clear the input state field immediately
 
-    const userMessageContent = input.trim() // Store content
-    setInput("")
-    setError(null)
-    setLastFailedMessage(null) // Clear previous failure on new send
+    // Call the programmatic sender function
+    await programmaticSendMessage(messageToSend);
+  }
 
-    // --- Optimistic UI Update ---
-    const timestamp = new Date().toISOString()
-    const userMessage: ChatMessage = {
-      role: "user",
-      content: userMessageContent,
-      timestamp: timestamp,
+  // ADDED: Function to programmatically send a message (used by store action)
+  const programmaticSendMessage = async (messageContent: string) => {
+    // Check session and loading state
+    if (!messageContent || isLoading || !sessionId) {
+      console.warn("[AIChatPanel programmaticSendMessage] Aborted: Invalid state (isLoading, no sessionId, or empty message)", { isLoading, sessionId, messageContent });
+      return;
     }
-    // Add user message immediately to the state
-    setMessages((prevMessages) => [...prevMessages, userMessage])
-    // --- End Optimistic Update ---
 
+    setError(null)
+    setLastFailedMessage(null)
     setIsLoading(true)
 
-    try {
-      // Send message to API and handle streaming response
-      await api.chat.sendMessage(sessionId, userMessageContent, handleMessageOrEvent)
+    // 1. Add user message to the UI immediately
+    const userMessage: ChatMessage = {
+      role: 'user',
+      content: messageContent,
+      timestamp: new Date().toISOString(),
+      id: `user-${Date.now()}`
+    };
+    setMessages((prev) => [...prev, userMessage]);
 
-      // If this is the first message, it might trigger an investigation
-      if (messages.length <= 1) { 
-        toast({
-          title: "Investigation Started",
-          description: "Your query may trigger an automated investigation. Watch for new cells being created.",
-        })
-      }
+    // Define placeholder for assistant's response
+    const assistantPlaceholder: ChatMessage = {
+      role: "model",
+      content: "", // Initially empty, will be populated by stream
+      timestamp: new Date().toISOString(),
+      id: `assistant-loading-${Date.now()}`, // Temporary ID
+    }
+
+    try {
+      // Add a placeholder for the assistant's response
+      setMessages((prev) => [...prev, assistantPlaceholder])
+
+      // Call the correct sendMessage endpoint, not unifiedChat
+      console.log(`Calling sendMessage with sessionId: ${sessionId}`)
+      // await api.chat.unifiedChat(userMessageContent, notebookId, sessionId, handleMessageOrEvent)
+      await api.chat.sendMessage(sessionId, messageContent, handleMessageOrEvent)
+
+      // Remove the loading placeholder *after* the stream finishes
+      // The stream might have added the actual message, or status updates handled elsewhere
+      setMessages((prev) => prev.filter((msg) => msg.id !== assistantPlaceholder.id))
+
     } catch (error) {
       console.error("Error sending message:", error)
 
+      // Remove the loading placeholder on error
+      setMessages((prev) => prev.filter((msg) => msg.id !== assistantPlaceholder.id))
+
       // Store the failed message for potential retry
-      setLastFailedMessage(userMessageContent) // Use captured content
+      setLastFailedMessage(messageContent) // Use function argument
 
       // Set a more user-friendly error message
       const errorMessage = parseErrorMessage(error)
@@ -480,8 +626,76 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
     }
   }
 
+  // --- ADDED: Effect to register/unregister the sending function with the store ---
+  useEffect(() => {
+    // --- START Logging ---
+    console.log(
+      `[AIChatPanel Registration Effect] Running. Session ID: ${sessionId}, Investigation Running: ${isInvestigationRunning}`
+    )
+    // --- END Logging ---
+    if (sessionId && !isInvestigationRunning) {
+      // Only register if session is ready and not already in a complex investigation
+      console.log("[AIChatPanel] Registering programmaticSendMessage with Zustand store.")
+      registerSendChatMessageFunction(programmaticSendMessage)
+    } else {
+      // If session is not ready or investigation is running, ensure function is not registered
+      console.log(
+        `[AIChatPanel] De-registering programmaticSendMessage (Session ID: ${sessionId}, Investigation Running: ${isInvestigationRunning}).`
+      )
+      registerSendChatMessageFunction(null)
+    }
+
+    // Cleanup function to de-register on unmount or when dependencies change
+    return () => {
+      console.log("[AIChatPanel] De-registering programmaticSendMessage on cleanup.")
+      registerSendChatMessageFunction(null)
+    }
+    // Dependencies: registration depends on session ID and investigation status
+  }, [sessionId, isInvestigationRunning, registerSendChatMessageFunction])
+
+  useEffect(() => {
+    // Log the current value of isInvestigationRunning on every render where this effect might run
+    console.log(`[Investigation Status Effect] isInvestigationRunning: ${isInvestigationRunning}`);
+
+    // When the investigation stops running, mark all agents as inactive
+    if (!isInvestigationRunning) {
+      console.log("[Investigation Status Effect] Condition met: !isInvestigationRunning. Attempting to deactivate agents.");
+      setAgentStatuses((prevStatuses) => {
+        console.log("[Investigation Status Effect] Inside setAgentStatuses. Previous statuses:", JSON.stringify(prevStatuses));
+        const updatedStatuses = { ...prevStatuses };
+        let changed = false;
+        Object.keys(updatedStatuses).forEach((agentType) => {
+          // Deactivate non-chat agents that are currently marked as active
+          if (agentType !== 'chat_agent' && updatedStatuses[agentType]?.isActive) { // Add null check for safety
+             console.log(`[Investigation Status Effect] Deactivating agent: ${agentType}`);
+             updatedStatuses[agentType] = {
+               ...updatedStatuses[agentType],
+               isActive: false,
+             };
+             changed = true;
+          }
+        });
+
+        if (changed) {
+            console.log("[Investigation Status Effect] Statuses changed. New statuses:", JSON.stringify(updatedStatuses));
+            return updatedStatuses;
+        } else {
+            console.log("[Investigation Status Effect] No status changes needed.");
+            return prevStatuses; // Only update state if something changed
+        }
+      });
+    }
+    // Dependency array ONLY includes the trigger: isInvestigationRunning
+    // and setAgentStatuses which is stable and typically recommended by lint rules
+  }, [isInvestigationRunning, setAgentStatuses]);
+
   // Handle keyboard shortcuts
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // Submit on Enter (if not Shift+Enter)
+    if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault(); // Prevent default newline behavior
+        handleSendMessage();
+    }
     // Escape to close panel
     if (e.key === "Escape") {
       onToggle()

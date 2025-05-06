@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 import logging
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 import redis.asyncio as redis
 from fastapi.staticfiles import StaticFiles
@@ -28,7 +28,7 @@ from backend.services.notebook_manager import NotebookManager
 from backend.db.chat_db import ChatDatabase
 from backend.core.logging import setup_logging, get_logger
 from backend.services.connection_handlers.registry import get_all_handler_types
-from backend.websockets import WebSocketManager, get_ws_manager
+from backend.websockets import WebSocketManager
 from backend.db.database import init_db
 from backend.db.models import Base
 from backend.routes import notebooks, connections
@@ -140,8 +140,18 @@ async def lifespan(app: FastAPI):
     
     app_logger.info("Application services initialization completed")
     
-    # --- Initialize WebSocket Manager & Set Callback ---
-    ws_manager = WebSocketManager()
+    # --- Initialize WebSocket Manager with Redis & Set Callback ---
+    # Pass the initialized redis client (ensure it's not None, handle error if needed)
+    redis_client_instance = getattr(app.state, 'redis', None)
+    if not redis_client_instance:
+        # This case should ideally be handled during Redis init, but double-check
+        app_logger.error("Redis client is not initialized. WebSocketManager cannot use Pub/Sub.")
+        # Decide on behavior: raise error, or let ws_manager init without redis?
+        # For now, let it init but log error. Broadcasting will fail later.
+        ws_manager = WebSocketManager(redis_client=None)
+    else:
+        ws_manager = WebSocketManager(redis_client=redis_client_instance)
+        
     app.state.ws_manager = ws_manager
     app_logger.info("WebSocketManager initialized.")
 
@@ -168,6 +178,17 @@ async def lifespan(app: FastAPI):
         app_logger.error(f"Failed to start ExecutionQueue processing: {e}", exc_info=True)
         raise 
 
+    # --- Start WebSocket Listener (if Redis is available) ---
+    if hasattr(app.state, 'ws_manager') and app.state.ws_manager and app.state.ws_manager.redis_client:
+        app_logger.info("Starting WebSocketManager Redis listener...")
+        try:
+            await app.state.ws_manager.start_listener()
+            app_logger.info("WebSocketManager Redis listener started.")
+        except Exception as e:
+            app_logger.error(f"Failed to start WebSocketManager Redis listener: {e}", exc_info=True)
+    else:
+        app_logger.warning("WebSocketManager Redis listener not started (Redis client unavailable).")
+
     # --- Initialize Chat Agents Cache ---
     app.state.chat_agents = {} 
     app_logger.info("Chat agents cache initialized.")
@@ -188,6 +209,14 @@ async def lifespan(app: FastAPI):
              app_logger.info("Execution queue stopped.")
         except Exception as e:
              app_logger.error(f"Error stopping execution queue: {e}", exc_info=True)
+    
+    # --- Stop WebSocket Listener ---
+    if hasattr(app.state, 'ws_manager') and app.state.ws_manager:
+        app_logger.info("Stopping WebSocketManager Redis listener...")
+        try:
+            await app.state.ws_manager.stop_listener()
+        except Exception as e:
+            app_logger.error(f"Error stopping WebSocketManager Redis listener: {e}", exc_info=True)
     
     # --- Close chat database connection ---
     if hasattr(app.state, "chat_db") and app.state.chat_db:

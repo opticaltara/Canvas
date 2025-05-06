@@ -3,7 +3,7 @@ Notebook API Endpoints
 """
 
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from uuid import UUID
 from datetime import datetime, timezone
 
@@ -16,7 +16,7 @@ from backend.core.cell import CellType, CellStatus
 from backend.core.types import ToolCallID
 from backend.services.notebook_manager import NotebookManager, get_notebook_manager
 from backend.db.database import get_db, get_async_db_session
-from backend.websockets import WebSocketManager, get_ws_manager
+from backend.websockets import WebSocketManager
 from backend.services.connection_manager import ConnectionManager, get_connection_manager
 from backend.db.repositories import NotebookRepository
 
@@ -73,6 +73,12 @@ class CellUpdate(BaseModel):
 class CellReorder(BaseModel):
     """Parameters for reordering cells"""
     cell_order: List[str]  # List of cell IDs (as strings) in the new order
+
+
+class CellExecutionRequest(BaseModel):
+    """Request body for cell execution, allowing content/args update"""
+    content: Optional[str] = None
+    tool_arguments: Optional[Dict[str, Any]] = None
 
 
 @router.get("/")
@@ -560,25 +566,46 @@ async def remove_dependency(
 async def execute_cell(
     notebook_id: UUID,
     cell_id: UUID,
+    execution_data: CellExecutionRequest,
     notebook_manager: NotebookManager = Depends(get_notebook_manager),
     db: AsyncSession = Depends(get_async_db_session)
 ) -> Dict:
     """
-    Queue a cell for execution
+    Queue a cell for execution, potentially updating its content/args first.
     
     Args:
         notebook_id: The ID of the notebook
         cell_id: The ID of the cell to execute
+        execution_data: Optional updated content and/or tool arguments
         
     Returns:
         Status message
     """
     route_logger.info(f"Queueing cell {cell_id} for execution in notebook {notebook_id}")
     try:
-        # Fetch the specific cell using the manager for validation (ignore result)
+        if execution_data.content is not None or execution_data.tool_arguments is not None:
+            route_logger.info(f"Updating cell {cell_id} before execution.")
+            updates_to_apply = {}
+            if execution_data.content is not None:
+                updates_to_apply['content'] = execution_data.content
+            if execution_data.tool_arguments is not None:
+                updates_to_apply['tool_arguments'] = execution_data.tool_arguments
+            
+            if updates_to_apply:
+                try:
+                    repository = NotebookRepository(db)
+                    await repository.update_cell(cell_id=str(cell_id), **updates_to_apply)
+                    route_logger.info(f"Successfully updated cell {cell_id} with new content/args.")
+                except AttributeError:
+                    route_logger.error(f"NotebookManager does not have method 'update_cell_fields'. Update required.")
+                except Exception as update_err:
+                    route_logger.error(f"Error updating cell {cell_id} before execution: {update_err}", exc_info=True)
+                    raise HTTPException(status_code=500, detail="Failed to update cell before execution")
+            else:
+                route_logger.debug(f"No content or argument updates provided for cell {cell_id}.")
+
         _ = await notebook_manager.get_cell(db, notebook_id, cell_id)
 
-        # Update cell status to queued using the new manager method (asynchronous)
         await notebook_manager.update_cell_status(db, notebook_id, cell_id, CellStatus.QUEUED)
 
         route_logger.info(f"Successfully queued cell {cell_id} for execution")
@@ -589,15 +616,13 @@ async def execute_cell(
             "status": CellStatus.QUEUED.value
         }
     except KeyError as e:
-        # Handle errors raised by get_cell or update_cell_status (if cell/notebook not found)
-        detail = str(e).strip("\' ") # Ensure stripping quotes correctly
+        detail = str(e).strip("\' ")
         error_message = f"Resource not found: {detail}"
         route_logger.error(f"Resource not found for execution request: {detail}")
         raise HTTPException(status_code=404, detail=error_message)
     except Exception as e:
-        # Catch other potential errors
-         route_logger.error(f"Unexpected error queueing cell {cell_id}: {str(e)}", exc_info=True)
-         raise HTTPException(status_code=500, detail="Internal server error processing cell execution request")
+        route_logger.error(f"Unexpected error queueing cell {cell_id}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error processing cell execution request")
 
 
 @router.post("/{notebook_id}/reorder", status_code=200, response_model=Dict)
@@ -638,9 +663,25 @@ async def reorder_cells(
 async def notebook_websocket(
     websocket: WebSocket, 
     notebook_id: str,
-    ws_manager: WebSocketManager = Depends(get_ws_manager)
+    # Remove dependency on get_ws_manager
+    # ws_manager: WebSocketManager = Depends(get_ws_manager)
 ):
-    notebook_uuid = UUID(notebook_id)
+    # Get the manager from the application state via the websocket
+    try:
+        ws_manager: WebSocketManager = websocket.app.state.ws_manager
+    except AttributeError:
+        route_logger.error("WebSocketManager not found in application state. Cannot establish WebSocket connection.")
+        await websocket.close(code=1011) # Internal Error
+        return
+        
+    route_logger.info(f"Attempting WebSocket connection for notebook ID: {notebook_id}, Client: {websocket.client}")
+    try:
+        notebook_uuid = UUID(notebook_id)
+    except ValueError:
+        route_logger.error(f"Invalid notebook_id format received: {notebook_id}")
+        await websocket.close(code=4001, reason="Invalid notebook ID format")
+        return
+        
     await ws_manager.connect(websocket, notebook_uuid)
     route_logger.info(f"WebSocket connected for notebook: {notebook_id}")
     try:

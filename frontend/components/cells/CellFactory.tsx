@@ -2,6 +2,9 @@ import type React from "react"
 import MarkdownCell from "./MarkdownCell"
 import GitHubCell from "./GitHubCell"
 import SummarizationCell from './SummarizationCell'
+import InvestigationReportCell from './InvestigationReportCell'
+import FileSystemCell from './FileSystemCell'
+import PythonCell from './PythonCell'
 import type { Cell } from "../../store/types"
 
 interface CellFactoryProps {
@@ -31,6 +34,33 @@ const CellFactory: React.FC<CellFactoryProps> = ({ cell, onExecute, onUpdate, on
         <SummarizationCell
           cell={cell}
           onDelete={onDelete}
+        />
+      )
+    case "investigation_report":
+      return (
+        <InvestigationReportCell
+          cell={cell}
+          onDelete={onDelete}
+        />
+      )
+    case "filesystem":
+      return (
+        <FileSystemCell
+          cell={cell}
+          onUpdate={onUpdate}
+          onExecute={onExecute}
+          onDelete={onDelete}
+          isExecuting={isExecuting}
+        />
+      )
+    case "python":
+      return (
+        <PythonCell
+          cell={cell}
+          onExecute={onExecute}
+          onUpdate={onUpdate}
+          onDelete={onDelete}
+          isExecuting={isExecuting}
         />
       )
     default:

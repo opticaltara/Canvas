@@ -253,7 +253,7 @@ class NotebookManager:
         if self.notify_callback:
             # We might want a specific notification type for content + stale updates
             # For now, just send the updated cell data
-            await self.notify_callback(notebook_id, updated_cell_model.model_dump())
+            await self.notify_callback(notebook_id, updated_cell_model.model_dump(mode='json'))
             # Consider sending updates for stale cells too
             # for stale_id in stale_dependents:
             #     stale_cell = self.get_cell(db, notebook_id, stale_id)
@@ -323,7 +323,7 @@ class NotebookManager:
             # Notify clients about the change via WebSocket
             if self.notify_callback:
                 # Use asyncio.create_task if calling from sync context, but this method is async
-                await self.notify_callback(notebook_id, updated_cell_model.model_dump()) 
+                await self.notify_callback(notebook_id, updated_cell_model.model_dump(mode='json')) 
                 logger.debug("WebSocket notification sent for cell status update", extra=log_extra)
             else:
                  logger.warning("notify_callback not set in NotebookManager. WebSocket update skipped.", extra=log_extra)
@@ -376,20 +376,35 @@ class NotebookManager:
         try:
             repository = NotebookRepository(db)
             
-            # Prepare updates dictionary
+            # --- Serialize result_content before saving --- 
+            serializable_result_content = None
+            if result is not None:
+                if hasattr(result, 'model_dump'): # Check for Pydantic-like models
+                    try:
+                        serializable_result_content = result.model_dump(mode='json')
+                    except Exception as dump_err:
+                         logger.warning(f"Failed to model_dump result for cell {cell_id}: {dump_err}. Falling back to dict/str.", extra=log_extra)
+                         serializable_result_content = str(result) # Fallback
+                elif isinstance(result, (dict, list, str, int, float, bool)):
+                     serializable_result_content = result # Already JSON serializable
+                else:
+                     # Attempt to convert other types to string as a fallback
+                     logger.warning(f"Result content for cell {cell_id} is of unexpected type {type(result)}. Converting to string.", extra=log_extra)
+                     serializable_result_content = str(result)
+            # --- End Serialization --- 
+            
+            # Prepare updates dictionary using the serialized content
             updates = {
                 'status': final_status.value,
-                'result_content': result, # Assuming result can be serialized
+                'result_content': serializable_result_content,
                 'result_error': error,
                 'result_execution_time': execution_time,
-                # Update timestamp automatically handled by repo or model?
-                # 'updated_at': datetime.now(timezone.utc) # Let repo handle this if possible
             }
             
             # Await async repo call
             updated_cell_data = await repository.update_cell(
                 cell_id=str(cell_id),
-                updates=updates
+                updates=updates # Pass the dictionary directly
             )
             
             if not updated_cell_data:
@@ -401,7 +416,7 @@ class NotebookManager:
             
              # Notify clients about the change
             if self.notify_callback:
-                await self.notify_callback(notebook_id, updated_cell_model.model_dump())
+                await self.notify_callback(notebook_id, updated_cell_model.model_dump(mode='json'))
                 logger.debug("WebSocket notification sent for cell result update", extra=log_extra)
             else:
                  logger.warning("notify_callback not set. WebSocket update skipped.", extra=log_extra)
@@ -422,6 +437,50 @@ class NotebookManager:
                  logger.critical(f"Failed to mark cell {cell_id} as ERROR after outer error: {inner_e}", extra=log_extra)
             raise # Re-raise original exception
 
+    async def update_cell_fields(self, db: AsyncSession, notebook_id: UUID, cell_id: UUID, updates: Dict[str, Any]) -> None:
+        """Update specific fields of a cell (async)."""
+        correlation_id = str(uuid4())
+        log_extra = {
+            'correlation_id': correlation_id, 
+            'notebook_id': str(notebook_id), 
+            'cell_id': str(cell_id), 
+            'updated_fields': list(updates.keys())
+        }
+        logger.info(f"Updating fields for cell {cell_id}", extra=log_extra)
+        
+        if not updates:
+            logger.warning("update_cell_fields called with empty updates dictionary.", extra=log_extra)
+            return # Nothing to update
+            
+        try:
+            repository = NotebookRepository(db)
+            # Await async repo call
+            updated_cell_data = await repository.update_cell(
+                cell_id=str(cell_id),
+                updates=updates # Pass the provided updates directly
+            )
+            
+            if not updated_cell_data:
+                 logger.error(f"Cell {cell_id} not found when trying to update fields", extra=log_extra)
+                 raise KeyError(f"Cell {cell_id} not found")
+                 
+            updated_cell_model = self._db_cell_to_model(updated_cell_data)
+            logger.info(f"Successfully updated fields for cell {cell_id}", extra=log_extra)
+            
+            # Notify clients about the change
+            if self.notify_callback:
+                await self.notify_callback(notebook_id, updated_cell_model.model_dump(mode='json'))
+                logger.debug("WebSocket notification sent for cell field update", extra=log_extra)
+            else:
+                 logger.warning("notify_callback not set. WebSocket update skipped.", extra=log_extra)
+
+        except KeyError as e:
+            logger.error(f"Resource not found when updating cell fields: {e}", extra=log_extra)
+            raise
+        except Exception as e:
+            logger.error(f"Error updating cell fields for {cell_id}: {e}", extra=log_extra, exc_info=True)
+            raise
+            
     async def mark_dependents_stale(self, db: AsyncSession, notebook_id: UUID, cell_id: UUID) -> Set[UUID]:
         """Mark all direct and indirect dependents of a cell as stale (async)"""
         correlation_id = str(uuid4())

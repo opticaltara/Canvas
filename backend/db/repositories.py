@@ -464,7 +464,6 @@ class NotebookRepository:
         """Get a cell by ID (async)"""
         logger.info("Fetching cell with ID: %s", cell_id, extra={'correlation_id': 'N/A'})
         try:
-            # Corrected: Use async syntax with select, joinedload, execute, scalar_one_or_none
             stmt = (
                 select(Cell).options(
                     joinedload(Cell.dependencies),
@@ -472,7 +471,7 @@ class NotebookRepository:
                 ).where(Cell.id == cell_id)
             )
             result = await self.db.execute(stmt)
-            cell = result.scalar_one_or_none()
+            cell = result.unique().scalar_one_or_none()
             
             if cell:
                 logger.info("Found cell: ID='%s', Type='%s', NotebookID='%s'", cell.id, cell.type, cell.notebook_id, extra={'correlation_id': 'N/A'})
@@ -529,23 +528,20 @@ class NotebookRepository:
             # Extract notebook_id for timestamp update
             notebook_id = self._ensure_str_id(cell.notebook_id)
 
-            stmt = delete(CellDependency).where(
-                (CellDependency.dependent_id == cell_id) |
-                (CellDependency.dependency_id == cell_id)
-            )
-            dep_result = await self.db.execute(stmt)
-            logger.info("Deleted %d dependencies associated with cell %s", dep_result.rowcount, cell_id, extra={'correlation_id': 'N/A'})
-
-            # Delete the cell itself
+            # Delete the cell itself - cascade should delete dependencies
             await self.db.delete(cell) # Session delete handles the object
-            logger.info("Cell %s deleted successfully", cell_id, extra={'correlation_id': 'N/A'})
+            logger.info("Cell %s marked for deletion", cell_id, extra={'correlation_id': 'N/A'})
 
-            # Update notebook timestamp
+            # Update notebook timestamp - this will trigger a flush which performs the delete + cascade
             await self._update_notebook_timestamp(notebook_id)
+            # Assuming commit happens in middleware or higher level function
+            logger.info("Notebook timestamp updated after cell deletion request for %s", cell_id, extra={'correlation_id': 'N/A'})
 
             return True
         except SQLAlchemyError as e:
             logger.error("Error deleting cell %s: %s", cell_id, str(e), extra={'correlation_id': 'N/A'}, exc_info=True)
+            # Consider rolling back here if not handled by middleware
+            # await self.db.rollback()
             raise
     
     async def add_dependency(self, dependent_id: str, dependency_id: str) -> bool:

@@ -16,6 +16,9 @@ export const CellTypeSchema = z.enum([
   "markdown",
   "github",
   "summarization",
+  "investigation_report",
+  "filesystem",
+  "python",
 ])
 export type CellType = z.infer<typeof CellTypeSchema>
 
@@ -62,7 +65,7 @@ export const NotebookSchema = z.object({
 export type Notebook = z.infer<typeof NotebookSchema>
 
 // --- Update: Remove 'grafana' and 'python' from ConnectionTypeSchema ---
-export const ConnectionTypeSchema = z.enum(["github", "jira"])
+export const ConnectionTypeSchema = z.enum(["github", "jira", "filesystem"])
 export type ConnectionType = z.infer<typeof ConnectionTypeSchema>
 
 export const ConnectionSchema = z.object({
@@ -102,7 +105,6 @@ export interface ConnectionListItem {
   is_default: boolean;
   config: Record<string, any>; // Redacted config is just a generic object
 }
-
 export interface GithubConnectionConfig {
   // github_pat is redacted
   [key: string]: any; // Allow other potential fields
@@ -121,6 +123,13 @@ export interface JiraConnectionConfig {
   [key: string]: any; // Allow other potential fields
 }
 
+// New interface for Filesystem redacted config (Placeholder)
+export interface FileSystemConnectionConfig {
+  base_path?: string; // Example field, assuming backend redacts sensitive details
+  allowed_paths?: string[]; // Example field
+  [key: string]: any; // Allow other potential fields
+}
+
 // Represents a fully loaded connection object (potentially used in UI state after fetching details)
 // The config here uses the specific interfaces defined above.
 export interface Connection {
@@ -128,9 +137,8 @@ export interface Connection {
   name: string;
   type: ConnectionType;
   is_default: boolean;
-  config: GithubConnectionConfig | JiraConnectionConfig | Record<string, any>; // Use specific types + fallback
+  config: GithubConnectionConfig | JiraConnectionConfig | FileSystemConnectionConfig | Record<string, any>; // Use specific types + fallback
 }
-
 export interface GithubConnectionCreateFormData {
   name: string;
   github_personal_access_token: string;
@@ -149,3 +157,12 @@ export interface JiraConnectionCreateFormData {
   read_only_mode?: boolean | null; // Allow null if using a tri-state or default
   jira_projects_filter?: string;
 }
+
+// New interface for Filesystem form data (Placeholder)
+export interface FileSystemConnectionCreateFormData {
+  name: string;
+  base_path: string;
+  allowed_paths?: string[]; // Optional example
+}
+
+

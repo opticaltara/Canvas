@@ -50,7 +50,9 @@ from backend.ai.events import (
     SummaryCellCreatedEvent,
     SummaryCellErrorEvent,
     InvestigationCompleteEvent,
-    StatusUpdateEvent
+    StatusUpdateEvent,
+    BaseEvent,
+    FileSystemToolCellCreatedEvent
 )
 
 # Initialize logger
@@ -423,7 +425,9 @@ class ChatAgentService:
                     
                     # Create ClarificationNeededEvent object
                     clarification_event = ClarificationNeededEvent(
-                        message=clarification_output.clarification_message
+                        message=clarification_output.clarification_message,
+                        session_id=session_id,
+                        notebook_id=self.notebook_id
                     )
                     # Wrap in ModelResponse using StatusResponsePart for transport
                     response_part = StatusResponsePart(
@@ -511,68 +515,106 @@ class ChatAgentService:
                             agent_type=agent_type_str,
                             result=result_dict
                         )
-                    case SummaryCellCreatedEvent(cell_id=cid, cell_params=cp, status=st, error=err):
+                    case FileSystemToolCellCreatedEvent(cell_id=cid, cell_params=cp, status=st, result=r, tool_name=tn):
                         chat_agent_logger.info(f"Creating CellResponsePart for {event_type_str}")
-                        result_dict = {"error": err} if err else None
+                        # Assuming result `r` might be complex, try model_dump or str()
+                        result_content = None
+                        if isinstance(r, BaseModel):
+                            result_content = r.model_dump()
+                        elif r is not None:
+                            result_content = str(r)
+                            
+                        result_dict = {"content": result_content, "tool_name": tn}
                         response_part = CellResponsePart(
                             cell_id=str(cid) if cid else "",
                             cell_params=cp or {},
-                            status_type=st.value,
-                            agent_type=agent_type_str,
+                            status_type=st.value, # Should be StatusType.SUCCESS
+                            agent_type=agent_type_str, # Should be AgentType.FILESYSTEM
                             result=result_dict
                         )
-                    case SummaryCellErrorEvent(status=st, error=err): # No cell created here
+                    case SummaryCellCreatedEvent(cell_id=cid, cell_params=cp, status=st, error=err):
+                        chat_agent_logger.info(f"Creating CellResponsePart for {event_type_str} (Investigation Report)")
+                        # Extract the report JSON string stored by AIAgent
+                        report_json_string = None
+                        if cp and 'result' in cp and isinstance(cp['result'], dict) and 'content' in cp['result']:
+                            report_json_string = cp['result']['content']
+                        
+                        # Package the report JSON string into the result field for the frontend
+                        result_dict_for_frontend = {"content": report_json_string, "error": err} if report_json_string else {"error": err or "Report content missing"}
+                        
+                        response_part = CellResponsePart(
+                            cell_id=str(cid) if cid else "",
+                            cell_params=cp or {},
+                            status_type=st.value, # Use status from the event
+                            agent_type=AgentType.INVESTIGATION_REPORTER.value, # Use specific reporter type
+                            result=result_dict_for_frontend
+                        )
+                    case SummaryCellErrorEvent(status=st, error=err, cell_params=cp, session_id=sid, notebook_id=nid):
                         chat_agent_logger.info(f"Creating StatusResponsePart for {event_type_str}")
-                        message = f"Error creating summary cell: {err}"
-                        response_part = StatusResponsePart(content=message, agent_type=agent_type_str)
+                        message = f"Error creating report cell: {err}"
+                        # Include attempted params if available
+                        # if cp: message += f"\nAttempted Params: {json.dumps(cp, indent=2)[:500]}..."
+                        response_part = StatusResponsePart(content=message, agent_type=AgentType.INVESTIGATION_REPORTER.value)
                     
                     # --- Status/Progress Events --- 
-                    case PlanCreatedEvent(thinking=t, status=st): 
+                    case PlanCreatedEvent(thinking=t, status=st, session_id=sid, notebook_id=nid):
                         chat_agent_logger.info(f"Creating StatusResponsePart for {event_type_str}")
                         message = f"Plan created. Thinking: {t}" if t else "Investigation plan created."
                         response_part = StatusResponsePart(content=message, agent_type=agent_type_str)
-                    case StepStartedEvent(step_id=sid, status=st):
+                    case StepStartedEvent(step_id=sid, status=st, session_id=sess_id, notebook_id=nid):
                         chat_agent_logger.info(f"Creating StatusResponsePart for {event_type_str}")
                         message = f"Status: {st.value} (Step: {sid})" 
                         response_part = StatusResponsePart(content=message, agent_type=agent_type_str)
-                    case GitHubToolErrorEvent(original_plan_step_id=sid, tool_name=tn, error=err, status=st):
+                    case GitHubToolErrorEvent(original_plan_step_id=sid, tool_name=tn, error=err, status=st, session_id=sess_id, notebook_id=nid):
                         chat_agent_logger.info(f"Creating StatusResponsePart for {event_type_str}")
                         message = f"GitHub Tool Error (Step: {sid}, Tool: {tn}): {err}" 
                         response_part = StatusResponsePart(content=message, agent_type=agent_type_str)
-                    case SummaryStartedEvent(status=st):
+                    case SummaryStartedEvent(status=st, session_id=sid, notebook_id=nid):
                         chat_agent_logger.info(f"Creating StatusResponsePart for {event_type_str}")
                         message = "Starting final summarization..."
                         response_part = StatusResponsePart(content=message, agent_type=agent_type_str)
-                    case SummaryUpdateEvent(update_info=ui, status=st): 
+                    case SummaryUpdateEvent(update_info=ui, status=st, session_id=sid, notebook_id=nid): 
                         chat_agent_logger.info(f"Creating StatusResponsePart for {event_type_str}")
                         if isinstance(ui, dict):
                             message = ui.get('message', ui.get('error', json.dumps(ui)))
                         else:
                             message = str(ui) # Fallback if not dict
                         response_part = StatusResponsePart(content=message, agent_type=agent_type_str)
-                    case InvestigationCompleteEvent(status=st):
+                    case InvestigationCompleteEvent(status=st, session_id=sid, notebook_id=nid):
                         chat_agent_logger.info(f"Creating StatusResponsePart for {event_type_str}")
                         message = "Investigation completed."
                         response_part = StatusResponsePart(content=message, agent_type=agent_type_str)
-                    case StatusUpdateEvent(message=msg, status=st, step_id=sid, attempt=att, max_attempts=ma): # Generic status update
+                    case StatusUpdateEvent(message=msg, status=st, step_id=sid, attempt=att, max_attempts=ma, session_id=sess_id, notebook_id=nid): # Generic status update
                         chat_agent_logger.info(f"Creating StatusResponsePart for {event_type_str}")
                         content = msg or f"Status: {st.value}"
                         if sid: content += f" (Step: {sid})"
                         if att: content += f" (Attempt: {att}/{ma})"
                         response_part = StatusResponsePart(content=content, agent_type=agent_type_str)
                     
-                    case _:
-                        chat_agent_logger.warning(f"Unhandled event type: {type(event)}. Creating generic StatusResponsePart.")
+                    # --- Catch-all for BaseEvent --- 
+                    case BaseEvent(session_id=sid, notebook_id=nid):
+                        # Handle any other event inheriting from BaseEvent that wasn't explicitly matched
+                        chat_agent_logger.warning(f"Unhandled BaseEvent type: {type(event)}. Creating generic StatusResponsePart.")
                         status_val = getattr(event, 'status', None)
-                        message = f"Status: {status_val.value if status_val else 'Unknown Status'}" 
-                        response_part = StatusResponsePart(content=message, agent_type=agent_type_str)
+                        message = f"Status: {status_val.value if status_val and hasattr(status_val, 'value') else 'Unknown Status'}"
+                        agent_type_val = getattr(event, 'agent_type', AgentType.UNKNOWN)
+                        response_part = StatusResponsePart(content=message, agent_type=agent_type_val.value)
+
+                    # --- Fallback for non-BaseEvent types (should ideally not happen) ---
+                    case _:
+                        chat_agent_logger.error(f"Unhandled non-BaseEvent type: {type(event)}. Cannot create standard response.")
+                        # Optionally yield a specific error message or skip
+                        continue # Skip yielding for completely unknown types
                 
-                response = ModelResponse(
-                    parts=[response_part],
-                    timestamp=datetime.now(timezone.utc)
-                )
-                
-                yield event_type_str, response
+                # Ensure response_part was assigned before creating ModelResponse
+                if 'response_part' in locals():
+                    response = ModelResponse(
+                        parts=[response_part],
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                    yield event_type_str, response
+                else:
+                    chat_agent_logger.error(f"Response part was not created for event type {event_type_str}. Skipping yield.")
             
             response_time = time.time() - start_time
             chat_agent_logger.info(

@@ -43,7 +43,7 @@ class CreateCellParams(BaseModel):
     tool_call_id: ToolCallID = Field(description="ID of the associated tool call (Generated UUID)")
     tool_name: Optional[str] = Field(description="Name of the tool called", default=None)
     tool_arguments: Optional[Dict[str, Any]] = Field(description="Arguments passed to the tool", default=None)
-    result: Optional[CellResult] = Field(description="Pre-computed result for the cell", default=None)
+    result: Optional[CellResult] = Field(description="Pre-computed result for the cell (e.g., structured report data)", default=None)
     status: Optional[CellStatus] = Field(description="Initial status for the cell", default=None)
     connection_id: Optional[str] = Field(description="ID of the data source connection to use (e.g., for GitHub)", default=None)
 

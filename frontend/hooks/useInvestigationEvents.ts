@@ -1,10 +1,10 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
-import { useWebSocket } from "./useWebSocket"
+import { useWebSocket } from "./useWebSocket" // Restore import
 import { useToast } from "@/hooks/use-toast"
 import { useCanvasStore } from "@/store/canvasStore" // Import useCanvasStore
-import { type CellStatus} from "@/store/types"; // Import CellStatus & CellType
+import { type CellStatus, CellType } from "@/store/types"; // Import CellStatus & CellType // Ensure CellType is imported
 
 // Define a simple QueryResult type matching backend structure
 export interface QueryResult {
@@ -14,6 +14,58 @@ export interface QueryResult {
   metadata?: Record<string, any>;
   // Add fields specific to subclasses if needed, e.g., tool_calls for GithubQueryResult
   tool_calls?: any[] | null;
+}
+
+export interface CodeReference {
+  file_path: string;
+  line_number?: number | null;
+  code_snippet?: string | null;
+  url?: string | null;
+  component_name?: string | null;
+}
+
+export interface Finding {
+  summary: string;
+  details?: string | null;
+  code_reference?: CodeReference | null;
+  supporting_quotes?: string[] | null;
+}
+
+export interface RelatedItem {
+  type: "Pull Request" | "Issue" | "Commit" | "Discussion" | "Documentation" | "Other";
+  identifier: string;
+  url: string;
+  relevance?: string | null;
+  status?: string | null;
+}
+
+export interface InvestigationReportData {
+  query: string;
+  title: string;
+  status?: string | null;
+  status_reason?: string | null;
+  estimated_severity?: "Critical" | "High" | "Medium" | "Low" | "Unknown" | null;
+  issue_summary: Finding;
+  root_cause: Finding;
+  root_cause_confidence?: "Low" | "Medium" | "High" | null;
+  key_components: CodeReference[];
+  related_items: RelatedItem[];
+  proposed_fix?: Finding | null;
+  proposed_fix_confidence?: "Low" | "Medium" | "High" | null;
+  affected_context?: Finding | null;
+  suggested_next_steps: string[];
+  tags: string[];
+  error?: string | null;
+}
+
+// Interface for the event carrying the report
+export interface InvestigationReportEvent extends BaseEvent {
+    type: "investigation_report"; // Specific type identifier
+    status: "success"; // Assume success if report is generated
+    agent_type: "investigation_reporter";
+    cell_id: string; // ID for the new cell
+    report: InvestigationReportData; // The actual report payload
+    cell_params?: Partial<CellCreationParams>; // Optional backend params
 }
 
 // Define event types based on the documentation
@@ -134,6 +186,16 @@ export type InvestigationEvent =
   // ADDED: GitHub Tool Events
   | GithubToolCellCreatedEvent
   | GithubToolErrorEvent
+  // ADDED: Investigation Report Event
+  | InvestigationReportEvent
+  // ADDED: Cell Update Event
+  | CellUpdateEvent
+  // ADDED: Filesystem Tool Events
+  | FileSystemToolCellCreatedEvent 
+  | FileSystemToolErrorEvent
+  // ADDED: Python Tool Events
+  | PythonToolCellCreatedEvent
+  | PythonToolErrorEvent
 
 // Define cell creation parameters
 export interface CellCreationParams {
@@ -147,45 +209,536 @@ export interface CellCreationParams {
   metadata?: Record<string, any>
 }
 
+// --- ADDED: Interface for Cell Update Event --- 
+export interface CellUpdateEvent extends BaseEvent {
+  type: "cell_update";
+  data: Partial<CellCreationParams> & { id: string }; // Ensure ID is always present
+}
+// --- END: Added Interface --- 
+
+// --- ADDED: Filesystem Tool Event Interfaces (mirroring GitHub) ---
+export interface FileSystemToolCellCreatedEvent extends BaseEvent {
+  type: "filesystem_tool_cell_created";
+  status: "success";
+  original_plan_step_id: string;
+  cell_id: string;
+  tool_name: string;
+  tool_args: Record<string, any>;
+  result: any;
+  agent_type: "filesystem"; // Specific agent type
+  cell_params: Partial<CellCreationParams>;
+}
+
+export interface FileSystemToolErrorEvent extends BaseEvent {
+  type: "filesystem_tool_error";
+  status: "error";
+  original_plan_step_id?: string;
+  tool_name?: string;
+  tool_args?: Record<string, any>;
+  error: string;
+  agent_type: "filesystem"; // Specific agent type
+}
+// --- END: Added Filesystem Interfaces ---
+
+// --- ADDED: Python Tool Event Interfaces --- 
+export interface PythonToolCellCreatedEvent extends BaseEvent {
+  type: "python_tool_cell_created";
+  status: "success";
+  original_plan_step_id: string;
+  cell_id: string;
+  tool_name: string; // e.g., "run_python_code"
+  tool_args: { python_code?: string; [key: string]: any }; // Expect python_code
+  result: any; // Structured result from Python execution (stdout, return_value, error)
+  agent_type: "python"; // Specific agent type
+  cell_params?: Partial<CellCreationParams>; // Use Partial since backend might not send all
+}
+
+export interface PythonToolErrorEvent extends BaseEvent {
+  type: "python_tool_error";
+  status: "error";
+  original_plan_step_id?: string;
+  tool_call_id?: string; // Added if available from backend
+  tool_name?: string;
+  tool_args?: { python_code?: string; [key: string]: any };
+  error: string;
+  agent_type: "python"; // Specific agent type
+}
+// --- END: Added Python Interfaces ---
+
 interface UseInvestigationEventsProps {
   notebookId: string
+  // REMOVED: streamedMessages: InvestigationEvent[] 
   onCreateCell: (params: CellCreationParams) => void
-  onUpdateCell: (cellId: string, updates: Partial<CellCreationParams>) => void
+  onUpdateCell: (cellId: string, updates: Partial<CellCreationParams>, metadata?: Record<string, any>) => void
   onError: (message: string) => void
 }
 
 export function useInvestigationEvents({
   notebookId,
+  // REMOVED: streamedMessages, 
   onCreateCell,
   onUpdateCell,
   onError,
 }: UseInvestigationEventsProps) {
-  const { status, messages, sendMessage } = useWebSocket(notebookId)
+  const { status: wsStatus, messages, sendMessage } = useWebSocket(notebookId) // Call useWebSocket
   const [isInvestigationRunning, setIsInvestigationRunning] = useState(false)
   const [currentPlan, setCurrentPlan] = useState<string | null>(null)
   const [currentStatus, setCurrentStatus] = useState<string | null>(null)
   const [steps, setSteps] = useState<Record<string, StepCompletedEvent>>({})
   const { toast } = useToast()
+  // REMOVED: const [processedIndices, setProcessedIndices] = useState<Set<number>>(new Set()); 
 
-  // Process incoming WebSocket messages
-  useEffect(() => {
-    if (!messages.length) return
+  // --- START: Define individual event handlers FIRST ---
+  // handlePlanCreated
+  const handlePlanCreated = useCallback(
+    (event: PlanCreatedEvent) => {
+      setIsInvestigationRunning(true)
+      setCurrentPlan(event.thinking)
+      setCurrentStatus("Creating investigation plan...")
 
-    // Process the latest message
-    const message = messages[messages.length - 1]
+      toast({
+        title: "Investigation Started",
+        description: "AI is creating an investigation plan...",
+      })
+    },
+    [toast],
+  )
 
-    try {
-      handleEvent(message as InvestigationEvent)
-    } catch (error) {
-      console.error("Error handling investigation event:", error)
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      onError(`Failed to process event: ${errorMessage}`)
-    }
-  }, [messages])
+  // handlePlanCellCreated
+  const handlePlanCellCreated = useCallback(() => {
+    setCurrentStatus("Plan created, executing steps...")
+  }, [])
 
+  // handleStepCompleted
+  const handleStepCompleted = useCallback(
+    (event: StepCompletedEvent) => {
+      // Store the step information
+      setSteps((prev) => ({
+        ...prev,
+        [event.step_id]: event,
+      }))
+
+      // Update status
+      setCurrentStatus(`Completed step ${event.step_id}`)
+
+      // Use content directly from cell_params if available, otherwise derive (for non-github)
+      let cellContent = event.cell_params?.content || event.result?.query || "";
+      if (event.step_type === "markdown" && event.result?.data) {
+        cellContent = String(event.result.data);
+      }
+
+      // Determine cell type based on step type
+      let cellType: CellType = "markdown"; // Default
+      if (event.step_type === "github") {
+        cellType = "github";
+      } else if (event.step_type === "log" || event.step_type === "metric") {
+        // Assign a type for logs/metrics if needed, maybe a generic 'output' or 'markdown'
+        cellType = "markdown"; // Or a new specific type
+      } // Add other mappings if needed
+
+      // Create the cell - THIS IS THE ONLY PLACE WE CREATE STEP CELLS
+      const cellParams: CellCreationParams = {
+        id: event.cell_id,
+        step_id: event.step_id,
+        type: cellType, // Use the determined cell type
+        content: cellContent,
+        status: event.result.error ? "error" : "success",
+        result: event.result.data,
+        error: event.result.error || undefined,
+        metadata: { ...(event.result.metadata || {}), ...(event.cell_params?.metadata || {})}, // Merge metadata
+      }
+
+      // Create the cell
+      onCreateCell(cellParams)
+
+      toast({
+        title: "Step Completed",
+        description: `Investigation step ${event.step_id} completed`,
+      })
+    },
+    [onCreateCell, toast],
+  )
+
+  // handlePlanRevised
+  const handlePlanRevised = useCallback(
+    (event: PlanRevisedEvent) => {
+      setCurrentPlan((prev) => (prev ? `${prev}\\n\\n### Plan Revision\\n${event.explanation}` : event.explanation))
+      setCurrentStatus("Investigation plan revised")
+
+      toast({
+        title: "Plan Revised",
+        description: "The investigation plan has been updated based on findings.",
+      })
+    },
+    [currentPlan, toast],
+  )
+
+  // handleSummaryStarted
+  const handleSummaryStarted = useCallback(
+    (event: SummaryStartedEvent) => {
+      setCurrentStatus("Generating final answer...");
+      toast({
+        title: "Summarizing Findings",
+        description: "AI is generating the final answer...",
+      });
+    },
+    [toast]
+  );
+
+  // handleSummaryUpdate
+  const handleSummaryUpdate = useCallback(
+    (event: SummaryUpdateEvent) => {
+      const { update_info } = event;
+      let message = "Summarization in progress...";
+      if (update_info.message) {
+        message = update_info.message;
+      } else if (update_info.status) {
+        message = `Summarization status: ${update_info.status}`;
+      }
+      setCurrentStatus(message);
+
+      // Optionally show toast for errors during update
+      if (update_info.error) {
+        console.error("Summarization update error:", update_info.error);
+        toast({
+          variant: "destructive",
+          title: "Summarization Issue",
+          description: `An issue occurred during summary generation: ${update_info.error}`,
+        });
+      }
+    },
+    [toast]
+  );
+
+  // handleSummaryCellCreated
+  const handleSummaryCellCreated = useCallback(
+    (event: SummaryCellCreatedEvent) => {
+      // Extract cell parameters from the event
+      const backendCellParams = event.cell_params;
+
+      // Create the final summary cell
+      const cellParams: CellCreationParams = {
+        id: event.cell_id,
+        step_id: backendCellParams.step_id || "final_summary", // Use step_id from backend or default
+        type: "markdown", // Explicitly set type to markdown for summary
+        content: backendCellParams.content || "",
+        status: event.error ? "error" : "success", // Status reflects summary generation error
+        result: null, // No direct 'result' data for the summary cell itself
+        error: event.error || undefined,
+        metadata: backendCellParams.metadata,
+      };
+
+      onCreateCell(cellParams);
+
+      // Final status updates
+      setIsInvestigationRunning(false); // Investigation is now complete
+      setCurrentStatus("Investigation complete.");
+
+      if (event.error) {
+        toast({
+          title: "Investigation Complete (with Summary Issue)",
+          description: `Investigation finished, but there was an issue generating the summary: ${event.error}`,
+        });
+      } else {
+        toast({
+          title: "Investigation Complete",
+          description: "The investigation has finished and the final answer is ready.",
+        });
+      }
+    },
+    [onCreateCell, toast]
+  );
+
+  // handleSummaryCellError
+  const handleSummaryCellError = useCallback(
+    (event: SummaryCellErrorEvent) => {
+      const errorMsg = `Failed to create final summary cell: ${event.error}`;
+      console.error(errorMsg);
+      onError(errorMsg); // Propagate error
+      setCurrentStatus("Error creating final summary cell.");
+      setIsInvestigationRunning(false); // Mark as complete even if cell creation failed
+
+      toast({
+        variant: "destructive",
+        title: "Summary Cell Error",
+        description: errorMsg,
+      });
+    },
+    [onError, toast]
+  );
+
+  // handleGithubToolCellCreated
+  const handleGithubToolCellCreated = useCallback(
+    (event: GithubToolCellCreatedEvent) => {
+      setCurrentStatus(`Completed tool: ${event.tool_name}`);
+
+      const backendCellParams = event.cell_params || {};
+      const backendMetadata = backendCellParams.metadata || {};
+      
+      // Construct CellCreationParams for the frontend store
+      const cellParams: CellCreationParams = {
+        id: event.cell_id,
+        step_id: event.original_plan_step_id, // Link back to original plan step
+        type: "github", // Explicitly set type to github
+        content: backendCellParams.content || `GitHub: ${event.tool_name}`, // Use backend content or generate default
+        status: "success", // Tool execution was successful
+        result: event.result, // The actual result data from the tool
+        error: undefined,
+        // Combine metadata from backend params and event details
+        metadata: {
+          ...backendMetadata,
+          tool_name: event.tool_name,
+          tool_args: event.tool_args,
+          tool_call_record_id: event.tool_call_record_id,
+          pydantic_ai_tool_call_id: backendMetadata.pydantic_ai_tool_call_id, // Get original ID if present
+          source_agent: event.agent_type,
+        },
+      };
+
+      console.log(`[handleGithubToolCellCreated] Creating cell ${event.cell_id} with status: success and result.`);
+      onCreateCell(cellParams); // Use onCreateCell with the constructed params
+      
+      // Original call was onUpdateCell:
+      /* 
+      console.log(`[handleGithubToolCellCreated] Updating cell ${event.cell_id} with status: success and result.`);
+      onUpdateCell(event.cell_id, {
+          status: "success",
+          result: event.result,
+          // We might also want to update metadata if it changed, but status/result are key
+          metadata: cellParams.metadata, // Pass updated metadata too
+          content: cellParams.content // Update content just in case backend changed it
+      });
+      */
+
+      toast({
+        title: "GitHub Tool Completed",
+        description: `Tool '${event.tool_name}' executed successfully.`,
+      });
+    },
+    [onCreateCell, toast] // Updated dependency from onUpdateCell to onCreateCell
+  );
+
+  // handleGithubToolError
+  const handleGithubToolError = useCallback(
+    (event: GithubToolErrorEvent) => {
+      const errorMsg = `GitHub tool '${event.tool_name || 'unknown'} failed: ${event.error}`;
+      console.error(errorMsg);
+      onError(errorMsg); // Propagate error
+      setCurrentStatus(`Error executing tool: ${event.tool_name || 'unknown'}`);
+      // No cell is created for tool errors
+
+      toast({
+        variant: "destructive",
+        title: "GitHub Tool Error",
+        description: errorMsg,
+      });
+    },
+    [onError, toast]
+  );
+
+  // --- ADDED: Handler for Filesystem Tool Cell Created ---
+  const handleFileSystemToolCellCreated = useCallback(
+    (event: FileSystemToolCellCreatedEvent) => {
+      setCurrentStatus(`Completed tool: ${event.tool_name}`);
+
+      const backendCellParams = event.cell_params || {};
+      const backendMetadata = backendCellParams.metadata || {};
+      
+      // Construct CellCreationParams for the frontend store
+      const cellParams: CellCreationParams = {
+        id: event.cell_id,
+        step_id: event.original_plan_step_id,
+        type: "filesystem", // Explicitly set type
+        content: backendCellParams.content || `Filesystem: ${event.tool_name}`,
+        status: "success",
+        result: event.result,
+        error: undefined,
+        metadata: {
+          ...backendMetadata,
+          tool_name: event.tool_name,
+          tool_args: event.tool_args,
+          source_agent: event.agent_type,
+        },
+      };
+
+      console.log(`[handleFileSystemToolCellCreated] Creating cell ${event.cell_id} with status: success and result.`);
+      onCreateCell(cellParams);
+
+      toast({
+        title: "Filesystem Tool Completed",
+        description: `Tool '${event.tool_name}' executed successfully.`,
+      });
+    },
+    [onCreateCell, toast]
+  );
+  // --- END: Added Filesystem Handler ---
+
+  // --- ADDED: Handler for Filesystem Tool Error ---
+  const handleFileSystemToolError = useCallback(
+    (event: FileSystemToolErrorEvent) => {
+      const errorMsg = `Filesystem tool '${event.tool_name || 'unknown'} failed: ${event.error}`;
+      console.error(errorMsg);
+      onError(errorMsg); // Propagate error
+      setCurrentStatus(`Error executing tool: ${event.tool_name || 'unknown'}`);
+      // No cell is created for tool errors
+
+      toast({
+        variant: "destructive",
+        title: "Filesystem Tool Error",
+        description: errorMsg,
+      });
+    },
+    [onError, toast]
+  );
+  // --- END: Added Filesystem Handler ---
+
+  // --- ADDED: Handler for Python Tool Cell Created ---
+  const handlePythonToolCellCreated = useCallback(
+    (event: PythonToolCellCreatedEvent) => {
+      setCurrentStatus(`Completed Python execution: ${event.tool_name}`);
+
+      const backendCellParams = event.cell_params || {};
+      const backendMetadata = backendCellParams.metadata || {};
+      const toolArgs = event.tool_args || {};
+      
+      // Construct CellCreationParams for the frontend store
+      const cellParams: CellCreationParams = {
+        id: event.cell_id,
+        step_id: event.original_plan_step_id,
+        type: "python", // Explicitly set type
+        // Content should be the Python code itself
+        content: toolArgs.python_code || backendCellParams.content || `Python code execution`, 
+        status: "success", // Tool execution reported success
+        // Result contains structured output { stdout, return_value, error? }
+        // Backend sends CellResult, frontend expects raw content
+        result: event.result?.content, // Extract content from CellResult if backend sends it
+        error: event.result?.error || undefined, // Extract error from CellResult
+        metadata: {
+          ...backendMetadata,
+          tool_name: event.tool_name,
+          tool_args: toolArgs, // Store original args
+          source_agent: event.agent_type,
+          // Extract specific result parts into metadata for potential display?
+          // stdout: event.result?.content?.stdout,
+          // return_value: event.result?.content?.return_value,
+        },
+      };
+
+      console.log(`[handlePythonToolCellCreated] Creating cell ${event.cell_id} with type: python, status: success.`);
+      onCreateCell(cellParams);
+
+      toast({
+        title: "Python Execution Completed",
+        description: `Code execution via '${event.tool_name}' successful.`,
+      });
+    },
+    [onCreateCell, toast, setCurrentStatus] // Added setCurrentStatus dependency
+  );
+  // --- END: Added Python Handler ---
+
+  // --- ADDED: Handler for Python Tool Error ---
+  const handlePythonToolError = useCallback(
+    (event: PythonToolErrorEvent) => {
+      const errorMsg = `Python execution via '${event.tool_name || 'run_python_code'}' failed: ${event.error}`;
+      console.error(errorMsg);
+      onError(errorMsg); 
+      setCurrentStatus(`Error executing Python code: ${event.tool_name || 'run_python_code'}`);
+      // No cell is created for tool errors usually, but backend might create one?
+      // If backend creates an error cell, a cell_update event might follow.
+
+      toast({
+        variant: "destructive",
+        title: "Python Execution Error",
+        description: errorMsg,
+      });
+    },
+    [onError, toast, setCurrentStatus] // Added setCurrentStatus dependency
+  );
+  // --- END: Added Python Handler ---
+
+  // handleStepUpdate
+  const handleStepUpdate = useCallback((event: any) => {
+    // Example: Update cell status visually if needed
+    const stepId = event.type.split('_')[1]; // Extract step ID
+    const updateInfo = event.update_info;
+    console.log(`Received update for step ${stepId}:`, updateInfo);
+    // Find the corresponding cell and update its status/display?
+    // This might require finding the cellId associated with the stepId
+    // and calling onUpdateCell. Needs more logic based on how cell IDs map to step IDs.
+    // For now, just log it.
+    setCurrentStatus(`Updating step ${stepId}: ${updateInfo?.message || updateInfo?.status || '...'}`);
+  }, [onUpdateCell]); // Add dependencies if it interacts with state/props
+
+  // handleError
+  const handleError = useCallback(
+    (event: ErrorEvent) => {
+      setCurrentStatus(`Error: ${event.message}`)
+      onError(event.message)
+
+      toast({
+        variant: "destructive",
+        title: "Investigation Error",
+        description: event.message,
+      })
+    },
+    [onError, toast],
+  )
+
+  // --- ADDED: Handler for Investigation Report ---
+  const handleInvestigationReport = useCallback(
+    (event: InvestigationReportEvent) => {
+      setCurrentStatus("Final investigation report generated.");
+      setIsInvestigationRunning(false); // Investigation ends with the report
+
+      const backendCellParams = event.cell_params || {};
+
+      // Create the report cell
+      const cellParams: CellCreationParams = {
+        id: event.cell_id,
+        step_id: backendCellParams.step_id || "final_report", // Use step_id or default
+        type: "investigation_report", // Use the new cell type string value
+        content: event.report.title || "Investigation Report", // Use report title or default
+        status: event.report.error ? "error" : "success", // Status based on report error field
+        result: event.report, // The full report object is the result
+        error: event.report.error || undefined,
+        metadata: { ...(backendCellParams.metadata || {}), source_agent: event.agent_type }, // Combine metadata
+      };
+
+      console.log(`[handleInvestigationReport] Creating cell ${event.cell_id} with type: "investigation_report"`);
+      onCreateCell(cellParams);
+
+      toast({
+        title: "Investigation Report Ready",
+        description: "The final investigation report has been generated.",
+      });
+    },
+    [onCreateCell, toast]
+  );
+  // --- END: Added Report Handler ---
+
+  // --- ADDED: Handler for Cell Update --- 
+  const handleCellUpdate = useCallback(
+    (event: CellUpdateEvent) => {
+      const { id, ...updates } = event.data; // Extract ID and the rest are updates
+      console.log(`[handleCellUpdate] Updating cell ${id} with data:`, updates);
+      onUpdateCell(id, updates);
+      // Optionally add a subtle toast or log
+      // toast({ title: "Cell Updated", description: `Cell ${id} received updates.` });
+    },
+    [onUpdateCell] // Dependency: onUpdateCell prop
+  );
+  // --- END: Added Cell Update Handler --- 
+
+  // --- START: Main event router and message processor ---
   // Handle different event types
   const handleEvent = useCallback(
     (event: InvestigationEvent) => {
+      // Check if the event is null or undefined before proceeding
+      if (!event || typeof event !== 'object' || !event.type) {
+          console.warn("Received invalid or null event in handleEvent, skipping:", event);
+          return; 
+      }
+      
       console.log("Received investigation event:", event)
 
       switch (event.type) {
@@ -219,6 +772,24 @@ export function useInvestigationEvents({
         case "error":
           handleError(event as ErrorEvent)
           break
+        case "investigation_report":
+          handleInvestigationReport(event as InvestigationReportEvent);
+          break;
+        case "cell_update":
+          handleCellUpdate(event as CellUpdateEvent);
+          break;
+        case "filesystem_tool_cell_created":
+          handleFileSystemToolCellCreated(event as FileSystemToolCellCreatedEvent);
+          break;
+        case "filesystem_tool_error":
+          handleFileSystemToolError(event as FileSystemToolErrorEvent);
+          break;
+        case "python_tool_cell_created":
+          handlePythonToolCellCreated(event as PythonToolCellCreatedEvent);
+          break;
+        case "python_tool_error":
+          handlePythonToolError(event as PythonToolErrorEvent);
+          break;
         default:
           // Check if it's a step completion event
           if (event.type.startsWith("step_") && event.type.endsWith("_completed")) {
@@ -227,8 +798,8 @@ export function useInvestigationEvents({
             // Handle the final completion signal if necessary (might be redundant with summary_cell_created)
             console.log("Received investigation_complete signal");
             // Optionally ensure UI state reflects completion if not already done by summary handler
-            // setIsInvestigationRunning(false);
-            // setCurrentStatus("Investigation finished.");
+            setIsInvestigationRunning(false); // Ensure investigation stops on completion signal
+            setCurrentStatus("Investigation finished.");
           } else if (event.type.startsWith("step_") && event.type.endsWith("_event")) {
             // Generic handler for other potential step events (like status updates)
             handleStepUpdate(event); // Placeholder function 
@@ -237,370 +808,37 @@ export function useInvestigationEvents({
           }
       }
     },
-    [onCreateCell, onUpdateCell, onError],
-  )
-
-  // Handle plan_created event - just update status, don't create a cell
-  const handlePlanCreated = useCallback(
-    (event: PlanCreatedEvent) => {
-      setIsInvestigationRunning(true)
-      setCurrentPlan(event.thinking)
-      setCurrentStatus("Creating investigation plan...")
-
-      toast({
-        title: "Investigation Started",
-        description: "AI is creating an investigation plan...",
-      })
-    },
-    [toast],
-  )
-
-  // Handle plan_cell_created event - just update status, don't create a cell
-  const handlePlanCellCreated = useCallback(() => {
-    setCurrentStatus("Plan created, executing steps...")
-  }, [])
-
-  // Handle step_*_completed events - THIS creates cells
-  const handleStepCompleted = useCallback(
-    (event: StepCompletedEvent) => {
-      // Store the step information
-      setSteps((prev) => ({
-        ...prev,
-        [event.step_id]: event,
-      }))
-
-      // Update status
-      setCurrentStatus(`Completed step ${event.step_id}`)
-
-      // Use content directly from cell_params if available, otherwise derive (for non-github)
-      let cellContent = event.cell_params?.content || event.result?.query || "";
-      if (event.step_type === "markdown" && event.result?.data) {
-        cellContent = String(event.result.data);
-      }
-
-      // Create the cell - THIS IS THE ONLY PLACE WE CREATE STEP CELLS
-      const cellParams: CellCreationParams = {
-        id: event.cell_id,
-        step_id: event.step_id,
-        type: event.step_type,
-        content: cellContent,
-        status: event.result.error ? "error" : "success",
-        result: event.result.data,
-        error: event.result.error || undefined,
-        metadata: { ...(event.result.metadata || {}), ...(event.cell_params?.metadata || {})}, // Merge metadata
-      }
-
-      // Create the cell
-      onCreateCell(cellParams)
-
-      toast({
-        title: "Step Completed",
-        description: `Investigation step ${event.step_id} completed`,
-      })
-    },
-    [onCreateCell, toast],
-  )
-
-  // Handle plan_revised event - just update status, don't create a cell
-  const handlePlanRevised = useCallback(
-    (event: PlanRevisedEvent) => {
-      setCurrentPlan((prev) => (prev ? `${prev}\n\n### Plan Revision\n${event.explanation}` : event.explanation))
-      setCurrentStatus("Investigation plan revised")
-
-      toast({
-        title: "Plan Revised",
-        description: "The investigation plan has been updated based on findings.",
-      })
-    },
-    [currentPlan, toast],
-  )
-
-  // --- New Handlers for Summarization Flow ---
-
-  const handleSummaryStarted = useCallback(
-    (event: SummaryStartedEvent) => {
-      setCurrentStatus("Generating final answer...");
-      toast({
-        title: "Summarizing Findings",
-        description: "AI is generating the final answer...",
-      });
-    },
-    [toast]
+    // Add new handlers to dependency array
+    [handlePlanCreated, handlePlanCellCreated, handlePlanRevised, handleSummaryStarted, handleSummaryUpdate, handleSummaryCellCreated, handleSummaryCellError, handleGithubToolCellCreated, handleGithubToolError, handleError, handleStepCompleted, handleStepUpdate, handleInvestigationReport, handleCellUpdate, handleFileSystemToolCellCreated, handleFileSystemToolError, handlePythonToolCellCreated, handlePythonToolError]
   );
 
-  const handleSummaryUpdate = useCallback(
-    (event: SummaryUpdateEvent) => {
-      const { update_info } = event;
-      let message = "Summarization in progress...";
-      if (update_info.message) {
-        message = update_info.message;
-      } else if (update_info.status) {
-        message = `Summarization status: ${update_info.status}`;
-      }
-      setCurrentStatus(message);
+  // Process incoming WebSocket messages from the internal hook
+  useEffect(() => {
+    // Change dependency from streamedMessages to messages
+    if (!messages || messages.length === 0) return
 
-      // Optionally show toast for errors during update
-      if (update_info.error) {
-        console.error("Summarization update error:", update_info.error);
-        toast({
-          variant: "destructive",
-          title: "Summarization Issue",
-          description: `An issue occurred during summary generation: ${update_info.error}`,
-        });
-      }
-    },
-    [toast]
-  );
-
-  const handleSummaryCellCreated = useCallback(
-    (event: SummaryCellCreatedEvent) => {
-      // Extract cell parameters from the event
-      const backendCellParams = event.cell_params;
-
-      // Create the final summary cell
-      const cellParams: CellCreationParams = {
-        id: event.cell_id,
-        step_id: backendCellParams.step_id || "final_summary", // Use step_id from backend or default
-        type: backendCellParams.type || "markdown",
-        content: backendCellParams.content || "",
-        status: event.error ? "error" : "success", // Status reflects summary generation error
-        result: null, // No direct 'result' data for the summary cell itself
-        error: event.error || undefined,
-        metadata: backendCellParams.metadata,
-      };
-
-      onCreateCell(cellParams);
-
-      // Final status updates
-      setIsInvestigationRunning(false); // Investigation is now complete
-      setCurrentStatus("Investigation complete.");
-
-      if (event.error) {
-        toast({
-          title: "Investigation Complete (with Summary Issue)",
-          description: `Investigation finished, but there was an issue generating the summary: ${event.error}`,
-        });
-      } else {
-        toast({
-          title: "Investigation Complete",
-          description: "The investigation has finished and the final answer is ready.",
-        });
-      }
-    },
-    [onCreateCell, toast]
-  );
-
-  const handleSummaryCellError = useCallback(
-    (event: SummaryCellErrorEvent) => {
-      const errorMsg = `Failed to create final summary cell: ${event.error}`;
-      console.error(errorMsg);
-      onError(errorMsg); // Propagate error
-      setCurrentStatus("Error creating final summary cell.");
-      setIsInvestigationRunning(false); // Mark as complete even if cell creation failed
-
-      toast({
-        variant: "destructive",
-        title: "Summary Cell Error",
-        description: errorMsg,
-      });
-    },
-    [onError, toast]
-  );
-
-  // --- ADDED: GitHub Tool Event Handlers --- 
-  const handleGithubToolCellCreated = useCallback(
-    (event: GithubToolCellCreatedEvent) => {
-      setCurrentStatus(`Completed tool: ${event.tool_name}`);
-
-      const backendCellParams = event.cell_params || {};
-      const backendMetadata = backendCellParams.metadata || {};
-      
-      // Construct CellCreationParams for the frontend store
-      const cellParams: CellCreationParams = {
-        id: event.cell_id,
-        step_id: event.original_plan_step_id, // Link back to original plan step
-        type: "github", // Explicitly set type
-        content: backendCellParams.content || `GitHub: ${event.tool_name}`, // Use backend content or generate default
-        status: "success", // Tool execution was successful
-        result: event.result, // The actual result data from the tool
-        error: undefined,
-        // Combine metadata from backend params and event details
-        metadata: {
-          ...backendMetadata,
-          tool_name: event.tool_name,
-          tool_args: event.tool_args,
-          tool_call_record_id: event.tool_call_record_id,
-          pydantic_ai_tool_call_id: backendMetadata.pydantic_ai_tool_call_id, // Get original ID if present
-          source_agent: event.agent_type,
-        },
-      };
-
-      // ---> CHANGE: Use onUpdateCell instead of onCreateCell
-      // Assuming the cell with event.cell_id already exists from an earlier step or initial load.
-      // We only need to update its status and result.
-      console.log(`[handleGithubToolCellCreated] Updating cell ${event.cell_id} with status: success and result.`);
-      onUpdateCell(event.cell_id, {
-          status: "success",
-          result: event.result,
-          // We might also want to update metadata if it changed, but status/result are key
-          metadata: cellParams.metadata, // Pass updated metadata too
-          content: cellParams.content // Update content just in case backend changed it
-      });
-      // Original call: onCreateCell(cellParams);
-
-      toast({
-        title: "GitHub Tool Completed",
-        description: `Tool '${event.tool_name}' executed successfully.`,
-      });
-    },
-    [onUpdateCell, toast]
-  );
-
-  const handleGithubToolError = useCallback(
-    (event: GithubToolErrorEvent) => {
-      const errorMsg = `GitHub tool '${event.tool_name || 'unknown'} failed: ${event.error}`;
-      console.error(errorMsg);
-      onError(errorMsg); // Propagate error
-      setCurrentStatus(`Error executing tool: ${event.tool_name || 'unknown'}`);
-      // No cell is created for tool errors
-
-      toast({
-        variant: "destructive",
-        title: "GitHub Tool Error",
-        description: errorMsg,
-      });
-    },
-    [onError, toast]
-  );
-  // --- END ADDED ---
-
-  // Placeholder for handling intermediate step updates (like GitHub status)
-  const handleStepUpdate = useCallback((event: any) => {
-    // Example: Update cell status visually if needed
-    const stepId = event.type.split('_')[1]; // Extract step ID
-    const updateInfo = event.update_info;
-    console.log(`Received update for step ${stepId}:`, updateInfo);
-    // Find the corresponding cell and update its status/display?
-    // This might require finding the cellId associated with the stepId
-    // and calling onUpdateCell. Needs more logic based on how cell IDs map to step IDs.
-    // For now, just log it.
-    setCurrentStatus(`Updating step ${stepId}: ${updateInfo?.message || updateInfo?.status || '...'}`);
-  }, [onUpdateCell]); // Add dependencies if it interacts with state/props
-
-  // Handle error event
-  const handleError = useCallback(
-    (event: ErrorEvent) => {
-      setCurrentStatus(`Error: ${event.message}`)
-      onError(event.message)
-
-      toast({
-        variant: "destructive",
-        title: "Investigation Error",
-        description: event.message,
-      })
-    },
-    [onError, toast],
-  )
-
-  const handleCellCreation = useCallback(
-    (message: any) => {
-      console.log("🔍 handleCellCreation called with message:", message)
-
-      try {
-        // Parse the content if it's a string
-        let parsedContent
-        if (typeof message.content === "string") {
-          try {
-            parsedContent = JSON.parse(message.content)
-            console.log("🔍 Successfully parsed message content:", parsedContent)
-          } catch (e) {
-            console.error("🔍 Error parsing message content:", e)
-            parsedContent = message.content
-          }
-        } else {
-          parsedContent = message.content
+    // Process only the latest message for simplicity in this model
+    // (Alternative: process all messages since last run, like the prop version did)
+    const latestMessage = messages[messages.length - 1];
+    if (latestMessage) {
+        try {
+            console.log("[useInvestigationEvents] Processing latest message:", latestMessage)
+            handleEvent(latestMessage as InvestigationEvent);
+        } catch (error) {
+            console.error("Error handling investigation event:", error);
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            onError(`Failed to process event: ${errorMessage}`);
         }
-
-        // Check for cell creation patterns
-        if (
-          (parsedContent.status_type === "plan_cell_created" || parsedContent.type === "cell_response") &&
-          parsedContent.cell_params
-        ) {
-          console.log("🔍 Found cell creation pattern in message")
-          console.log("🔍 Cell params:", parsedContent.cell_params)
-
-          const { notebook_id, cell_type, content, position, metadata } = parsedContent.cell_params
-
-          // Generate a temporary ID for the cell
-          const tempId = `temp-${Date.now()}`
-          console.log("🔍 Generated temporary ID for cell:", tempId)
-
-          // Create cell data object
-          const cellData = {
-            id: tempId,
-            notebook_id,
-            type: cell_type,
-            content,
-            position,
-            metadata,
-            status: "idle" as CellStatus,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          }
-
-          console.log("🔍 Created cell data object:", {
-            id: cellData.id,
-            notebook_id: cellData.notebook_id,
-            type: cellData.type,
-            content_length: cellData.content?.length || 0,
-            metadata: cellData.metadata ? "present" : "absent",
-          })
-
-          // Log cell parameters for debugging
-          console.log("🔍 Cell creation parameters:", {
-            notebook_id,
-            cell_type,
-            content_length: content?.length || 0,
-            metadata: metadata ? "present" : "absent",
-          })
-
-          // Add the cell directly to the canvas store
-          console.log("🔍 Adding cell to canvas store:", tempId, `(${cell_type})`)
-          const canvasStore = useCanvasStore.getState()
-          console.log("🔍 Current active notebook ID in store:", canvasStore.activeNotebookId)
-          console.log("🔍 Current cells count in store:", canvasStore.cells.length)
-
-          canvasStore.handleCellUpdate(cellData)
-
-          console.log(`🔍 Added new ${cell_type} cell from agent ${parsedContent.agent_type} directly to canvas store`)
-
-          // Also call the onCreateCell callback if provided
-          if (onCreateCell) {
-            console.log("🔍 Calling onCreateCell callback")
-            onCreateCell({
-              id: tempId,
-              step_id: '',
-              type: cell_type,
-              content,
-              status: "idle",
-              metadata,
-            })
-          }
-        } else {
-          console.log("🔍 Message does not match cell creation pattern:", parsedContent)
-        }
-      } catch (error) {
-        console.error("🔍 Error in handleCellCreation:", error)
-      }
-    },
-    [onCreateCell],
-  )
+    } 
+  }, [messages, handleEvent, onError]); // Depend on messages from useWebSocket
+  // --- END: Main event router and message processor ---
 
   return {
-    wsStatus: status,
+    wsStatus, // Add wsStatus back
     isInvestigationRunning,
     currentPlan,
     currentStatus,
     steps,
+    // REMOVED: No longer returning streamedMessages or related processing logic
   }
 }

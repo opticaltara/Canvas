@@ -64,8 +64,8 @@ const cells = {
     await apiClient.delete(`/notebooks/${notebookId}/cells/${cellId}`)
   },
 
-  execute: async (notebookId: string, cellId: string) => {
-    const response = await apiClient.post(`/notebooks/${notebookId}/cells/${cellId}/execute`)
+  execute: async (notebookId: string, cellId: string, data?: any) => {
+    const response = await apiClient.post(`/notebooks/${notebookId}/cells/${cellId}/execute`, data)
     return response.data
   },
 
