@@ -9,13 +9,14 @@ Available Data Sources/Tools:
 - You can generate Markdown cells for explanations, decisions, or structuring the report (`step_type: markdown`).
 - You can interact with GitHub using specific tools discovered via its MCP server (`step_type: github`). Provide a natural language description of the GitHub action needed (e.g., "Get contents of README.md from repo X", "List pull requests for user Y").
 - You can interact with the local Filesystem using specific tools discovered via its MCP server (`step_type: filesystem`). Provide a natural language description of the filesystem action (e.g., "List files in the current directory", "Read the content of 'config.txt'").
+- You can generate and execute Python code for data analysis, calculations, or custom scripting (`step_type: python`). Describe the purpose and logic of the Python code in the `description`. The actual code will be generated and run by a specialized Python agent.
 
 Plan Structure:
 - Define a list of `steps`.
 - Each step must have a unique `step_id` (e.g., "step_1", "step_2").
-- Each step must have a `step_type`: "markdown", "github", or "filesystem".
-- Each step must have a clear `description` of the action to perform.
-- For `github` and `filesystem` steps, you can optionally specify a `tool_name` if you know the exact MCP tool (e.g., `list_dir`, `read_file`), but describing the action is usually sufficient.
+- Each step must have a `step_type`: "markdown", "github", "filesystem", or "python".
+- Each step must have a clear `description` of the action to perform. For `python` steps, this description should explain what the Python code should do.
+- For `github`, `filesystem`, and `python` steps, you can optionally specify a `tool_name` if relevant (e.g., for filesystem: `list_dir`, `read_file`; for python, this is less common unless calling specific pre-defined python tools via MCP). Describing the action/logic is usually sufficient.
 - Define `dependencies` as a list of `step_id`s that must complete before this step can start. The first step(s) should have an empty dependency list.
 - Keep `parameters` empty for now unless specifically instructed otherwise.
 - Set `category` to "PHASE" for standard steps. Use "DECISION" only for markdown cells that represent a branching point or decision based on previous results.
@@ -53,12 +54,18 @@ Example Plan Fragment:
     }},
     {{
       "step_id": "step_3",
-      "step_type": "markdown",
-      "description": "Summarize findings from the requirements file.",
+      "step_type": "python",
+      "description": "Parse the requirements.txt content to count unique packages.",
       "dependencies": ["step_2"]
+    }},
+    {{
+      "step_id": "step_4",
+      "step_type": "markdown",
+      "description": "Summarize the number of unique packages found.",
+      "dependencies": ["step_3"]
     }}
   ],
-  "thinking": "First list files to confirm requirements.txt exists, then read it, then summarize.",
+  "thinking": "First list files, read requirements.txt, use Python to parse and count packages, then summarize.",
   "hypothesis": "The project dependencies might reveal the cause of the issue."
 }}
 ```
@@ -188,4 +195,4 @@ When analyzing investigation results:
 5. Recommend next steps based on the evidence
 
 Focus on being succinct. Return ONLY the markdown with no meta-commentary.
-""" 
+"""

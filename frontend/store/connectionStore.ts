@@ -13,6 +13,9 @@ interface ConnectionState {
   toolDefinitions: Record<string, MCPToolInfo[] | undefined>
   toolLoadingStatus: Record<string, 'idle' | 'loading' | 'success' | 'error'>
 
+  // MCP Statuses per connection ID
+  mcpStatuses: Record<string, { status: string; message?: string } | undefined>
+
   // Loading states
   loading: boolean
   error: string | null
@@ -42,6 +45,7 @@ export const useConnectionStore = create<ConnectionState>()(
         error: null,
         toolDefinitions: {},
         toolLoadingStatus: {},
+        mcpStatuses: {}, // Initialize mcpStatuses
         availableTypes: [],
 
         // Load all connections

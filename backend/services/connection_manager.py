@@ -749,7 +749,7 @@ class ConnectionManager:
                 async with ClientSession(read, write) as session:
                     logger.info(f"Initializing MCP session for {connection_type} tool discovery...", extra={'correlation_id': correlation_id})
                     try: 
-                        await asyncio.wait_for(session.initialize(), timeout=45.0) # Increased timeout for process startup
+                        await asyncio.wait_for(session.initialize(), timeout=90.0) # Increased timeout for process startup
                     except asyncio.TimeoutError: 
                         logger.error(f"Timeout initializing MCP session for {connection_type} tool discovery.", extra={'correlation_id': correlation_id})
                         raise ValueError(f"Timeout initializing MCP session for {connection_type}")

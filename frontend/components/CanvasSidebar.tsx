@@ -17,9 +17,15 @@ import {
 } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Search, Plus, MoreVertical, Trash2, FileText, ChevronLeft, ChevronRight, Database } from "lucide-react"
+import dynamic from 'next/dynamic'
 import { api } from "@/api/client"
 import { useToast } from "@/hooks/use-toast"
-import DataConnectionsDialog from "./DataConnectionsDialog"
+// import DataConnectionsDialog from "./DataConnectionsDialog" // Will be dynamically imported
+
+const DataConnectionsDialog = dynamic(() => import('./DataConnectionsDialog'), {
+  ssr: false,
+  loading: () => null, // Or a proper loading skeleton/spinner
+});
 
 // Define a type for the raw notebook data structure from the API
 interface RawNotebook {

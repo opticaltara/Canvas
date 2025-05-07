@@ -1,0 +1,199 @@
+"""
+Cell creation utilities for the AI agent system.
+"""
+
+import logging
+from typing import Any, Dict, List, Optional, Tuple, Union
+from uuid import UUID, uuid4
+
+from backend.ai.models import StepType, InvestigationStepModel
+from backend.ai.events import AgentType, ToolSuccessEvent
+from backend.core.cell import CellType, CellResult, CellStatus
+from backend.ai.chat_tools import NotebookCellTools, CreateCellParams
+from backend.core.query_result import InvestigationReport
+from backend.services.connection_manager import ConnectionManager
+
+ai_logger = logging.getLogger("ai")
+
+class CellCreator:
+    """Handles cell creation for different step types"""
+    def __init__(self, notebook_id: str, connection_manager: ConnectionManager):
+        self.notebook_id = notebook_id
+        self.connection_manager = connection_manager
+    
+    async def create_markdown_cell(
+        self,
+        cell_tools: NotebookCellTools, 
+        step: InvestigationStepModel, 
+        result: Any,  # Should be MarkdownQueryResult
+        dependency_cell_ids: List[UUID],
+        session_id: str
+    ) -> Tuple[Optional[UUID], Optional[CreateCellParams], Optional[str]]:
+        """Create a markdown cell and return its ID, params and any error"""
+        error = getattr(result, "error", None)
+        cell_content = getattr(result, "data", "") or ""
+        
+        cell_metadata = {
+            "session_id": session_id,
+            "step_id": step.step_id
+        }
+        
+        cell_params = CreateCellParams(
+            notebook_id=self.notebook_id,
+            cell_type=CellType.MARKDOWN,
+            content=cell_content,
+            metadata=cell_metadata,
+            dependencies=dependency_cell_ids,
+            tool_call_id=uuid4()
+        )
+        
+        try:
+            cell_result = await cell_tools.create_cell(params=cell_params)
+            cell_id_str = cell_result.get("cell_id")
+            if cell_id_str:
+                return UUID(cell_id_str), cell_params, None
+            else:
+                return None, cell_params, "Cell creation returned no cell_id"
+        except Exception as e:
+            ai_logger.error(f"Failed to create markdown cell for step {step.step_id}: {e}", exc_info=True)
+            return None, cell_params, str(e)
+    
+    async def create_report_cell(
+        self,
+        cell_tools: NotebookCellTools, 
+        step: InvestigationStepModel, 
+        report: InvestigationReport,
+        dependency_cell_ids: List[UUID],
+        session_id: str
+    ) -> Tuple[Optional[UUID], Optional[CreateCellParams], Optional[str]]:
+        """Create an investigation report cell and return its ID, params and any error"""
+        error = report.error
+        report_cell_content = f"# Investigation Report: {report.title}\n\n_Structured report data generated._"
+        report_data_dict = report.model_dump(mode='json')
+        
+        report_cell_metadata = {
+            "session_id": session_id,
+            "step_id": step.step_id,
+            "is_investigation_report": True
+        }
+        
+        report_cell_params = CreateCellParams(
+            notebook_id=self.notebook_id,
+            cell_type=CellType.INVESTIGATION_REPORT.value,
+            content=report_cell_content,
+            metadata=report_cell_metadata,
+            dependencies=dependency_cell_ids,
+            tool_call_id=uuid4(),
+            result=CellResult(
+                content=report_data_dict,
+                error=error,
+                execution_time=0.0
+            ),
+            status=CellStatus.ERROR if error else CellStatus.SUCCESS
+        )
+        
+        try:
+            report_cell_result = await cell_tools.create_cell(params=report_cell_params)
+            report_cell_id_str = report_cell_result.get("cell_id")
+            if report_cell_id_str:
+                return UUID(report_cell_id_str), report_cell_params, None
+            else:
+                return None, report_cell_params, "Cell creation returned no cell_id"
+        except Exception as e:
+            ai_logger.error(f"Failed to create report cell for step {step.step_id}: {e}", exc_info=True)
+            return None, report_cell_params, str(e)
+    
+    async def create_tool_cell(
+        self,
+        cell_tools: NotebookCellTools,
+        step: InvestigationStepModel,
+        cell_type: CellType,
+        agent_type: AgentType,
+        tool_event: ToolSuccessEvent,
+        dependency_cell_ids: List[UUID],
+        session_id: str
+    ) -> Tuple[Optional[UUID], Optional[CreateCellParams], Optional[str]]:
+        """Create a cell for a tool call and return its ID, params and any error"""
+        if not tool_event.tool_call_id or not tool_event.tool_name:
+            return None, None, f"Tool event missing tool_call_id or tool_name for step {step.step_id}"
+        
+        # Get proper cell content based on the tool type
+        if cell_type == CellType.PYTHON and tool_event.tool_args and 'python_code' in tool_event.tool_args:
+            cell_content = tool_event.tool_args['python_code']
+        else:
+            cell_content = f"{cell_type.value.capitalize()}: {tool_event.tool_name}"
+        
+        # Get default connection ID for this type
+        connection_type = cell_type.value.lower()
+        default_connection_id = None
+        try:
+            default_connection = await self.connection_manager.get_default_connection(connection_type)
+            if default_connection:
+                default_connection_id = default_connection.id
+            else:
+                ai_logger.warning(f"No default {connection_type} connection found for step {step.step_id}")
+        except Exception as conn_err:
+            ai_logger.error(f"Error fetching default {connection_type} connection: {conn_err}", exc_info=True)
+        
+        # Prepare cell metadata
+        cell_tool_call_id = uuid4()
+        cell_metadata = {
+            "session_id": session_id,
+            "original_plan_step_id": step.step_id,
+            "external_tool_call_id": tool_event.tool_call_id
+        }
+        
+        # Serialize result content
+        tool_result_content = tool_event.tool_result
+        serializable_result_content = self._serialize_tool_result(tool_result_content, tool_event.tool_name)
+        
+        # Create cell parameters
+        create_cell_kwargs = {
+            "notebook_id": self.notebook_id,
+            "cell_type": cell_type,
+            "content": cell_content,
+            "metadata": cell_metadata,
+            "dependencies": dependency_cell_ids,
+            "connection_id": default_connection_id,
+            "tool_call_id": cell_tool_call_id,
+            "tool_name": tool_event.tool_name,
+            "tool_arguments": tool_event.tool_args or {},
+            "result": CellResult(
+                content=serializable_result_content,
+                error=None,
+                execution_time=0.0
+            )
+        }
+        
+        cell_params = CreateCellParams(**create_cell_kwargs)
+        
+        try:
+            cell_creation_result = await cell_tools.create_cell(params=cell_params)
+            cell_id = cell_creation_result.get("cell_id")
+            if not cell_id:
+                return None, cell_params, f"create_cell tool did not return a cell_id for {cell_type} tool"
+            
+            return UUID(cell_id), cell_params, None
+        except Exception as e:
+            error_msg = f"Failed creating cell for {cell_type} tool {tool_event.tool_name}: {e}"
+            ai_logger.warning(error_msg, exc_info=True)
+            return None, cell_params, error_msg
+    
+    def _serialize_tool_result(self, result: Any, tool_name: str) -> Optional[Union[Dict, List, str, int, float, bool]]:
+        """Serialize tool result to a JSON-compatible format"""
+        from pydantic import BaseModel
+        
+        if isinstance(result, (dict, list, str, int, float, bool, type(None))):
+            return result
+        elif isinstance(result, BaseModel):
+            try:
+                return result.model_dump(mode='json')
+            except Exception as e:
+                ai_logger.warning(f"Failed to dump Pydantic model result for {tool_name}: {e}")
+                return str(result)
+        else:
+            try:
+                return str(result)
+            except Exception as e:
+                ai_logger.warning(f"Failed to convert tool result for {tool_name} to string: {e}")
+                return f"Error converting result to string: {e}"

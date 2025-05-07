@@ -3,6 +3,8 @@ import json
 from typing import Dict, Set, Optional
 from uuid import UUID
 
+from pydantic import BaseModel # Added for Pydantic models
+
 from fastapi import WebSocket, WebSocketDisconnect
 import redis.asyncio as redis
 from redis.asyncio.client import PubSub # Correct import for PubSub type
@@ -231,4 +233,24 @@ class WebSocketManager:
 # ws_manager = WebSocketManager()
 # def get_ws_manager() -> WebSocketManager:
 #    """Dependency function to get the WebSocket manager instance."""
-#    return ws_manager 
+#    return ws_manager
+
+# --- WebSocket Message Types and Payloads ---
+
+# Message type constants
+RERUN_INVESTIGATION_CELL = "rerun_investigation_cell"
+
+class RerunInvestigationCellPayload(BaseModel):
+    """Payload for the RERUN_INVESTIGATION_CELL message."""
+    notebook_id: UUID
+    cell_id: UUID
+    session_id: str # To track the origin of the request
+
+# Example of how other message types could be structured:
+# class ClientToServerMessage(BaseModel):
+#     type: str
+#     payload: Union[RerunInvestigationCellPayload, OtherPayloadType, ...]
+
+# class ServerToClientMessage(BaseModel):
+#     type: str # e.g., "cell_updated", "status_update"
+#     data: Dict[str, Any]

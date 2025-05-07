@@ -19,8 +19,14 @@ import { Plus, Search, MoreVertical, Trash2, FileText, LineChart, Github, Databa
 import { api, Notebook } from "@/api/client"
 import { useToast } from "@/hooks/use-toast"
 import { useConnectionStore } from "@/store/connectionStore"
-import DataConnectionsDialog from "@/components/DataConnectionsDialog"
+import dynamic from 'next/dynamic'
+// import DataConnectionsDialog from "@/components/DataConnectionsDialog" // Will be dynamically imported
 import type { Connection } from "@/store/types"
+
+const DataConnectionsDialog = dynamic(() => import('@/components/DataConnectionsDialog'), {
+  ssr: false,
+  loading: () => null, // Or a proper loading skeleton/spinner
+});
 
 // Define interfaces based on usage if not available from API client
 interface Canvas {

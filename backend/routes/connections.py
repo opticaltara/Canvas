@@ -26,8 +26,8 @@ from backend.services.connection_handlers.jira_handler import (
 )
 # Import filesystem models
 from backend.services.connection_handlers.filesystem_handler import (
-    FileSystemConnectionCreate, FileSystemConnectionUpdate
-    # FileSystemConnectionTest is skipped for now
+    FileSystemConnectionCreate, FileSystemConnectionUpdate, FileSystemConnectionBase
+    # FileSystemConnectionTest is skipped for now, using FileSystemConnectionBase for test
 )
 # Import function to get registered types and handler getter
 from backend.services.connection_handlers.registry import get_all_handler_types, get_handler
@@ -89,9 +89,9 @@ UpdatePayloadUnion = Annotated[
 # Union for specific config fields during testing - Filesystem skipped for now
 TestPayloadUnion = Annotated[
     Union[
-        GithubConnectionTest, 
-        JiraConnectionTest
-        # FileSystemConnectionTest is skipped for now
+        GithubConnectionTest,
+        JiraConnectionTest,
+        FileSystemConnectionBase # Added for filesystem connection testing
     ],
     Field(discriminator="type")
 ]

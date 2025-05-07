@@ -13,9 +13,11 @@ import os
 from pydantic_ai import Agent, UnexpectedModelBehavior, CallToolsNode
 from pydantic_ai.messages import (
     FunctionToolCallEvent, 
-    FunctionToolResultEvent, 
+    FunctionToolResultEvent,
+    ModelMessage, # For message_history
 )
-from pydantic_ai.models.openai import OpenAIModel
+# from pydantic_ai.models.openai import OpenAIModel # Replaced with SafeOpenAIModel
+from backend.ai.models import SafeOpenAIModel # Added for safer timestamp handling
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.mcp import MCPServerStdio
 from mcp.shared.exceptions import McpError 
@@ -45,7 +47,7 @@ class FileSystemAgent:
         filesystem_agent_logger.info(f"Initializing FileSystemAgent for notebook_id: {notebook_id}")
         self.settings = get_settings()
         # Using the same AI model settings as GitHub agent for now
-        self.model = OpenAIModel(
+        self.model = SafeOpenAIModel( # Changed from OpenAIModel to SafeOpenAIModel
                 self.settings.ai_model,
                 provider=OpenAIProvider(
                     base_url='https://openrouter.ai/api/v1',
@@ -114,157 +116,7 @@ class FileSystemAgent:
         filesystem_agent_logger.info(f"Agent instance created with MCPServerStdio.")
         return agent
 
-    async def _run_single_attempt(
-        self, 
-        agent: Agent, 
-        current_description: str, 
-        attempt_num: int,
-        session_id: str,
-        notebook_id: str
-    ) -> AsyncGenerator[
-        Union[StatusUpdateEvent, ToolCallRequestedEvent, ToolSuccessEvent, ToolErrorEvent],
-        None,
-    ]:
-        """Runs a single attempt of the agent iteration, yielding status updates and individual tool success/error dictionaries."""
-        filesystem_agent_logger.info(f"Starting agent iteration attempt {attempt_num}...")
-        yield StatusUpdateEvent(
-            type=EventType.STATUS_UPDATE,
-            status=StatusType.AGENT_ITERATING,
-            agent_type=AgentType.FILESYSTEM,
-            attempt=attempt_num,
-            message="Agent is processing...",
-            max_attempts=None,
-            reason=None,
-            step_id=None,
-            original_plan_step_id=None,
-            session_id=session_id,
-            notebook_id=notebook_id
-        )
-
-        run_result = None
-        
-        async with agent.iter(current_description) as agent_run:
-            pending_tool_calls: Dict[str, Dict[str, Any]] = {}
-            async for node in agent_run:
-                if isinstance(node, CallToolsNode):
-                    filesystem_agent_logger.info(f"Attempt {attempt_num}: Processing CallToolsNode, streaming events...")
-                    try:
-                        async with node.stream(agent_run.ctx) as handle_stream:
-                            async for event in handle_stream:
-                                if isinstance(event, FunctionToolCallEvent):
-                                    tool_call_id = event.part.tool_call_id
-                                    tool_name = getattr(event.part, 'tool_name', None)
-                                    tool_args = getattr(event.part, 'args', {})
-                                    if not tool_name:
-                                        filesystem_agent_logger.warning(f"Attempt {attempt_num}: ToolCallPart missing 'tool_name'. Part: {event.part!r}")
-                                        tool_name = "UnknownTool"
-                                    
-                                    if isinstance(tool_args, str):
-                                        try:
-                                            tool_args = json.loads(tool_args)
-                                        except json.JSONDecodeError as json_err:
-                                            filesystem_agent_logger.error(f"Attempt {attempt_num}: Failed to parse tool_args JSON string: {tool_args}. Error: {json_err}")
-                                            tool_args = {}
-                                    elif not isinstance(tool_args, dict):
-                                        filesystem_agent_logger.warning(f"Attempt {attempt_num}: tool_args is not a dict or valid JSON string: {type(tool_args)}. Using empty dict.")
-                                        tool_args = {}
-                                    
-                                    pending_tool_calls[tool_call_id] = {
-                                        "tool_name": tool_name, 
-                                        "tool_args": tool_args
-                                    }
-                                    yield ToolCallRequestedEvent(
-                                        type=EventType.TOOL_CALL_REQUESTED,
-                                        status=StatusType.TOOL_CALL_REQUESTED,
-                                        agent_type=AgentType.FILESYSTEM,
-                                        attempt=attempt_num,
-                                        tool_call_id=tool_call_id,
-                                        tool_name=tool_name,
-                                        tool_args=tool_args,
-                                        original_plan_step_id=None,
-                                        session_id=session_id,
-                                        notebook_id=notebook_id
-                                    )
-                                
-                                elif isinstance(event, FunctionToolResultEvent):
-                                    tool_call_id = event.tool_call_id
-                                    tool_result = event.result.content
-                                    if tool_call_id in pending_tool_calls:
-                                        call_info = pending_tool_calls.pop(tool_call_id)
-                                        args_data = call_info["tool_args"]
-                                        
-                                        yield ToolSuccessEvent(
-                                            type=EventType.TOOL_SUCCESS,
-                                            status=StatusType.TOOL_SUCCESS,
-                                            agent_type=AgentType.FILESYSTEM,
-                                            attempt=attempt_num,
-                                            tool_call_id=tool_call_id,
-                                            tool_name=call_info["tool_name"],
-                                            tool_args=args_data,
-                                            tool_result=tool_result,
-                                            original_plan_step_id=None,
-                                            session_id=session_id,
-                                            notebook_id=notebook_id
-                                        )
-                                        filesystem_agent_logger.info(f"Attempt {attempt_num}: Yielded success for tool: {call_info['tool_name']} (ID: {tool_call_id})")
-                                    else:
-                                        filesystem_agent_logger.warning(f"Attempt {attempt_num}: Received result for unknown/processed ID: {tool_call_id}")
-                    
-                    except McpError as mcp_err:
-                        error_str = str(mcp_err)
-                        filesystem_agent_logger.warning(f"MCPError during CallToolsNode stream in attempt {attempt_num}: {error_str}")
-                        mcp_tool_call_id = getattr(mcp_err, 'tool_call_id', None)
-                        failed_tool_info = pending_tool_calls.get(mcp_tool_call_id, {}) if mcp_tool_call_id else {}
-                        yield ToolErrorEvent(
-                            type=EventType.TOOL_ERROR,
-                            status=StatusType.MCP_ERROR,
-                            agent_type=AgentType.FILESYSTEM,
-                            attempt=attempt_num,
-                            tool_call_id=mcp_tool_call_id,
-                            tool_name=failed_tool_info.get("tool_name"),
-                            tool_args=failed_tool_info.get("tool_args"),
-                            error=f"MCP Tool Error: {error_str}",
-                            message=None,
-                            original_plan_step_id=None,
-                            session_id=session_id,
-                            notebook_id=notebook_id
-                        )
-                        raise mcp_err
-
-                    except Exception as stream_err:
-                        filesystem_agent_logger.error(f"Attempt {attempt_num}: Error during CallToolsNode stream: {stream_err}", exc_info=True)
-                        yield ToolErrorEvent(
-                            type=EventType.TOOL_ERROR,
-                            status=StatusType.ERROR,
-                            agent_type=AgentType.FILESYSTEM,
-                            attempt=attempt_num,
-                            tool_call_id=None,
-                            tool_name=None,
-                            tool_args=None,
-                            error=f"Stream Processing Error: {stream_err}",
-                            message=None,
-                            original_plan_step_id=None,
-                            session_id=session_id,
-                            notebook_id=notebook_id
-                        )
-                        raise stream_err
-            
-            run_result = agent_run.result 
-            filesystem_agent_logger.info(f"Attempt {attempt_num}: Agent iteration finished. Raw final result (less relevant now): {run_result}")
-
-        yield StatusUpdateEvent(
-            type=EventType.STATUS_UPDATE,
-            status=StatusType.AGENT_RUN_COMPLETE, 
-            agent_type=AgentType.FILESYSTEM,
-            attempt=attempt_num,
-            message=None,
-            max_attempts=None,
-            reason=None,
-            step_id=None,
-            original_plan_step_id=None,
-            session_id=session_id,
-            notebook_id=notebook_id
-        )
+    # Removed _run_single_attempt as its logic is now directly in run_query's attempt loop.
 
     async def run_query(
         self,
@@ -352,6 +204,7 @@ class FileSystemAgent:
         last_error = None
         attempt_completed = 0
         success_occurred = False
+        accumulated_message_history: list[ModelMessage] = [] # Initialize message history
 
         yield StatusUpdateEvent(
             type=EventType.STATUS_UPDATE,
@@ -384,52 +237,153 @@ class FileSystemAgent:
                 last_error_for_attempt = None 
                 agent_produced_final_result = False # Flag to track if agent finished cleanly in this attempt
 
-                try: 
-                    async with agent.run_mcp_servers():
-                        filesystem_agent_logger.info(f"Attempt {attempt_completed}: MCP Server connection active.")
+                try:
+                    async with agent.run_mcp_servers(): # MCP server management should wrap agent.iter
+                        filesystem_agent_logger.info(f"Attempt {attempt_completed}: MCP Server context entered.")
+                        # Pass accumulated_message_history to agent.iter
+                        async with agent.iter(current_description, message_history=accumulated_message_history) as agent_run:
+                            filesystem_agent_logger.info(f"Attempt {attempt_completed}: agent.iter called. History length: {len(accumulated_message_history)}")
+                            # The MCP_CONNECTION_ACTIVE event might be redundant if agent.iter() only proceeds if connection is active.
+                            # For now, let's keep it to explicitly signal this state.
+                            yield StatusUpdateEvent(
+                                type=EventType.STATUS_UPDATE, status=StatusType.MCP_CONNECTION_ACTIVE,
+                                agent_type=AgentType.FILESYSTEM,
+                                attempt=attempt_completed,
+                                message="MCP server connection established and agent.iter active.",
+                                max_attempts=None, reason=None, step_id=None, original_plan_step_id=None,
+                                session_id=session_id,
+                                notebook_id=notebook_id
+                            )
+
+                            # --- Core agent interaction logic ---
+                        pending_tool_calls: Dict[str, Dict[str, Any]] = {}
+                        # No longer tracking duplicate calls within a single attempt here,
+                        # as passing full message_history to retries should help.
+                        # attempt_tool_calls_history = set()
+                        
                         yield StatusUpdateEvent(
-                            type=EventType.STATUS_UPDATE, status=StatusType.MCP_CONNECTION_ACTIVE, 
+                            type=EventType.STATUS_UPDATE,
+                            status=StatusType.AGENT_ITERATING, # Moved here from _run_single_attempt
                             agent_type=AgentType.FILESYSTEM,
-                            attempt=attempt_completed, 
-                            message="MCP server connection established.",
-                            max_attempts=None, reason=None, step_id=None, original_plan_step_id=None,
+                            attempt=attempt_completed,
+                            message="Agent is processing...",
+                            max_attempts=None, # max_attempts is known by run_query
+                            reason=None,
+                            step_id=None,
+                            original_plan_step_id=None,
                             session_id=session_id,
                             notebook_id=notebook_id
                         )
 
-                        # --- Wrap the core agent interaction ---
-                        try:
-                            async for event_data in self._run_single_attempt(agent, current_description, attempt_completed, session_id, notebook_id):
-                                yield event_data
+                        try: # This try block is for errors within the agent.iter() and node.stream()
+                            async for node in agent_run: # agent_run is from agent.iter with history
+                                if isinstance(node, CallToolsNode):
+                                    filesystem_agent_logger.info(f"Attempt {attempt_completed}: Processing CallToolsNode, streaming events...")
+                                    try:
+                                        async with node.stream(agent_run.ctx) as handle_stream:
+                                            async for event in handle_stream:
+                                                if isinstance(event, FunctionToolCallEvent):
+                                                    tool_call_id = event.part.tool_call_id
+                                                    tool_name = getattr(event.part, 'tool_name', None)
+                                                    tool_args = getattr(event.part, 'args', {})
+                                                    if not tool_name:
+                                                        filesystem_agent_logger.warning(f"Attempt {attempt_completed}: ToolCallPart missing 'tool_name'. Part: {event.part!r}")
+                                                        tool_name = "UnknownTool"
+                                                    
+                                                    if isinstance(tool_args, str):
+                                                        try:
+                                                            tool_args = json.loads(tool_args)
+                                                        except json.JSONDecodeError as json_err:
+                                                            filesystem_agent_logger.error(f"Attempt {attempt_completed}: Failed to parse tool_args JSON string: {tool_args}. Error: {json_err}")
+                                                            tool_args = {} 
+                                                    elif not isinstance(tool_args, dict):
+                                                        filesystem_agent_logger.warning(f"Attempt {attempt_completed}: tool_args is not a dict or valid JSON string: {type(tool_args)}. Defaulting to empty dict.")
+                                                        tool_args = {}
 
-                                # Track if any tool succeeded overall
-                                if isinstance(event_data, ToolSuccessEvent): 
-                                    success_occurred = True # Mark overall success
-                                elif isinstance(event_data, ToolErrorEvent):
-                                    # Mark attempt as failed if any tool error occurs
-                                    attempt_failed = True 
-                                    last_error_for_attempt = event_data.error 
+                                                    pending_tool_calls[tool_call_id] = {
+                                                        "tool_name": tool_name, 
+                                                        "tool_args": tool_args
+                                                    }
+                                                    yield ToolCallRequestedEvent(
+                                                        type=EventType.TOOL_CALL_REQUESTED,
+                                                        status=StatusType.TOOL_CALL_REQUESTED,
+                                                        agent_type=AgentType.FILESYSTEM,
+                                                        attempt=attempt_completed,
+                                                        tool_call_id=tool_call_id,
+                                                        tool_name=tool_name,
+                                                        tool_args=tool_args,
+                                                        original_plan_step_id=None,
+                                                        session_id=session_id,
+                                                        notebook_id=notebook_id
+                                                    )
+                                                
+                                                elif isinstance(event, FunctionToolResultEvent):
+                                                    tool_call_id = event.tool_call_id
+                                                    tool_result = event.result.content
+                                                    if tool_call_id in pending_tool_calls:
+                                                        call_info = pending_tool_calls.pop(tool_call_id)
+                                                        args_data = call_info["tool_args"]
+                                                        
+                                                        yield ToolSuccessEvent(
+                                                            type=EventType.TOOL_SUCCESS,
+                                                            status=StatusType.TOOL_SUCCESS,
+                                                            agent_type=AgentType.FILESYSTEM,
+                                                            attempt=attempt_completed,
+                                                            tool_call_id=tool_call_id,
+                                                            tool_name=call_info["tool_name"],
+                                                            tool_args=args_data,
+                                                            tool_result=tool_result,
+                                                            original_plan_step_id=None,
+                                                            session_id=session_id,
+                                                            notebook_id=notebook_id
+                                                        )
+                                                        success_occurred = True # Mark overall success
+                                                        filesystem_agent_logger.info(f"Attempt {attempt_completed}: Yielded success for tool: {call_info['tool_name']} (ID: {tool_call_id})")
+                                                    else:
+                                                        filesystem_agent_logger.warning(f"Attempt {attempt_completed}: Received result for unknown/processed ID: {tool_call_id}")
+                                    
+                                    except McpError as mcp_err_stream: # Renamed to avoid conflict
+                                        error_str = str(mcp_err_stream)
+                                        filesystem_agent_logger.warning(f"MCPError during CallToolsNode stream in attempt {attempt_completed}: {error_str}")
+                                        mcp_tool_call_id = getattr(mcp_err_stream, 'tool_call_id', None)
+                                        failed_tool_info = pending_tool_calls.get(mcp_tool_call_id, {}) if mcp_tool_call_id else {}
+                                        yield ToolErrorEvent(
+                                            type=EventType.TOOL_ERROR, status=StatusType.MCP_ERROR,
+                                            agent_type=AgentType.FILESYSTEM, attempt=attempt_completed,
+                                            tool_call_id=mcp_tool_call_id, tool_name=failed_tool_info.get("tool_name"),
+                                            tool_args=failed_tool_info.get("tool_args"), error=f"MCP Tool Error: {error_str}",
+                                            message=None, original_plan_step_id=None, session_id=session_id, notebook_id=notebook_id
+                                        )
+                                        raise mcp_err_stream # Re-raise to be caught by outer try-except in this attempt
 
-                            # If the async for loop completes without raising an exception,
-                            # it means agent.iter() finished its process for this round.
-                            # We consider this as the agent reaching a final state for the attempt,
-                            # unless an error already marked it as failed.
-                            if not attempt_failed:
+                                    except Exception as stream_err_inner: # Renamed
+                                        filesystem_agent_logger.error(f"Attempt {attempt_completed}: Error during CallToolsNode stream: {stream_err_inner}", exc_info=True)
+                                        yield ToolErrorEvent(
+                                            type=EventType.TOOL_ERROR, status=StatusType.ERROR,
+                                            agent_type=AgentType.FILESYSTEM, attempt=attempt_completed,
+                                            tool_call_id=None, tool_name=None, tool_args=None,
+                                            error=f"Stream Processing Error: {stream_err_inner}", message=None,
+                                            original_plan_step_id=None, session_id=session_id, notebook_id=notebook_id
+                                        )
+                                        raise stream_err_inner # Re-raise
+                            
+                            # This part is reached if agent.iter completes without internal exceptions from node processing
+                            run_result = agent_run.result 
+                            filesystem_agent_logger.info(f"Attempt {attempt_completed}: Agent iteration finished. Raw final result: {run_result}")
+                            if not attempt_failed: # If no tool errors occurred during streaming
                                 agent_produced_final_result = True
-                                filesystem_agent_logger.info(f"Attempt {attempt_completed}: Agent iteration completed without raising errors.")
-                        
-                        # --- Handle exceptions from _run_single_attempt or streaming ---
-                        except McpError as mcp_err:
+
+                        # --- Handle exceptions from the agent.iter() or node.stream() logic ---
+                        except McpError as mcp_err: # This catches McpError re-raised from inner block
                             error_str = str(mcp_err)
-                            filesystem_agent_logger.warning(f"Attempt {attempt_completed} caught MCPError within _run_single_attempt processing: {error_str}")
+                            filesystem_agent_logger.warning(f"Attempt {attempt_completed} caught MCPError: {error_str}")
                             last_error_for_attempt = f"MCP Tool Error: {error_str}"
                             attempt_failed = True
-                            # Note: The ToolErrorEvent for McpError is yielded within _run_single_attempt now
+                            # Note: The ToolErrorEvent for McpError is yielded within the stream processing block
                         except UnexpectedModelBehavior as e:
-                            filesystem_agent_logger.error(f"Attempt {attempt_completed} caught UnexpectedModelBehavior within _run_single_attempt processing: {e}", exc_info=True)
+                            filesystem_agent_logger.error(f"Attempt {attempt_completed} caught UnexpectedModelBehavior: {e}", exc_info=True)
                             last_error_for_attempt = f"Agent run failed due to unexpected model behavior: {str(e)}"
                             attempt_failed = True
-                            # Yield an error event if not already done by _run_single_attempt for this
                             yield ToolErrorEvent( 
                                 type=EventType.TOOL_ERROR, status=StatusType.MODEL_ERROR,
                                 agent_type=AgentType.FILESYSTEM, attempt=attempt_completed,
@@ -442,7 +396,7 @@ class FileSystemAgent:
                             is_timestamp_error = isinstance(e, TypeError) and "'NoneType' object cannot be interpreted as an integer" in str(e)
                             error_msg = "TypeError: OpenAI API response likely missing 'created' timestamp." if is_timestamp_error else f"Agent iteration failed unexpectedly: {str(e)}"
                             error_status = StatusType.TIMESTAMP_ERROR if is_timestamp_error else StatusType.GENERAL_ERROR_RUN
-                            filesystem_agent_logger.error(f"Attempt {attempt_completed} caught general error within _run_single_attempt processing: {error_msg}", exc_info=True)
+                            filesystem_agent_logger.error(f"Attempt {attempt_completed} caught general error: {error_msg}", exc_info=True)
                             
                             last_error_for_attempt = error_msg # Use specific message
                             attempt_failed = True
@@ -457,7 +411,22 @@ class FileSystemAgent:
                                 original_plan_step_id=None, session_id=session_id, notebook_id=notebook_id
                             )
                         finally:
-                             filesystem_agent_logger.info(f"Attempt {attempt_completed}: Exiting core _run_single_attempt processing block (inside run_mcp_servers).")
+                            # Capture history after the agent_run block finishes or if an error occurs within it.
+                            if hasattr(agent_run, 'ctx') and hasattr(agent_run.ctx, 'state') and hasattr(agent_run.ctx.state, 'message_history'):
+                                accumulated_message_history = agent_run.ctx.state.message_history[:]
+                                filesystem_agent_logger.info(f"Attempt {attempt_completed} (finally): Captured message history of length {len(accumulated_message_history)}.")
+                            else: # This case should ideally not happen if agent_run is always valid here
+                                filesystem_agent_logger.warning(f"Attempt {attempt_completed} (finally): Could not capture message history from agent_run.ctx.state.")
+                            
+                            yield StatusUpdateEvent( # Consistent with other agents
+                                type=EventType.STATUS_UPDATE,
+                                status=StatusType.AGENT_RUN_COMPLETE, 
+                                agent_type=AgentType.FILESYSTEM, 
+                                attempt=attempt_completed,
+                                message=None, max_attempts=None, reason=None, step_id=None,
+                                original_plan_step_id=None, session_id=session_id, notebook_id=notebook_id
+                            )
+                            filesystem_agent_logger.info(f"Attempt {attempt_completed}: Exiting core agent interaction block.")
                         # --- End core agent interaction wrap ---
 
                 # --- Handle fatal errors managing MCP connection itself ---
@@ -481,6 +450,12 @@ class FileSystemAgent:
 
                 elif attempt_failed:
                      last_error = last_error_for_attempt # Update overall last error for final reporting
+                     
+                     # Check if the error is the specific timestamp error
+                     if last_error_for_attempt == "TypeError: OpenAI API response likely missing 'created' timestamp.":
+                         filesystem_agent_logger.error(f"Persistent timestamp error encountered on attempt {attempt_completed}. Not retrying further for this error. Error: {last_error_for_attempt}")
+                         break # Break the loop immediately for this specific persistent error
+
                      if attempt < max_attempts - 1:
                          # Retry only if an error occurred and we have attempts left
                          error_context = f"\\n\\nINFO: Attempt {attempt_completed} failed with error: {last_error_for_attempt}. Retrying..."

@@ -506,13 +506,34 @@ class NotebookRepository:
             result = await self.db.execute(stmt)
             if result.rowcount == 0:
                  logger.warning("No rows updated for cell %s, possibly concurrent modification?", cell_id, extra={'correlation_id': 'N/A'})
-                 raise SQLAlchemyError("Update affected 0 rows.")
+                 # Not necessarily an error if updates didn't change any values, but for content update it should change.
+                 # For now, let's proceed, the re-fetch will confirm.
+                 # raise SQLAlchemyError("Update affected 0 rows.") # Commenting out to allow no-op updates
 
-            # Update notebook timestamp
+            # Update notebook timestamp (this also executes an update)
             await self._update_notebook_timestamp(notebook_id)
-            logger.info("Cell %s updated successfully with attributes: %s", cell_id, list(valid_attrs.keys()), extra={'correlation_id': 'N/A'})
+            
+            # Commit the changes to the database so they are visible to subsequent queries
+            # Expire the cell instance from the session before commit,
+            # so that subsequent accesses will reload it from the DB.
+            if cell: # Ensure cell object exists before expiring
+                self.db.expire(cell)
+            
+            await self.db.commit()
+            logger.info("Cell %s update transaction committed.", cell_id, extra={'correlation_id': 'N/A'})
+            
+            # After commit, the 'cell' instance is expired. Accessing its attributes
+            # would normally cause a reload. To be certain, we can refresh it.
+            # If 'cell' was None initially (should not happen due to prior get_cell), this would error.
+            # The re-fetch via self.get_cell() is a safer way to get a fully fresh object.
+            refreshed_cell = await self.get_cell(cell_id) # Re-fetch to ensure fresh state
 
-            return await self.get_cell(cell_id) # Fetch again to get refreshed data
+            if refreshed_cell:
+                logger.info("Cell %s updated and re-fetched successfully with attributes: %s", cell_id, list(valid_attrs.keys()), extra={'correlation_id': 'N/A'})
+            else:
+                # This would be unexpected if the update succeeded and cell still exists
+                logger.error("Failed to re-fetch cell %s after update and commit.", cell_id, extra={'correlation_id': 'N/A'})
+            return refreshed_cell
         except SQLAlchemyError as e:
             logger.error("Error updating cell %s: %s", cell_id, str(e), extra={'correlation_id': 'N/A'}, exc_info=True)
             raise

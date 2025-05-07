@@ -29,7 +29,7 @@ from backend.db.chat_db import ChatDatabase
 from backend.core.logging import setup_logging, get_logger
 from backend.services.connection_handlers.registry import get_all_handler_types
 from backend.websockets import WebSocketManager
-from backend.db.database import init_db
+from backend.db.database import init_db, async_session_factory # Import the factory directly
 from backend.db.models import Base
 from backend.routes import notebooks, connections
 
@@ -80,8 +80,10 @@ async def lifespan(app: FastAPI):
     # --- Initialize database ---
     app_logger.info("Initializing database tables")
     try:
-        await init_db()
-        app_logger.info("Database initialized (tables checked/created).")
+        await init_db() # This creates tables
+        # Store the imported async_session_factory in app.state
+        app.state.async_session_factory = async_session_factory # Use the directly imported factory
+        app_logger.info("Database initialized (tables checked/created) and async_session_factory stored in app.state.")
     except Exception as e:
         app_logger.error(f"Database initialization failed: {e}", exc_info=True)
         raise 

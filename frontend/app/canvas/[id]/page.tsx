@@ -7,8 +7,9 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Play } from "lucide-react"
+import dynamic from 'next/dynamic'
 import CellCreationPills from "@/components/canvas/CellCreationPills"
-import AIChatPanel from "@/components/AIChatPanel"
+// import AIChatPanel from "@/components/AIChatPanel" // Will be dynamically imported
 import AIChatToggle from "@/components/AIChatToggle"
 import { api } from "@/api/client"
 import { useToast } from "@/hooks/use-toast"
@@ -16,6 +17,11 @@ import { useInvestigationEvents, type CellCreationParams } from "@/hooks/useInve
 import { useCanvasStore, type NotebookState } from "@/store/canvasStore"
 import { type Cell, type CellType } from "@/store/types"
 import CellFactory from "@/components/cells/CellFactory"
+
+const AIChatPanel = dynamic(() => import('@/components/AIChatPanel'), {
+  ssr: false, // Typically, chat panels are client-side heavy and don't need SSR
+  loading: () => <div className="fixed bottom-4 right-4 p-4 bg-gray-700 text-white rounded-lg shadow-lg">Loading Chat...</div>,
+});
 
 type DisplayCell = Cell & { isNew?: boolean }
 

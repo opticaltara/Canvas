@@ -58,6 +58,9 @@ class AgentType(str, Enum):
     PYTHON = "python"
     PLAN_REVISER = "plan_reviser"
     INVESTIGATION_REPORT_GENERATOR = "investigation_report_generator"
+    SQL = "sql"
+    S3 = "s3"
+    METRIC = "metric"
 class StatusType(str, Enum):
     # General Statuses
     STARTING = "starting"
@@ -84,6 +87,7 @@ class StatusType(str, Enum):
     TIMESTAMP_ERROR = "timestamp_error" # Specific error during run
     GENERAL_ERROR_RUN = "general_error_run" # Other errors during run
     FATAL_MCP_ERROR = "fatal_mcp_error"
+    FILE_PREPARATION_ERROR = "file_preparation_error" # Error during local file staging
     
     # Final Statuses
     FINISHED_SUCCESS = "finished_success"
@@ -382,7 +386,7 @@ class PythonToolCellCreatedEvent(BaseEvent):
     status: StatusType = Field(default=StatusType.TOOL_SUCCESS, description="Fixed status for success")
     agent_type: AgentType = Field(default=AgentType.PYTHON, description="Fixed agent type")
     original_plan_step_id: str = Field(..., description="The ID of the original investigation plan step")
-    cell_id: str = Field(..., description="The ID of the created notebook cell")
+    cell_id: Optional[str] = Field(..., description="The ID of the created notebook cell") # Made Optional
     tool_name: str = Field(..., description="The name of the specific Python tool executed (e.g., 'run_python_code')")
     tool_args: Optional[Dict[str, Any]] = Field(None, description="The arguments passed to the tool")
     result: Optional[Any] = Field(..., description="The result object from the tool execution to store in the cell")

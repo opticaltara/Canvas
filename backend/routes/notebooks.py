@@ -7,8 +7,9 @@ from typing import Dict, List, Optional, Any
 from uuid import UUID
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+import json # Added for parsing incoming WebSocket messages
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Request
+from pydantic import BaseModel, ValidationError # Added for Pydantic validation
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -16,7 +17,8 @@ from backend.core.cell import CellType, CellStatus
 from backend.core.types import ToolCallID
 from backend.services.notebook_manager import NotebookManager, get_notebook_manager
 from backend.db.database import get_db, get_async_db_session
-from backend.websockets import WebSocketManager
+# Import specific message types and payloads
+from backend.websockets import WebSocketManager, RERUN_INVESTIGATION_CELL, RerunInvestigationCellPayload
 from backend.services.connection_manager import ConnectionManager, get_connection_manager
 from backend.db.repositories import NotebookRepository
 
@@ -417,23 +419,37 @@ async def update_cell(
         The updated cell data
     """
     route_logger.info(f"Updating cell {cell_id} in notebook {notebook_id}")
-    updated_cell = None
     try:
-        cell = await notebook_manager.get_cell(db, notebook_id, cell_id)
+        # Ensure cell exists, will raise 404 if not.
+        # This initial get_cell is mostly for the 404 check if no updates are made,
+        # or as a base if update_cell_content isn't called.
+        final_cell_state_model = await notebook_manager.get_cell(db, notebook_id, cell_id) 
 
-        route_logger.info(f"Cell: {cell}")
-        
-        # Update content if provided
         if cell_data.content is not None:
             route_logger.info(f"Updating content for cell {cell_id}")
-            updated_cell = await notebook_manager.update_cell_content(db, notebook_id, cell_id, cell_data.content)
+            # update_cell_content returns the updated Pydantic cell model. Use this.
+            final_cell_state_model = await notebook_manager.update_cell_content(db, notebook_id, cell_id, cell_data.content)
         
-        # If no updates were performed, fetch the current cell state
-        if updated_cell is None:
-            updated_cell = await notebook_manager.get_cell(db, notebook_id, cell_id)
+        # If metadata or settings are also updated, the current final_cell_state_model might become stale
+        # if update_cell_fields doesn't also update it or return the newest state.
+        if cell_data.metadata is not None:
+            route_logger.info(f"Updating metadata for cell {cell_id}")
+            # Assuming 'cell_metadata' is the field name in the DB model/repository for cell's metadata
+            await notebook_manager.update_cell_fields(db, notebook_id, cell_id, {"cell_metadata": cell_data.metadata})
+            # If content was NOT updated before this, final_cell_state_model is from the initial get_cell.
+            # We need to re-fetch if metadata is the only/last update modifying the cell.
+            if cell_data.content is None: # Re-fetch if content wasn't updated to set final_cell_state_model
+                 final_cell_state_model = await notebook_manager.get_cell(db, notebook_id, cell_id)
 
-        route_logger.info(f"Successfully updated cell {cell_id}")
-        return updated_cell.model_dump()
+        if cell_data.settings is not None:
+            route_logger.info(f"Updating settings for cell {cell_id}")
+            await notebook_manager.update_cell_fields(db, notebook_id, cell_id, {"settings": cell_data.settings})
+            # Re-fetch if settings is the only/last update and content/metadata weren't.
+            if cell_data.content is None and cell_data.metadata is None: # Re-fetch if neither content nor metadata set final_cell_state_model
+                 final_cell_state_model = await notebook_manager.get_cell(db, notebook_id, cell_id)
+        
+        route_logger.info(f"Successfully updated cell {cell_id} and returning fresh state.")
+        return final_cell_state_model.model_dump()
     except KeyError:
         route_logger.error(f"Cell {cell_id} not found for update in notebook {notebook_id}")
         raise HTTPException(status_code=404, detail=f"Cell {cell_id} not found in notebook {notebook_id}")
@@ -686,7 +702,69 @@ async def notebook_websocket(
     route_logger.info(f"WebSocket connected for notebook: {notebook_id}")
     try:
         while True:
-            await websocket.receive_text() 
+            data = await websocket.receive_text()
+            route_logger.debug(f"WebSocket received data for notebook {notebook_id}: {data[:200]}...") # Log received data
+
+            try:
+                message_data = json.loads(data)
+                message_type = message_data.get("type")
+                payload_data = message_data.get("payload")
+
+                if message_type == RERUN_INVESTIGATION_CELL:
+                    route_logger.info(f"Received '{RERUN_INVESTIGATION_CELL}' message for notebook {notebook_id}")
+                    if payload_data:
+                        try:
+                            payload = RerunInvestigationCellPayload(**payload_data)
+                            
+                            # Get NotebookManager and DB session
+                            # Note: Accessing request.app.state directly in WebSocket is tricky.
+                            # We rely on ws_manager being set up with app state access.
+                            # For DB session, we need a way to get it per request/operation.
+                            # A common pattern is to have a dependency that can be called.
+                            # For simplicity here, we'll try to get it from app state if available,
+                            # or create a new one. This part might need refinement based on app structure.
+                            
+                            notebook_manager: Optional[NotebookManager] = getattr(websocket.app.state, 'notebook_manager', None)
+                            
+                            if not notebook_manager:
+                                route_logger.error("NotebookManager not found in application state. Cannot process rerun.")
+                                # Optionally send an error back to client
+                                await websocket.send_text(json.dumps({"type": "error", "message": "Internal server error: NotebookManager not available."}))
+                                continue
+
+                            # Get a new async DB session for this operation
+                            async_session_factory = websocket.app.state.async_session_factory # Assuming this is set up in lifespan
+                            async with async_session_factory() as db_session:
+                                await notebook_manager.rerun_investigation_cell(
+                                    db=db_session,
+                                    notebook_id=payload.notebook_id,
+                                    cell_id=payload.cell_id,
+                                    session_id=payload.session_id # Pass session_id from payload
+                                )
+                            route_logger.info(f"Successfully processed '{RERUN_INVESTIGATION_CELL}' for cell {payload.cell_id}")
+
+                        except ValidationError as e:
+                            route_logger.error(f"Invalid payload for '{RERUN_INVESTIGATION_CELL}': {e.errors()}", exc_info=True)
+                            await websocket.send_text(json.dumps({"type": "error", "message": f"Invalid payload: {e.errors()}"}))
+                        except Exception as e_process:
+                            route_logger.error(f"Error processing '{RERUN_INVESTIGATION_CELL}' for cell {payload_data.get('cell_id', 'unknown')}: {e_process}", exc_info=True)
+                            await websocket.send_text(json.dumps({"type": "error", "message": f"Error processing rerun request: {str(e_process)}"}))
+                    else:
+                        route_logger.warning(f"'{RERUN_INVESTIGATION_CELL}' message received without payload.")
+                        await websocket.send_text(json.dumps({"type": "error", "message": "Rerun message missing payload."}))
+                
+                else:
+                    route_logger.debug(f"Received unknown WebSocket message type: {message_type} for notebook {notebook_id}")
+                    # Optionally, send a message back to client indicating unknown type
+                    # await websocket.send_text(json.dumps({"type": "info", "message": f"Unknown message type: {message_type}"}))
+
+            except json.JSONDecodeError:
+                route_logger.error(f"Failed to decode JSON from WebSocket message: {data[:200]}...", exc_info=True)
+                await websocket.send_text(json.dumps({"type": "error", "message": "Invalid JSON format."}))
+            except Exception as e_outer:
+                route_logger.error(f"Generic error in WebSocket message handling loop for notebook {notebook_id}: {e_outer}", exc_info=True)
+                # Avoid flooding client with errors for every minor issue, but consider critical ones.
+
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket, notebook_uuid)
         route_logger.info(f"WebSocket disconnected for notebook: {notebook_id}")

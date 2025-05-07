@@ -1,0 +1,100 @@
+/Users/navneetkumar/sherlog-canvas/venv/lib/python3.10/site-packages/pytest_asyncio/plugin.py:217: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+============================= test session starts ==============================
+platform darwin -- Python 3.10.9, pytest-8.3.5, pluggy-1.5.0
+rootdir: /Users/navneetkumar/sherlog-canvas
+plugins: anyio-4.9.0, logfire-3.12.0, asyncio-0.26.0
+asyncio: mode=strict, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 6 items
+
+backend/tests/unit/ai/test_python_agent.py ..F...                        [100%]
+
+=================================== FAILURES ===================================
+___ TestPythonAgentPrepareLocalFile.test_filename_sanitization_and_extension ___
+
+self = <test_python_agent.TestPythonAgentPrepareLocalFile object at 0x1197cd120>
+mock_file_open = <MagicMock name='open' spec='builtin_function_or_method' id='4725501152'>
+mock_uuid = <MagicMock name='uuid4' id='4727065424'>
+mock_makedirs = <MagicMock name='makedirs' id='4727073344'>
+python_agent_instance = <backend.ai.python_agent.PythonAgent object at 0x119abb730>
+
+    @pytest.mark.asyncio
+    @patch("backend.ai.python_agent.os.makedirs")
+    @patch("backend.ai.python_agent.uuid.uuid4")
+    @patch("builtins.open", new_callable=mock_open)
+    async def test_filename_sanitization_and_extension(
+        self, mock_file_open, mock_uuid, mock_makedirs, python_agent_instance
+    ):
+        notebook_id = "nb3" # Define notebook_id and session_id for this test
+        session_id = "sess3"
+        expected_dir = os.path.join(IMPORTED_DATA_BASE_PATH, notebook_id, session_id)
+    
+        # Test case 1: Sanitization of spaces
+        mock_uuid.return_value = MagicMock(hex="sanitize") # Reset mock for consistent UUID
+        data_ref_simple_sanitize = FileDataRef(
+            type="content_string",
+            value="c",
+            original_filename="file with space.csv",
+            source_cell_id="cell_sanitize_space"
+        )
+        expected_simple_sanitized_filename = "file_with_space_sanitize.csv"
+        expected_dir = os.path.join(IMPORTED_DATA_BASE_PATH, notebook_id, session_id)
+        expected_path_simple = os.path.join(expected_dir, expected_simple_sanitized_filename)
+    
+        result_path = await python_agent_instance._prepare_local_file(data_ref_simple_sanitize, notebook_id, session_id)
+        assert result_path == expected_path_simple
+        mock_file_open.assert_called_with(expected_path_simple, 'w', encoding='utf-8')
+        mock_makedirs.assert_any_call(expected_dir, exist_ok=True) # Use assert_any_call if makedirs is called multiple times in test class
+    
+        # Test case 2: No extension in original filename
+        mock_file_open.reset_mock() # Reset for this sub-test
+        mock_makedirs.reset_mock()
+        mock_uuid.return_value = MagicMock(hex="noext")
+        data_ref_no_ext = FileDataRef(
+            type="content_string",
+            value="c",
+            original_filename="filenoext", # No extension
+            source_cell_id="cell_no_ext"
+        )
+        expected_no_ext_filename = "filenoext_noext.csv"
+        expected_path_no_ext = os.path.join(expected_dir, expected_no_ext_filename)
+        result_path_no_ext = await python_agent_instance._prepare_local_file(data_ref_no_ext, notebook_id, session_id)
+        assert result_path_no_ext == expected_path_no_ext
+        mock_file_open.assert_called_with(expected_path_no_ext, 'w', encoding='utf-8')
+        mock_makedirs.assert_any_call(expected_dir, exist_ok=True)
+    
+        # Test case 3: Special characters and different extension
+        mock_file_open.reset_mock()
+        mock_makedirs.reset_mock()
+        mock_uuid.return_value = MagicMock(hex="special")
+        data_ref_special_ext = FileDataRef(
+            type="content_string",
+            value="content",
+            original_filename="My Data File (Special!).txt",
+            source_cell_id="cell_special_ext"
+        )
+        # sanitized_name = re.sub(r'[^\w\.-]', '_', "My Data File (Special!).txt") -> "My_Data_File_Special__.txt"
+        # name_part, ext_part = os.path.splitext("My_Data_File_Special__.txt") -> ("My_Data_File_Special__", ".txt")
+        # ext_part.lower() != ".csv" is true.
+        # sanitized_name = name_part + ".csv" -> "My_Data_File_Special__.csv"
+        # base_filename = "My_Data_File_Special__.csv"
+        # filename = f"{os.path.splitext(base_filename)[0]}_{unique_id}.csv" -> "My_Data_File_Special___special.csv"
+        expected_special_ext_filename = "My_Data_File_Special___special.csv"
+        expected_path_special_ext = os.path.join(expected_dir, expected_special_ext_filename)
+        result_path_special_ext = await python_agent_instance._prepare_local_file(data_ref_special_ext, notebook_id, session_id)
+>       assert result_path_special_ext == expected_path_special_ext
+E       AssertionError: assert 'data/importe...__special.csv' == 'data/importe...__special.csv'
+E         
+E         Skipping 36 identical leading characters in diff, use -v to show
+E         - Data_File_Special___special.csv
+E         + Data_File__Special___special.csv
+E         ?          +
+
+backend/tests/unit/ai/test_python_agent.py:152: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  ai.python_agent:python_agent.py:95 Original filename 'My Data File (Special!).txt' does not end with .csv. Appending .csv to sanitized name 'My_Data_File__Special__'.
+=========================== short test summary info ============================
+FAILED backend/tests/unit/ai/test_python_agent.py::TestPythonAgentPrepareLocalFile::test_filename_sanitization_and_extension
+========================= 1 failed, 5 passed in 1.51s ==========================

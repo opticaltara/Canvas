@@ -33,6 +33,7 @@ RUN apt-get update \
     nodejs \
     npm \
     docker-ce-cli \
+    git \
  && rm -rf /var/lib/apt/lists/*
 
 # Copy Go installation from the builder stage
@@ -49,19 +50,24 @@ RUN curl -fsSL https://deno.land/x/install/install.sh | sh \
 ENV GOBIN=/usr/local/bin
 RUN --mount=type=cache,target=/root/.cache/go-build go install github.com/grafana/mcp-grafana/cmd/mcp-grafana@latest
 
+# Install uv first, as it's needed by mcp-server-data-exploration and for main requirements
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install mcp-server-data-exploration
+# Ensure PATH includes /root/.local/bin for this RUN command if uv was just installed to user's bin
+RUN PATH=/root/.local/bin:$PATH git clone https://github.com/reading-plus-ai/mcp-server-data-exploration.git /opt/mcp-server-data-exploration \
+ && cd /opt/mcp-server-data-exploration \
+ && PATH=/root/.local/bin:$PATH /root/.local/bin/uv sync
+
 # Copy requirements first for better caching
 COPY requirements.txt .
 
-# Install uv and Python dependencies
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
- && /root/.local/bin/uv pip install --system --no-cache -r requirements.txt
+# Install Python dependencies using the already installed uv
+RUN PATH=/root/.local/bin:$PATH /root/.local/bin/uv pip install --system --no-cache -r requirements.txt
 
 # Create necessary directories in one go
 RUN mkdir -p node_modules data logs \
  && chmod 777 node_modules logs
-
-# Warm up the Pyodide environment
-RUN deno run -A --unstable-worker-options jsr:@pydantic/mcp-run-python warmup
 
 # Copy application code
 COPY backend/ ./backend/

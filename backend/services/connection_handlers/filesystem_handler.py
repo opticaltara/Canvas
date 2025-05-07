@@ -114,7 +114,7 @@ class FileSystemConnectionHandler(MCPConnectionHandler):
             existing_config = {}
 
         # Validate input_data based on whether it's Create or Update
-        if isinstance(input_data, FileSystemConnectionCreate):
+        if isinstance(input_data, (FileSystemConnectionCreate, FileSystemConnectionBase)): # Also handle FileSystemConnectionBase
             prepared_config = input_data.model_dump()
         elif isinstance(input_data, FileSystemConnectionUpdate):
             update_dict = input_data.model_dump(exclude_unset=True) 
@@ -183,20 +183,51 @@ class FileSystemConnectionHandler(MCPConnectionHandler):
         command = "docker"
         args: List[str]
         env: Dict[str, str] = os.environ.copy() 
-
-        if not all(os.path.isabs(d) for d in directories):
-             logger.warning("Docker mode expects absolute paths for allowed_directories.")
-             raise ValueError("Docker mode requires absolute paths for allowed directories.")
         
+        project_host_root = os.environ.get("SHERLOG_PROJECT_HOST_ROOT")
+        logger.info(f"SHERLOG_PROJECT_HOST_ROOT environment variable: {project_host_root}")
+
         mount_args = []
-        for directory in directories:
-            basename = os.path.basename(directory.rstrip('/'))
-            if not basename:
-                logger.error(f"Could not determine basename for directory: {directory}")
-                raise ValueError(f"Invalid directory path for Docker mount: {directory}")
+        for original_dir_path in directories: # 'directories' here are the allowed_directories from config
+            src_host_path = original_dir_path # Default to using the path as is
+
+            # Handle special "/app" and "/app/..." placeholders by resolving them against SHERLOG_PROJECT_HOST_ROOT
+            if original_dir_path == "/app":
+                if not project_host_root:
+                    logger.error("An allowed_directory is '/app', but SHERLOG_PROJECT_HOST_ROOT environment variable is not set.")
+                    raise ValueError("Configuration error: '/app' in allowed_directories requires SHERLOG_PROJECT_HOST_ROOT to be set in the backend environment.")
+                src_host_path = project_host_root
+                logger.info(f"Mapping allowed_directory '/app' to host path: {src_host_path}")
+            elif original_dir_path.startswith("/app/"):
+                if not project_host_root:
+                    logger.error(f"An allowed_directory ('{original_dir_path}') starts with '/app/', but SHERLOG_PROJECT_HOST_ROOT environment variable is not set.")
+                    raise ValueError(f"Configuration error: '{original_dir_path}' in allowed_directories requires SHERLOG_PROJECT_HOST_ROOT to be set.")
+                
+                # Get the part of the path relative to "/app/"
+                # e.g., if original_dir_path is "/app/data", relative_path is "data"
+                # if original_dir_path is "/app/", relative_path is ""
+                relative_path = original_dir_path[len("/app/"):] if len(original_dir_path) > len("/app/") else ""
+                src_host_path = os.path.join(project_host_root, relative_path)
+                logger.info(f"Mapping allowed_directory '{original_dir_path}' to host path: {src_host_path}")
+
+            # Validate that the final source path for the mount is absolute
+            if not os.path.isabs(src_host_path):
+                 logger.error(f"Calculated source path '{src_host_path}' for Docker mount is not absolute. Original configured path: '{original_dir_path}'. SHERLOG_PROJECT_HOST_ROOT: '{project_host_root}'")
+                 raise ValueError(f"Source path for Docker mount must be absolute. Calculated '{src_host_path}' from configured path '{original_dir_path}'.")
+
+            # Determine the basename from the original_dir_path to maintain the desired /projects/... structure
+            # e.g. /app -> app, /app/data -> data
+            temp_path_for_basename = original_dir_path.rstrip('/')
+            basename = os.path.basename(temp_path_for_basename)
             
-            destination = f"/projects/{basename}"
-            mount_args.extend(["--mount", f"type=bind,src={directory},dst={destination}"])
+            if not basename: # Handles cases like original_dir_path being "/" or "///"
+                logger.error(f"Could not determine a valid basename for Docker mount destination from original path: '{original_dir_path}'. This path will be skipped for mounting.")
+                # Optionally, raise ValueError or continue to next directory
+                # For now, let's raise an error as an empty basename for /projects/{basename} is problematic
+                raise ValueError(f"Invalid directory path for Docker mount destination (empty basename): {original_dir_path}")
+            
+            destination = f"/projects/{basename}" # This creates /projects/app, /projects/data etc.
+            mount_args.extend(["--mount", f"type=bind,src={src_host_path},dst={destination}"])
         
         args = [
             "run",
@@ -283,4 +314,4 @@ class FileSystemConnectionHandler(MCPConnectionHandler):
             raise McpError(ErrorData(code=500, message=error_msg)) from e
 
 # Register the handler instance
-register_handler(FileSystemConnectionHandler()) 
+register_handler(FileSystemConnectionHandler())

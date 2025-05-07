@@ -3,10 +3,16 @@
 import type React from "react"
 import { useState } from "react"
 import { ShareIcon, CopyIcon, PlayCircleIcon, Database } from "lucide-react"
+import dynamic from 'next/dynamic'
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
-import DataConnectionsDialog from "./DataConnectionsDialog"
+// import DataConnectionsDialog from "./DataConnectionsDialog" // Will be dynamically imported
 import { useConnectionStore } from "../store/connectionStore"
+
+const DataConnectionsDialog = dynamic(() => import('./DataConnectionsDialog'), {
+  ssr: false,
+  loading: () => null, // Or a proper loading skeleton/spinner
+});
 
 interface CanvasHeaderProps {
   name: string

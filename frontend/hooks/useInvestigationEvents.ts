@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
-import { useWebSocket } from "./useWebSocket" // Restore import
+import { useWebSocket, type WebSocketMessage } from "./useWebSocket" // Restore import and add WebSocketMessage
 import { useToast } from "@/hooks/use-toast"
 import { useCanvasStore } from "@/store/canvasStore" // Import useCanvasStore
 import { type CellStatus, CellType } from "@/store/types"; // Import CellStatus & CellType // Ensure CellType is imported
@@ -280,7 +280,14 @@ export function useInvestigationEvents({
   onUpdateCell,
   onError,
 }: UseInvestigationEventsProps) {
-  const { status: wsStatus, messages, sendMessage } = useWebSocket(notebookId) // Call useWebSocket
+  const [latestEvent, setLatestEvent] = useState<InvestigationEvent | null>(null);
+
+  const handleWebSocketMessage = useCallback((message: WebSocketMessage) => {
+    // Assuming all messages for investigation are InvestigationEvent
+    setLatestEvent(message as InvestigationEvent);
+  }, []);
+
+  const { status: wsStatus, sendMessage } = useWebSocket(notebookId, handleWebSocketMessage) // Call useWebSocket with callback
   const [isInvestigationRunning, setIsInvestigationRunning] = useState(false)
   const [currentPlan, setCurrentPlan] = useState<string | null>(null)
   const [currentStatus, setCurrentStatus] = useState<string | null>(null)
@@ -814,23 +821,17 @@ export function useInvestigationEvents({
 
   // Process incoming WebSocket messages from the internal hook
   useEffect(() => {
-    // Change dependency from streamedMessages to messages
-    if (!messages || messages.length === 0) return
+    if (!latestEvent) return;
 
-    // Process only the latest message for simplicity in this model
-    // (Alternative: process all messages since last run, like the prop version did)
-    const latestMessage = messages[messages.length - 1];
-    if (latestMessage) {
-        try {
-            console.log("[useInvestigationEvents] Processing latest message:", latestMessage)
-            handleEvent(latestMessage as InvestigationEvent);
-        } catch (error) {
-            console.error("Error handling investigation event:", error);
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            onError(`Failed to process event: ${errorMessage}`);
-        }
-    } 
-  }, [messages, handleEvent, onError]); // Depend on messages from useWebSocket
+    try {
+        console.log("[useInvestigationEvents] Processing latest event:", latestEvent)
+        handleEvent(latestEvent); // latestEvent is already typed as InvestigationEvent | null
+    } catch (error) {
+        console.error("Error handling investigation event:", error);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        onError(`Failed to process event: ${errorMessage}`);
+    }
+  }, [latestEvent, handleEvent, onError]); // Depend on latestEvent
   // --- END: Main event router and message processor ---
 
   return {

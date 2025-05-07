@@ -8,13 +8,15 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { Button } from '@/components/ui/button';
-import { CodeIcon, ExternalLinkIcon, FileCodeIcon, GitCommitIcon, HelpCircleIcon, InfoIcon, ListIcon, MessageSquareIcon, PaperclipIcon, SearchIcon, ServerIcon, TagIcon, TriangleAlertIcon, CheckCircleIcon, XCircleIcon, ClockIcon, FileTextIcon, GitPullRequestIcon, Trash2Icon, BarChartIcon, QuoteIcon, PuzzleIcon, TargetIcon, WrenchIcon, LightbulbIcon, UsersIcon, ChevronRightIcon } from 'lucide-react';
+import { CodeIcon, ExternalLinkIcon, FileCodeIcon, GitCommitIcon, HelpCircleIcon, InfoIcon, ListIcon, MessageSquareIcon, PaperclipIcon, SearchIcon, ServerIcon, TagIcon, TriangleAlertIcon, CheckCircleIcon, XCircleIcon, ClockIcon, FileTextIcon, GitPullRequestIcon, Trash2Icon, BarChartIcon, QuoteIcon, PuzzleIcon, TargetIcon, WrenchIcon, LightbulbIcon, UsersIcon, ChevronRightIcon, RefreshCwIcon } from 'lucide-react'; // Added RefreshCwIcon
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import oneLight from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import type { Cell } from '@/store/types'; // Import base Cell type
 import type { InvestigationReportData, Finding, CodeReference, RelatedItem } from '@/hooks/useInvestigationEvents'; // Import report-specific types
-import { useCanvasStore } from '@/store/canvasStore'; // ADDED: Import zustand store
+import { useCanvasStore } from '@/store/canvasStore';
+import { useWebSocket, type WebSocketMessage } from '@/hooks/useWebSocket'; // Added for sending messages & WebSocketMessage type
+import { v4 as uuidv4 } from 'uuid'; // Added for generating session_id
 
 interface InvestigationReportCellProps {
   cell: Cell; // Expecting a Cell object
@@ -209,9 +211,66 @@ const InvestigationReportCell: React.FC<InvestigationReportCellProps> = ({ cell,
   // Log the cell prop received by the component
   console.log(`[InvestigationReportCell ${cell.id}] Render with cell prop:`, cell);
 
-  // Access the nested report data
-  const { sendSuggestedStepToChat, isSendingChatMessage } = useCanvasStore(); // ADDED: Get action and state from store
+  const notebookId = cell.notebook_id; // Placed notebookId definition before its use in useCallback
+  const { sendSuggestedStepToChat, isSendingChatMessage, updateCell } = useCanvasStore();
+
+  const handleWebSocketMessage = React.useCallback((message: WebSocketMessage) => {
+    console.log(`[InvestigationReportCell ${cell.id}] WebSocket message received:`, message);
+
+    // Assumption: Define the expected message type for cell updates.
+    // This should ideally come from a shared constants/types file.
+    const CELL_UPDATE_EVENT_TYPE = "cell_update"; // Example type, adjust if different
+
+    if (message.type === CELL_UPDATE_EVENT_TYPE && message.payload) {
+      const {
+        notebook_id: msgNotebookId,
+        cell_id: msgCellId,
+        // Spread the rest of the payload as potential updates to the cell
+        // This assumes the payload structure aligns with Partial<Cell>
+        ...cellUpdates 
+      } = message.payload as any; // Use 'as any' for now, or define a more specific type for payload
+
+      // Check if the update is for the current cell and its notebook
+      if (msgCellId === cell.id && msgNotebookId === notebookId) {
+        console.log(`[InvestigationReportCell ${cell.id}] Received relevant cell update from WebSocket:`, cellUpdates);
+        
+        // Ensure `cellUpdates` is treated as Partial<Cell>
+        // The backend should send updates like { status: 'completed', result: { ... } }
+        // or { error: "some error message" }
+        if (Object.keys(cellUpdates).length > 0) {
+          updateCell(notebookId as string, cell.id, cellUpdates as Partial<Cell>);
+        }
+      }
+    }
+    // Future: Handle other specific message types relevant to InvestigationReportCell if any.
+  }, [cell.id, notebookId, updateCell]); // Added notebookId and updateCell to dependencies
+
+  // Pass notebookId (or empty string if undefined) and the message handler to useWebSocket
+  // Destructure sendMessage and rename status to webSocketStatus to avoid conflict with cell.status
+  const { sendMessage, status: webSocketStatus } = useWebSocket(notebookId || '', handleWebSocketMessage);
   const report = cell.result?.content as InvestigationReportData | undefined;
+
+  // Define message type constant locally, ideally this would come from a shared types file
+  const RERUN_INVESTIGATION_CELL = "rerun_investigation_cell";
+
+  const handleRerun = () => {
+    if (!cell.notebook_id) {
+      console.error("Notebook ID is missing, cannot rerun cell:", cell.id);
+      // Optionally show a toast or alert to the user
+      return;
+    }
+    const sessionId = uuidv4();
+    const payload = {
+        notebook_id: cell.notebook_id, // notebook_id is confirmed to be a string here
+        cell_id: cell.id,
+        session_id: sessionId,
+    };
+    console.log(`[InvestigationReportCell ${cell.id}] Sending rerun message. Type: ${RERUN_INVESTIGATION_CELL}, Payload:`, payload);
+    sendMessage(RERUN_INVESTIGATION_CELL, payload); // Use sendMessage with type and payload
+    // Optimistically update cell status in the store to provide immediate feedback
+    // The backend will send further status updates.
+    updateCell(cell.notebook_id, cell.id, { status: 'running' }); 
+  };
 
   if (!report) {
     // Handle case where result or content is missing or not the expected type
@@ -243,6 +302,22 @@ const InvestigationReportCell: React.FC<InvestigationReportCellProps> = ({ cell,
         {/* ADD Delete Button */}
         <div className="flex items-center space-x-1.5">
             <TooltipProvider delayDuration={100}>
+                 <Tooltip>
+                    <TooltipTrigger asChild>
+                        <Button
+                            size="sm"
+                            variant="ghost"
+                            className="text-gray-500 hover:bg-indigo-100 hover:text-indigo-700 h-7 w-7 px-0"
+                            onClick={handleRerun}
+                            disabled={cell.status === 'running' || cell.status === 'queued'} // Disable if already running/queued
+                        >
+                            <RefreshCwIcon className={`h-4 w-4 ${ (cell.status === 'running' || cell.status === 'queued') ? 'animate-spin' : ''}`} />
+                        </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                        <p>Re-run Investigation Report</p>
+                    </TooltipContent>
+                </Tooltip>
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -250,7 +325,6 @@ const InvestigationReportCell: React.FC<InvestigationReportCellProps> = ({ cell,
                       variant="ghost"
                       className="text-gray-500 hover:bg-red-100 hover:text-red-700 h-7 w-7 px-0"
                       onClick={() => onDelete(cell.id)}
-                      // Optionally disable if investigation is technically still running? (Though report means it finished)
                     >
                       <Trash2Icon className="h-4 w-4" />
                     </Button>
@@ -370,4 +444,4 @@ const InvestigationReportCell: React.FC<InvestigationReportCellProps> = ({ cell,
   );
 };
 
-export default InvestigationReportCell; 
+export default InvestigationReportCell;

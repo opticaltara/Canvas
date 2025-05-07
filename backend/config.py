@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     # AI settings
     openrouter_api_key: str = ""
     ai_model: str = "anthropic/claude-3.7-sonnet"
+    anthropic_api_key: str = ""
+    sherlog_anthropic_model: str = ""
+    sherlog_env: str = ""
     # Logging settings
     logfire_token: str = ""
     environment: str = "development"

@@ -4,6 +4,8 @@ Notebook Manager Service
 
 import logging
 import asyncio
+import json # Added
+import time # Added
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set
 from uuid import UUID, uuid4
@@ -14,9 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import get_settings
 from backend.core.notebook import Notebook, NotebookMetadata, Cell, CellType, CellStatus, DependencyGraph
-from backend.core.cell import Cell, CellType, CellStatus, CellResult
+from backend.core.cell import Cell, CellType, CellStatus, CellResult # CellStatus is already here
 from backend.core.types import ToolCallID
 from backend.db.repositories import NotebookRepository
+from backend.ai.investigation_report_agent import InvestigationReportAgent 
+from backend.ai.events import StatusUpdateEvent, AgentType 
+from backend.core.query_result import QueryResult, InvestigationReport # Added InvestigationReport model
 from backend.core.execution import ExecutionQueue, CellExecutor
 
 
@@ -130,11 +135,33 @@ class NotebookManager:
                 str_cell_order = [str(cell_id) for cell_id in notebook.cell_order]
                 # await repository.update_cell_order(str(notebook_id), str_cell_order)
                 logger.info(f"[{correlation_id}] Placeholder: Would save cell order (async).")
-            # if update_notebook_timestamp becomes async:
-            # await repository.update_notebook_timestamp(str(notebook_id))
-            # For now, directly update timestamp if needed (assuming repo._update... is async)
-            await repository._update_notebook_timestamp(str(notebook_id))
-            logger.info(f"[{correlation_id}] Updated notebook timestamp (async).")
+            # Update metadata
+            update_data = {}
+            if notebook.metadata.title is not None:
+                update_data['title'] = notebook.metadata.title
+            if notebook.metadata.description is not None:
+                update_data['description'] = notebook.metadata.description
+            # Add other metadata fields if they are direct columns on the Notebook table
+            # For example, if 'tags' and 'created_by' are part of NotebookCreate/Update but stored in Notebook.metadata Pydantic model
+            # and also direct columns on the DB model, they would be updated here.
+            # For now, assuming only title and description are directly updatable on the Notebook DB model via kwargs.
+            
+            if update_data:
+                await repository.update_notebook(str(notebook_id), **update_data)
+                logger.info(f"[{correlation_id}] Updated notebook metadata (async).")
+            else:
+                # Still update timestamp even if no other metadata changed
+                await repository._update_notebook_timestamp(str(notebook_id))
+                logger.info(f"[{correlation_id}] Updated notebook timestamp (async, no other metadata changes).")
+
+            # Persist cell order if it has changed (repository.update_notebook should handle this if cell_order is a column)
+            # Or, if cell_order is managed by individual cell positions, this part might not be needed here
+            # if notebook.cell_order:
+            #     str_cell_order = [str(cell_id) for cell_id in notebook.cell_order]
+            #     # This assumes repository.update_notebook can also take cell_order
+            #     # await repository.update_notebook(str(notebook_id), cell_order=str_cell_order) 
+            #     logger.info(f"[{correlation_id}] Updated notebook cell_order (async).")
+
 
             logger.info(f"Successfully completed save operations for notebook {notebook_id}", extra={'correlation_id': correlation_id})
         except Exception as e:
@@ -537,15 +564,188 @@ class NotebookManager:
         """Reorder cells in a notebook (async)"""
         repository = NotebookRepository(db)
         str_cell_order = [str(cell_id) for cell_id in cell_order]
-        # Await async repo call (if/when implemented)
-        # success = await repository.reorder_cells(str(notebook_id), str_cell_order)
-        logger.warning(f"Skipping repository.reorder_cells for notebook {notebook_id} (Async version). Cell order might not be persisted.")
-        logger.info(f"Reordered cells for notebook {notebook_id} (Persistence skipped)")
         
-        # Notify clients (might need a specific 'reorder' type)
-        if self.notify_callback:
-             # Send the new order, or perhaps the whole notebook state?
-             await self.notify_callback(notebook_id, {"type": "cell_reorder", "order": str_cell_order})
+        # Call the repository method to update cell positions
+        success = await repository.reorder_cells(str(notebook_id), str_cell_order)
+        
+        if success:
+            logger.info(f"Successfully reordered cells in repository for notebook {notebook_id} (positions updated)")
+            # The cell_order is derived from cell positions, so no separate update to Notebook.cell_order field is needed here.
+            # The Notebook._db_notebook_to_model method will reconstruct it.
+            
+            # Notify clients (might need a specific 'reorder' type)
+            if self.notify_callback:
+                 # Send the new order, or perhaps the whole notebook state?
+                 # Fetching the full notebook to send its updated state might be better
+                 updated_notebook = await self.get_notebook(db, notebook_id)
+                 await self.notify_callback(notebook_id, updated_notebook.model_dump(mode='json'))
+                 # Old notification: await self.notify_callback(notebook_id, {"type": "cell_reorder", "order": str_cell_order})
+        else:
+            logger.error(f"Failed to reorder cells in repository for notebook {notebook_id}")
+            # Consider raising an error or handling this failure case
+
+    async def rerun_investigation_cell(self, db: AsyncSession, notebook_id: UUID, cell_id: UUID, session_id: str) -> None:
+        """
+        Re-run the generation of an investigation report cell.
+        """
+        correlation_id = str(uuid4())
+        log_extra = {'correlation_id': correlation_id, 'notebook_id': str(notebook_id), 'cell_id': str(cell_id), 'session_id': session_id}
+        logger.info(f"Attempting to re-run investigation report cell {cell_id}", extra=log_extra)
+
+        try:
+            # 1. Fetch the target cell and the full notebook
+            report_cell_model = await self.get_cell(db, notebook_id, cell_id)
+            if report_cell_model.type != CellType.INVESTIGATION_REPORT:
+                logger.error(f"Cell {cell_id} is not an investigation report cell. Type: {report_cell_model.type}", extra=log_extra)
+                # Optionally notify client of error
+                if self.notify_callback:
+                    await self.notify_callback(notebook_id, {
+                        "type": "error", 
+                        "message": f"Cell {cell_id} is not an investigation report cell.",
+                        "cell_id": str(cell_id)
+                    })
+                return
+
+            notebook = await self.get_notebook(db, notebook_id)
+            logger.info(f"Fetched report cell {cell_id} and notebook {notebook_id}", extra=log_extra)
+
+            # 2. Update cell status to PENDING/RUNNING
+            await self.update_cell_status(db, notebook_id, cell_id, CellStatus.RUNNING, correlation_id=correlation_id) # Changed to RUNNING
+            # Optionally send another status update for RUNNING if PENDING is too brief
+            # await self.update_cell_status(db, notebook_id, cell_id, CellStatus.RUNNING, correlation_id=correlation_id)
+
+
+            # 3. Extract original_query from the cell's existing result
+            original_query = None
+            if report_cell_model.result and report_cell_model.result.content and isinstance(report_cell_model.result.content, dict):
+                original_query = report_cell_model.result.content.get('query')
+            
+            if not original_query:
+                logger.error(f"Could not find original_query in existing result for report cell {cell_id}", extra=log_extra)
+                await self.set_cell_result(db, notebook_id, cell_id, result=report_cell_model.result.content if report_cell_model.result else {}, error="Could not find original query for re-run.", execution_time=0.0)
+                return
+            logger.info(f"Extracted original_query: '{original_query[:100]}...' for cell {cell_id}", extra=log_extra)
+
+            # 4. Reconstruct findings_summary
+            findings_summary_lines = []
+            # Get all direct and indirect dependencies (excluding the report cell itself)
+            # The report cell's dependencies are the *direct* step cells.
+            # We need to iterate through all cells that contribute to the report.
+            # For simplicity, let's assume the direct dependencies of the report cell are the relevant step cells.
+            
+            # We need the actual cell objects for the dependencies to get their results.
+            dependency_ids = report_cell_model.dependencies # These are UUIDs
+            
+            logger.info(f"Report cell {cell_id} has dependencies: {dependency_ids}", extra=log_extra)
+
+            for dep_cell_id_uuid in dependency_ids:
+                dep_cell_id = str(dep_cell_id_uuid)
+                if dep_cell_id_uuid == cell_id : # Should not happen if graph is correct
+                    continue
+
+                dep_cell = notebook.cells.get(dep_cell_id_uuid) # Get Cell object from notebook.cells
+                if not dep_cell:
+                    logger.warning(f"Dependency cell {dep_cell_id} not found in notebook model for report {cell_id}", extra=log_extra)
+                    findings_summary_lines.append(f"Step (ID: {dep_cell_id}): Error - Cell data not found.")
+                    continue
+
+                desc = dep_cell.content # Or some metadata field if content is code/tool specific
+                cell_type_str = dep_cell.type.value
+                
+                result_str = ""
+                if dep_cell.status == CellStatus.ERROR and dep_cell.result and dep_cell.result.error:
+                    result_str = f"Error: {dep_cell.result.error}"
+                elif dep_cell.result and dep_cell.result.content is not None:
+                    # Adapt formatting based on cell type, similar to _format_findings_for_report
+                    if dep_cell.type == CellType.MARKDOWN:
+                        result_str = f"Data: {str(dep_cell.result.content)[:500]}..."
+                    elif isinstance(dep_cell.result.content, dict) or isinstance(dep_cell.result.content, list):
+                        # For tool cells (GitHub, Python, etc.) that store dict/list results
+                        # We might want a more structured summary or just a string representation
+                        result_str = f"Data: {json.dumps(dep_cell.result.content)[:500]}..."
+                    else:
+                        result_str = f"Data: {str(dep_cell.result.content)[:500]}..."
+                else:
+                    result_str = "Step completed, but no specific outputs captured or status is not SUCCESS/ERROR."
+                
+                findings_summary_lines.append(f"Step (ID: {dep_cell_id}, Type: {cell_type_str}): {desc}\nResult:\n{result_str}")
+
+            findings_summary = "\n---\n".join(findings_summary_lines)
+            if not findings_summary:
+                findings_summary = "No preceding investigation steps were successfully executed or produced results for this re-run."
+            
+            logger.info(f"Reconstructed findings_summary for cell {cell_id}:\n{findings_summary[:500]}...", extra=log_extra)
+
+            # 5. Initialize InvestigationReportAgent
+            report_agent = InvestigationReportAgent(notebook_id=str(notebook_id))
+            logger.info(f"Initialized InvestigationReportAgent for re-run of cell {cell_id}", extra=log_extra)
+
+            # 6. Stream report generation
+            final_report_data = None
+            start_time = time.time()
+
+            async for event in report_agent.run_report_generation(
+                original_query=original_query,
+                findings_summary=findings_summary,
+                session_id=session_id, # Pass the session_id
+                notebook_id=str(notebook_id) # Pass notebook_id
+            ):
+                if isinstance(event, StatusUpdateEvent):
+                    # Add cell_id to the event for frontend to target the correct cell
+                    event_data = event.model_dump()
+                    event_data["cell_id"] = str(cell_id) 
+                    # Ensure agent_type is correctly set for report generation status
+                    event_data["agent_type"] = AgentType.INVESTIGATION_REPORTER.value
+                    if self.notify_callback:
+                        await self.notify_callback(notebook_id, {"type": "status_update", "data": event_data})
+                elif isinstance(event, InvestigationReport): # This is the final report object
+                    final_report_data = event
+                    logger.info(f"Successfully received new report data for cell {cell_id}", extra=log_extra)
+                    break # Stop after getting the report
+            
+            execution_time = time.time() - start_time
+
+            # 7. Update cell with new report
+            if final_report_data:
+                new_report_dict = final_report_data.model_dump(mode='json')
+                # Update cell content (title) if it changed
+                new_title = final_report_data.title or "Investigation Report"
+                current_display_content = f"# Investigation Report: {new_title}\n\n_Structured report data generated._"
+                
+                updates_for_cell = {
+                    'status': CellStatus.ERROR.value if final_report_data.error else CellStatus.SUCCESS.value,
+                    'result_content': new_report_dict,
+                    'result_error': final_report_data.error,
+                    'result_execution_time': execution_time,
+                    'content': current_display_content # Update the display content as well
+                }
+                await self.update_cell_fields(db, notebook_id, cell_id, updates_for_cell)
+                logger.info(f"Successfully updated cell {cell_id} with re-run report.", extra=log_extra)
+            else:
+                error_msg = "Re-run: InvestigationReportAgent did not produce a final report."
+                logger.error(error_msg, extra=log_extra)
+                await self.set_cell_result(db, notebook_id, cell_id, result=report_cell_model.result.content if report_cell_model.result else {}, error=error_msg, execution_time=execution_time)
+
+        except KeyError as e:
+            logger.error(f"KeyError during investigation cell re-run for {cell_id}: {e}", extra=log_extra, exc_info=True)
+            await self.set_cell_result(db, notebook_id, cell_id, result={}, error=f"Error during re-run: {str(e)}", execution_time=0.0)
+        except Exception as e:
+            logger.error(f"Unexpected error during investigation cell re-run for {cell_id}: {e}", extra=log_extra, exc_info=True)
+            # Attempt to set cell to error status
+            try:
+                await self.set_cell_result(db, notebook_id, cell_id, result={}, error=f"Unexpected error during re-run: {str(e)}", execution_time=0.0)
+            except Exception as e_final:
+                logger.critical(f"Failed to even set error status for cell {cell_id} after re-run failure: {e_final}", extra=log_extra)
+        finally:
+            # Ensure a final notification goes out if not handled by update_cell_fields or set_cell_result
+            # This might be redundant if the above calls always notify, but good for safety.
+            try:
+                final_cell_state = await self.get_cell(db, notebook_id, cell_id)
+                if self.notify_callback:
+                    await self.notify_callback(notebook_id, final_cell_state.model_dump(mode='json'))
+            except Exception:
+                pass # Avoid errors in finally block from masking original error
+
 
     def _db_notebook_to_model(self, db_notebook) -> Notebook:
         """Convert DB Notebook object to Pydantic Notebook model"""

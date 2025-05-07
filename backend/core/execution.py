@@ -13,10 +13,11 @@ from backend.core.notebook import Notebook
 from backend.core.dependency import ToolCallID
 from backend.services.connection_manager import ConnectionManager, get_connection_manager
 from backend.core.cell import GitHubCell
-from mcp.client.stdio import stdio_client
+from mcp.client.stdio import stdio_client # Reverted import style
 from mcp import ClientSession
 from mcp.shared.exceptions import McpError
 import logging
+import os # Import os module
 
 # Import StdioServerParameters
 from mcp import StdioServerParameters
@@ -460,8 +461,75 @@ class CellExecutor:
         
         elif cell.type == CellType.SUMMARIZATION:
             return cell.content
+
+        elif cell.type == CellType.PYTHON:
+            self.logger.info(f"Executing Python cell {cell.id} using mcp-server-data-exploration.", extra={'correlation_id': correlation_id, 'cell_id': cell.id})
+            python_code = cell.content
+            if not python_code:
+                self.logger.warning(f"Python cell {cell.id} is empty.", extra={'correlation_id': correlation_id, 'cell_id': cell.id})
+                return {"status": "success", "stdout": "", "stderr": None} # Or an error?
+
+            # Get StdioServerParameters for mcp-server-data-exploration
+            # This is similar to PythonAgent._get_stdio_server_params
+            # TODO: Consider refactoring to a shared utility if this pattern repeats
+            env = os.environ.copy()
+            server_params = StdioServerParameters(
+                command='/root/.local/bin/uv',
+                args=[
+                    '--directory',
+                    '/opt/mcp-server-data-exploration',
+                    'run',
+                    'mcp-server-ds' 
+                ],
+                env=env
+            )
+            
+            # Create a client session for this execution
+            # The MCPServerStdio instance from pydantic-ai is for agent use.
+            # For direct client calls, we use mcp.client.stdio.stdio_client
+            try:
+                async with stdio_client(server_params) as (read, write): # Reverted usage
+                    async with ClientSession(read, write) as session: # Reverted usage
+                        self.logger.info(f"Calling 'run-script' for Python cell {cell.id}", extra={'correlation_id': correlation_id, 'cell_id': cell.id})
+                        # The mcp-server-data-exploration 'run-script' tool expects a 'script' argument.
+                        await session.initialize()
+                        response = await session.call_tool(
+                            "run-script", # Tool name
+                            arguments={"script": python_code}, # Tool arguments
+                        )
+                        self.logger.info(f"Received response from 'run-script' for cell {cell.id}: {response}", extra={'correlation_id': correlation_id, 'cell_id': cell.id})
+                        
+                        # Assuming the response from 'run-script' is a dict like:
+                        # {"stdout": "...", "stderr": "...", "status": "success/error", ...}
+                        # We can adapt PythonAgent's _parse_python_mcp_output or simplify
+                        if isinstance(response, dict):
+                            # Basic parsing, similar to a simplified _parse_python_mcp_output
+                            parsed_result = {
+                                "status": response.get("status", "success" if response.get("stdout") is not None else "error"),
+                                "stdout": response.get("stdout"),
+                                "stderr": response.get("stderr"),
+                                # Add other fields if mcp-server-data-exploration provides them
+                            }
+                            if parsed_result["status"] == "error" and parsed_result["stderr"] and not response.get("error_details"):
+                                parsed_result["error_details"] = {
+                                    "type": "PythonExecutionError",
+                                    "message": str(parsed_result["stderr"]).splitlines()[-1] if parsed_result["stderr"] else "Unknown Python error",
+                                    "traceback": str(parsed_result["stderr"])
+                                }
+                            return parsed_result
+                        else:
+                            # Fallback if response is not a dict (e.g., just a string)
+                            self.logger.warning(f"Unexpected response type from 'run-script' for cell {cell.id}: {type(response)}. Treating as stdout.", extra={'correlation_id': correlation_id, 'cell_id': cell.id})
+                            return {"status": "success", "stdout": str(response), "stderr": None}
+
+            except McpError as mcp_e:
+                self.logger.error(f"McpError during Python cell {cell.id} execution: {mcp_e}", exc_info=True, extra={'correlation_id': correlation_id, 'cell_id': cell.id})
+                raise # Re-raise to be caught by the outer try-except
+            except Exception as e:
+                self.logger.error(f"Unexpected error during Python cell {cell.id} execution with mcp-server-data-exploration: {e}", exc_info=True, extra={'correlation_id': correlation_id, 'cell_id': cell.id})
+                raise # Re-raise to be caught by the outer try-except
         
-        # Check if this cell represents a tool call
+        # Check if this cell represents a tool call (This is the original logic for other tool calls)
         elif cell.tool_name and cell.tool_arguments is not None:
             tool_name = cell.tool_name
             tool_args = cell.tool_arguments

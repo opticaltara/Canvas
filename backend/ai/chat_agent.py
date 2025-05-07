@@ -18,7 +18,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
-from pydantic_ai.models.openai import OpenAIModel
+# OpenAIModel is no longer directly used, SafeOpenAIModel is used instead
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.messages import (
     ModelMessage, 
@@ -52,8 +52,10 @@ from backend.ai.events import (
     InvestigationCompleteEvent,
     StatusUpdateEvent,
     BaseEvent,
-    FileSystemToolCellCreatedEvent
+    FileSystemToolCellCreatedEvent,
+    PythonToolCellCreatedEvent
 )
+from backend.ai.models import SafeOpenAIModel # Import the custom model
 
 # Initialize logger
 chat_agent_logger = logging.getLogger("ai.chat_agent")
@@ -253,7 +255,7 @@ class ChatAgentService:
         system_prompt = self._generate_system_prompt() # Uses fetched tool info
         chat_agent_logger.info(f"System prompt generated for chat agent (notebook: {self.notebook_id}).")
         self.chat_agent = Agent(
-            model=OpenAIModel(
+            model=SafeOpenAIModel( # Use the SafeOpenAIModel
                 self.settings.ai_model,
                 provider=OpenAIProvider(
                     base_url='https://openrouter.ai/api/v1',
@@ -285,18 +287,27 @@ class ChatAgentService:
                     for conn in connections 
                     if isinstance(conn, dict) and isinstance(conn.get("type"), str)
                 ]
-                unique_types = sorted(list(set(valid_types)))
-                display_types = [t.title() for t in unique_types]
+                connection_based_types = sorted(list(set(valid_types)))
+                
+                # Always include built-in types
+                builtin_types = ["markdown", "python"]
+                all_available_types = sorted(list(set(connection_based_types + builtin_types)))
+                
+                self._available_data_source_types = all_available_types
+                
+                display_types = [t.title() for t in all_available_types]
                 if display_types:
-                    self.available_tools_info = f"You have access to the following data sources: {', '.join(display_types)}."
+                    self.available_tools_info = f"You have access to the following data sources/capabilities: {', '.join(display_types)}."
                 else:
-                    self.available_tools_info = "No specific external data sources are currently connected."
-                self._available_data_source_types = unique_types
-                chat_agent_logger.info(f"Fetched connection types. Available tools info: {self.available_tools_info}")
+                    # This case should ideally not happen if markdown and python are always included
+                    self.available_tools_info = "No specific external data sources are currently connected, but built-in capabilities like Markdown and Python are available."
+                
+                chat_agent_logger.info(f"Determined available sources/capabilities. For prompt: {self.available_tools_info}. For AIAgent: {self._available_data_source_types}")
             except Exception as e:
                 chat_agent_logger.error(f"Failed to fetch connection types: {e}", exc_info=True)
-                self.available_tools_info = "Error fetching available data sources."
-                self._available_data_source_types = [] # Set to empty list on error
+                self.available_tools_info = "Error fetching available data sources. Built-in capabilities like Markdown and Python should still be available."
+                # Fallback to built-in types if connection fetching fails
+                self._available_data_source_types = ["markdown", "python"]
 
     def _load_system_prompt_template(self) -> str:
         """Loads the system prompt template from the dedicated file."""
@@ -455,14 +466,18 @@ class ChatAgentService:
                 cell_tools=self.cell_tools
             ):
                 # Now expect event model instances directly
-                event_type_enum = event.type
-                event_type_str = event_type_enum.value
+                event_type_enum = getattr(event, 'type', None)
+                if not event_type_enum or not hasattr(event_type_enum, 'value'):
+                    chat_agent_logger.warning(f"Event object missing 'type' attribute or type enum has no value: {event!r}. Skipping.")
+                    continue # Skip if we can't get a valid type string
+
+                event_type_str = event_type_enum.value # Guaranteed to be a string here
                 agent_type_attr = getattr(event, 'agent_type', None)
                 agent_type_str = agent_type_attr.value if agent_type_attr else AgentType.UNKNOWN.value
                 chat_agent_logger.info(f"Yielding event update for session {session_id}. Type: {event_type_str}")
                 chat_agent_logger.debug(f"Received event object: {event!r}")
 
-                response_part: Union[CellResponsePart, StatusResponsePart]
+                response_part: Optional[Union[CellResponsePart, StatusResponsePart]] = None # Initialize to None
                 
                 match event:
                     case PlanCellCreatedEvent(cell_id=cid, cell_params=cp, status=st):
@@ -530,6 +545,17 @@ class ChatAgentService:
                             cell_params=cp or {},
                             status_type=st.value, # Should be StatusType.SUCCESS
                             agent_type=agent_type_str, # Should be AgentType.FILESYSTEM
+                            result=result_dict
+                        )
+                    case PythonToolCellCreatedEvent(cell_id=cid, cell_params=cp, status=st, result=r, tool_name=tn, agent_type=at):
+                        chat_agent_logger.info(f"Creating CellResponsePart for {event_type_str} (Python Tool)")
+                        # r is likely None at this stage as this event signals cell creation, not tool completion.
+                        result_dict = {"content": r, "tool_name": tn} 
+                        response_part = CellResponsePart(
+                            cell_id=str(cid) if cid else "",
+                            cell_params=cp or {},
+                            status_type=st.value,
+                            agent_type=at.value, # Use agent_type from the event
                             result=result_dict
                         )
                     case SummaryCellCreatedEvent(cell_id=cid, cell_params=cp, status=st, error=err):
@@ -607,14 +633,14 @@ class ChatAgentService:
                         continue # Skip yielding for completely unknown types
                 
                 # Ensure response_part was assigned before creating ModelResponse
-                if 'response_part' in locals():
+                if response_part is not None: # Check if it was assigned in the match block
                     response = ModelResponse(
                         parts=[response_part],
                         timestamp=datetime.now(timezone.utc)
                     )
-                    yield event_type_str, response
+                    yield event_type_str, response # Yield the guaranteed string
                 else:
-                    chat_agent_logger.error(f"Response part was not created for event type {event_type_str}. Skipping yield.")
+                    chat_agent_logger.error(f"Response part was not created or was None for event type {event_type_str}. Skipping yield.")
             
             response_time = time.time() - start_time
             chat_agent_logger.info(
@@ -636,4 +662,4 @@ class ChatAgentService:
                 },
                 exc_info=True
             )
-            raise 
+            raise

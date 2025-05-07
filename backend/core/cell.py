@@ -67,6 +67,10 @@ class CellType(str, Enum):
     INVESTIGATION_REPORT = "investigation_report"
     FILESYSTEM = "filesystem"
     PYTHON = "python"
+    SQL = "sql"
+    S3 = "s3"
+    METRIC = "metric"
+    AI_QUERY = "ai_query" # Generic for other agent-driven cells
 
 
 class CellResult(BaseModel):

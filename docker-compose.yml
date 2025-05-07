@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   backend:
     build:
@@ -17,6 +15,7 @@ services:
       - SHERLOG_AI_MODEL=${SHERLOG_AI_MODEL:-anthropic/claude-3.7-sonnet}
       - SHERLOG_REDIS_HOST=redis
       - SHERLOG_REDIS_PORT=6379
+      - SHERLOG_PROJECT_HOST_ROOT=${PWD}
     ports:
       - "9091:8000"
       - "9092:8100"
@@ -55,6 +54,25 @@ services:
       backend:
         condition: service_healthy
     restart: unless-stopped
+
+  tests:
+    build:
+      context: .
+      dockerfile: Dockerfile.tests
+    container_name: sherlog-canvas-tests
+    volumes:
+      - ./integration_tests:/app/integration_tests
+      - ./backend:/app/backend # Mount local backend code
+    env_file:
+      - .env # Or define specific environment variables if needed
+    environment:
+      - BACKEND_URL=http://backend:8000 # Service name 'backend' is resolvable within Docker network
+    depends_on:
+      backend:
+        condition: service_healthy
+    # The command will be defined in Dockerfile.tests or overridden here if needed
+    # For example: command: ["pytest", "/app/integration_tests"]
+    # We'll keep it simple for now and let the Dockerfile handle the CMD
 
 volumes:
   data:

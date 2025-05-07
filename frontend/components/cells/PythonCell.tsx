@@ -2,7 +2,7 @@
 
 import React from "react"
 import { useState, useEffect } from "react"
-import { PlayIcon, CopyIcon, CheckIcon, Trash2Icon, AlertCircleIcon, ServerIcon, ChevronsUpDownIcon } from "lucide-react"
+import { PlayIcon, CopyIcon, CheckIcon, Trash2Icon, AlertCircleIcon, ServerIcon, ChevronsUpDownIcon, CodeIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
@@ -111,10 +111,10 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
   return (
     <div className="border rounded-md overflow-hidden mb-3 mx-8 bg-white">
       {/* Header */}
-      <div className="bg-sky-100 border-b border-sky-200 p-2 flex justify-between items-center">
+      <div className="bg-emerald-100 border-b border-emerald-200 p-2 flex justify-between items-center">
         <div className="flex items-center">
-          <ServerIcon className="h-4 w-4 mr-2 text-sky-700" />
-          <span className="font-medium text-sm text-sky-800">Python Code</span>
+          <CodeIcon className="h-4 w-4 mr-2 text-emerald-700" />
+          <span className="font-medium text-sm text-emerald-800">Python Code</span>
         </div>
         <div className="flex items-center space-x-1.5">
           <TooltipProvider delayDuration={100}>
@@ -123,7 +123,7 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
                 <Button
                   size="sm"
                   variant="ghost"
-                  className="text-gray-600 hover:bg-gray-200 h-7 w-7 px-0"
+                  className="text-gray-600 hover:bg-emerald-100 hover:text-emerald-700 h-7 w-7 px-0"
                   onClick={() => copyToClipboard(pythonCode, setCopiedCode)}
                 >
                   {copiedCode ? <CheckIcon className="h-4 w-4 text-green-600" /> : <CopyIcon className="h-4 w-4" />}
@@ -135,11 +135,11 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
           <Button
             size="sm"
             variant="outline"
-            className="bg-white hover:bg-sky-50 border-sky-300 h-7 px-2 text-xs"
+            className="bg-white hover:bg-emerald-50 border-emerald-300 h-7 px-2 text-xs text-emerald-800 hover:text-emerald-900"
             onClick={() => onExecute(cell.id)}
             disabled={isExecuting}
           >
-            <PlayIcon className="h-3.5 w-3.5 mr-1 text-sky-700" />
+            <PlayIcon className="h-3.5 w-3.5 mr-1 text-emerald-700" />
             {isExecuting ? "Running..." : "Run Code"}
           </Button>
           <TooltipProvider delayDuration={100}>
@@ -162,9 +162,9 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
       </div>
 
       {/* Code and Output Area */}
-      <ResizablePanelGroup direction="vertical" className="min-h-[150px]">
+      <ResizablePanelGroup direction="vertical" className="min-h-[250px]"> {/* Increased min-h */}
         {/* Code Panel */}
-        <ResizablePanel defaultSize={50} minSize={20}>
+        <ResizablePanel defaultSize={65} minSize={30}> {/* Increased defaultSize and minSize */}
           <ScrollArea className="h-full p-1 text-xs">
             <SyntaxHighlighter
               language="python"
@@ -345,4 +345,4 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
 // Memoize for performance
 const PythonCell = React.memo(PythonCellComponent);
 
-export default PythonCell; 
+export default PythonCell;

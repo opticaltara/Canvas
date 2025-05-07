@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { api, type Notebook, type Cell } from "../api/client"
-import { useWebSocket } from "./useWebSocket"
+import { useWebSocket, type WebSocketMessage } from "./useWebSocket"
 
 export function useNotebook(notebookId: string) {
   console.log('[useNotebook] Initializing hook with notebookId:', notebookId);
@@ -12,9 +12,16 @@ export function useNotebook(notebookId: string) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [executingCells, setExecutingCells] = useState<Set<string>>(new Set())
+  const [latestMessage, setLatestMessage] = useState<WebSocketMessage | null>(null);
+
+
+  // WebSocket onMessage handler
+  const handleWebSocketMessage = useCallback((message: WebSocketMessage) => {
+    setLatestMessage(message);
+  }, []);
 
   // WebSocket connection for real-time updates
-  const { status: wsStatus, messages: wsMessages } = useWebSocket(notebookId)
+  const { status: wsStatus } = useWebSocket(notebookId, handleWebSocketMessage)
   console.log('[useNotebook] Called useWebSocket. Initial wsStatus:', wsStatus);
 
   // Load notebook and cells
@@ -43,26 +50,26 @@ export function useNotebook(notebookId: string) {
 
   // Handle WebSocket messages
   useEffect(() => {
-    if (wsMessages.length === 0) return
+    if (!latestMessage) return
 
     // Process the latest message
-    const message = wsMessages[wsMessages.length - 1]
+    // const message = wsMessages[wsMessages.length - 1] // Old logic
 
-    switch (message.type) {
+    switch (latestMessage.type) {
       case "cell_update":
-        handleCellUpdate(message.data)
+        handleCellUpdate(latestMessage.data)
         break
       case "cell_execution_started":
-        handleCellExecutionStarted(message.data.cell_id)
+        handleCellExecutionStarted(latestMessage.data.cell_id)
         break
       case "cell_execution_completed":
-        handleCellExecutionCompleted(message.data.cell_id)
+        handleCellExecutionCompleted(latestMessage.data.cell_id)
         break
       case "notebook_update":
-        handleNotebookUpdate(message.data)
+        handleNotebookUpdate(latestMessage.data)
         break
     }
-  }, [wsMessages])
+  }, [latestMessage]) // Depend on latestMessage
 
   // Handle cell update from WebSocket
   const handleCellUpdate = useCallback((cellData: Cell) => {

@@ -1,11 +1,14 @@
 import type React from "react"
-import MarkdownCell from "./MarkdownCell"
-import GitHubCell from "./GitHubCell"
-import SummarizationCell from './SummarizationCell'
-import InvestigationReportCell from './InvestigationReportCell'
-import FileSystemCell from './FileSystemCell'
-import PythonCell from './PythonCell'
+import dynamic from 'next/dynamic'
 import type { Cell } from "../../store/types"
+
+// Dynamically import cell components
+const MarkdownCell = dynamic(() => import('./MarkdownCell'), { loading: () => <p>Loading Markdown Cell...</p> });
+const GitHubCell = dynamic(() => import('./GitHubCell'), { loading: () => <p>Loading GitHub Cell...</p> });
+const SummarizationCell = dynamic(() => import('./SummarizationCell'), { loading: () => <p>Loading Summarization Cell...</p> });
+const InvestigationReportCell = dynamic(() => import('./InvestigationReportCell'), { loading: () => <p>Loading Report Cell...</p> });
+const FileSystemCell = dynamic(() => import('./FileSystemCell'), { loading: () => <p>Loading FileSystem Cell...</p> });
+const PythonCell = dynamic(() => import('./PythonCell'), { loading: () => <p>Loading Python Cell...</p> });
 
 interface CellFactoryProps {
   cell: Cell

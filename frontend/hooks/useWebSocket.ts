@@ -12,9 +12,10 @@ export interface WebSocketMessage {
   [key: string]: any
 }
 
-export function useWebSocket(notebookId: string) {
+export type OnMessageCallback = (message: WebSocketMessage) => void;
+
+export function useWebSocket(notebookId: string, onMessage: OnMessageCallback) {
   const [status, setStatus] = useState<WebSocketStatus>("disconnected")
-  const [messages, setMessages] = useState<WebSocketMessage[]>([])
   const socketRef = useRef<WebSocket | any>(null)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
@@ -71,7 +72,7 @@ export function useWebSocket(notebookId: string) {
       try {
         const message = JSON.parse(event.data) as WebSocketMessage
         console.log("WebSocket onmessage event: Message received:", message)
-        setMessages((prev) => [...prev, message])
+        onMessage(message) // Call the provided callback
       } catch (error) {
         console.error("WebSocket onmessage event: Failed to parse message:", error, "Raw data:", event.data)
       }
@@ -98,7 +99,7 @@ export function useWebSocket(notebookId: string) {
         connect() // Call connect again
       }, 3000)
     }
-  }, [notebookId])
+  }, [notebookId, onMessage])
 
   const disconnect = useCallback(() => {
     if (socketRef.current) {
@@ -145,7 +146,7 @@ export function useWebSocket(notebookId: string) {
 
   return {
     status,
-    messages,
+    // messages, // Removed messages state
     sendMessage,
     connect,
     disconnect,
