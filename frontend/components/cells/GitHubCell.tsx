@@ -47,42 +47,57 @@ const GitHubCellComponent: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpd
     result_error: cell.result?.error,
   }));
 
-  if (cell.result?.error) {
-      console.log(`[GitHubCell ${cell.id}] Backend error detected. Skipping render. Error:`, cell.result.error);
-      return null; // Don't render the cell if there was a backend execution error
+  if (cell.result?.error && cell.status === 'error') { // Only skip render if the cell itself is in an error state with a result error
+      console.log(`[GitHubCell ${cell.id}] Backend error detected and cell status is error. Skipping render. Error:`, cell.result.error);
+      // We still want to render the error *within* the cell structure if the cell isn't in a global error status
+      // but the result itself indicates an error.
+      // This change makes it so that renderResultData can still show the error message.
   }
 
-  const [showToolCalls, setShowToolCalls] = useState(false)
   const [toolForms, setToolForms] = useState<ToolForm[]>([{ toolName: "", toolArgs: {} }])
-  const [activeToolIndex, setActiveToolIndex] = useState(0)
+  const [activeToolIndex, setActiveToolIndex] = useState(0) // Kept for consistency, though only one tool form
   const [isResultExpanded, setIsResultExpanded] = useState(true)
   const [copiedStates, setCopiedStates] = useState<Record<string, boolean>>({})
 
-  // Access connection store for tool definitions
+  // Access connection store for tool definitions and global expansion state
   const toolDefinitions = useConnectionStore((state) => state.toolDefinitions.github);
   const toolLoadingStatus = useConnectionStore((state) => state.toolLoadingStatus.github);
+  const areAllCellsExpanded = useConnectionStore((state) => state.areAllCellsExpanded);
+
+  // State for controlled accordion for Tool Arguments
+  const [argsAccordionValue, setArgsAccordionValue] = useState<string>(areAllCellsExpanded ? "tool-args" : "");
+
+  // Effect to sync Tool Arguments accordion with global state
+  useEffect(() => {
+    setArgsAccordionValue(areAllCellsExpanded ? "tool-args" : "");
+  }, [areAllCellsExpanded]);
+
+  // Effect to sync Execution Result card expansion with global state
+  useEffect(() => {
+    setIsResultExpanded(areAllCellsExpanded);
+  }, [areAllCellsExpanded]);
+
 
   // Initialize/Reset the tool form state ONLY when the cell identity changes.
   useEffect(() => {
     const incomingToolName = cell.tool_name;
     const incomingToolArgs = cell.tool_arguments;
 
-    if (incomingToolName && incomingToolArgs) {
-      console.log(`[GitHubCell ${cell.id}] useEffect [id changed]: Initializing/Resetting form state from props.`);
+    if (incomingToolName) { // Removed incomingToolArgs check as it might be empty initially
+      console.log(`[GitHubCell ${cell.id}] useEffect [id, tool_name, tool_arguments changed]: Initializing/Resetting form state from props.`);
       const initialForm: ToolForm = {
         toolName: incomingToolName,
-        toolArgs: { ...incomingToolArgs }, // Ensure a copy
+        toolArgs: incomingToolArgs ? { ...incomingToolArgs } : {}, // Ensure a copy or empty object
       };
       setToolForms([initialForm]);
       setActiveToolIndex(0);
     } else {
       // Fallback if tool info is missing
-      console.warn(`[GitHubCell ${cell.id}] useEffect [id changed]: Tool info missing in cell prop, setting empty state.`);
+      console.warn(`[GitHubCell ${cell.id}] useEffect: Tool name missing in cell prop, setting empty state.`);
       setToolForms([{ toolName: "", toolArgs: {} }]);
       setActiveToolIndex(0);
     }
-    // Dependency array: Only run when the cell identity changes.
-  }, [cell.id]); // Use cell.id as the primary dependency
+  }, [cell.id, cell.tool_name, cell.tool_arguments]); // Depend on tool_name and tool_arguments as well
 
   // Format date to be more readable
   const formatDate = (dateString: string) => {
@@ -155,6 +170,10 @@ const GitHubCellComponent: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpd
       }
     }
     setToolForms(updatedForms)
+     // Also call onUpdate to save changes to the store
+    if (updatedForms[toolIndex]) {
+      onUpdate(cell.id, cell.content, { toolName: updatedForms[toolIndex].toolName, toolArgs: updatedForms[toolIndex].toolArgs });
+    }
   }
 
   // Execute the cell with the current tool forms
@@ -177,13 +196,13 @@ const GitHubCellComponent: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpd
     const githubToolDefinitions = useConnectionStore(state => state.toolDefinitions.github);
 
     // Debug Logs (keep for now)
-    console.log(`[GitHubCell] Rendering inputs for: ${toolName}`);
-    console.log(`[GitHubCell] GitHub Tool loading status from store:`, githubToolLoadingStatus);
-    console.log(`[GitHubCell] Available GitHub tool definitions from store:`, githubToolDefinitions);
+    console.log(`[GitHubCell ${cell.id}] Rendering inputs for: ${toolName}`);
+    console.log(`[GitHubCell ${cell.id}] GitHub Tool loading status from store:`, githubToolLoadingStatus);
+    console.log(`[GitHubCell ${cell.id}] Available GitHub tool definitions from store:`, githubToolDefinitions);
 
     // Find the tool definition from the store
     const toolInfo = githubToolDefinitions?.find(def => def.name === toolName);
-    console.log(`[GitHubCell] Found toolInfo:`, toolInfo);
+    console.log(`[GitHubCell ${cell.id}] Found toolInfo:`, toolInfo);
 
     // Handle loading state MORE ROBUSTLY
     // Case 1: Status is undefined or 'idle' (fetching hasn't started or finished yet)
@@ -199,15 +218,15 @@ const GitHubCellComponent: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpd
     }
     // Case 3: Explicit error state from the store
     if (githubToolLoadingStatus === 'error') {
-        return <div className="text-xs text-red-500\">Error loading tool definitions from store.</div>;
+        return <div className="text-xs text-red-500">Error loading tool definitions from store.</div>; // Corrected quote
     }
     // Case 4: Status is 'success', but the specific tool isn't found
     if (githubToolLoadingStatus === 'success' && !toolInfo) {
-        return <div className="text-xs text-red-500\">Tool definition not found for: {toolName}</div>;
+        return <div className="text-xs text-red-500">Tool definition not found for: {toolName}</div>;
     }
     // Case 5: Tool definition not available for other reasons (shouldn't happen if logic above is correct)
      if (!toolInfo) {
-        return <div className="text-xs text-red-500\">Tool definition unavailable for: {toolName}. Status: {githubToolLoadingStatus}</div>; // Fallback error
+        return <div className="text-xs text-red-500">Tool definition unavailable for: {toolName}. Status: {githubToolLoadingStatus}</div>; // Fallback error
     }
 
 
@@ -288,7 +307,7 @@ const GitHubCellComponent: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpd
                    <input
                      type="checkbox"
                      id={fieldId}
-                     checked={!!currentValue}
+                     checked={!!currentValue} // Ensure boolean coercion
                      onChange={(e) => handleToolArgChange(activeToolIndex, paramName, e.target.checked)}
                      className="h-4 w-4 text-green-600 border-gray-300 rounded focus:ring-green-500"
                     />
@@ -1155,7 +1174,7 @@ const GitHubCellComponent: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpd
                  prData = JSON.parse(jsonText);
             } else {
                  // Fallback: Check if content is already an object
-                 if (typeof toolResult.content === 'object' && prData !== null) { // Typo: should be toolResult.content
+                 if (typeof toolResult.content === 'object' && prData !== null) { // Typo: should be toolResult.content, and check for toolResult.content instead of prData
                      console.warn("[get_pull_request] Parsing direct object content.");
                      prData = toolResult.content;
                  } else {
@@ -1587,7 +1606,7 @@ const GitHubCellComponent: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpd
              <Button
                variant="ghost"
                size="sm"
-               onClick={() => setIsResultExpanded(!isResultExpanded)}
+               onClick={() => setIsResultExpanded(!isResultExpanded)} // Local toggle still works
                className="text-xs"
              >
                {isResultExpanded ? (
@@ -1601,7 +1620,7 @@ const GitHubCellComponent: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpd
                )}
              </Button>
            </CardHeader>
-           {isResultExpanded && (
+           {isResultExpanded && ( // Controlled by local state, which is synced with global
              <CardContent className="p-2 border-t">
                <div className="mt-1 rounded overflow-x-auto max-h-[450px]">
                  {displayContent}
@@ -1717,7 +1736,7 @@ const GitHubCellComponent: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpd
             variant="outline"
             className="bg-white hover:bg-green-50 border-green-300 h-7 px-2 text-xs"
             onClick={executeWithToolForms}
-            disabled={isExecuting || toolForms.length === 0}
+            disabled={isExecuting || toolForms.length === 0 || !toolForms[0]?.toolName} // Added check for toolName
           >
             <PlayIcon className="h-3.5 w-3.5 mr-1 text-green-700" />
             {isExecuting ? "Running..." : "Run Tool"}
@@ -1754,8 +1773,14 @@ const GitHubCellComponent: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpd
               {renderToolFormTabs()}
 
               {/* Render inputs for the single active tool within a collapsible accordion */}
-              {toolForms[0] && (
-                <Accordion type="single" collapsible className="w-full">
+              {toolForms[0] && toolForms[0].toolName && ( // Ensure toolName exists before rendering accordion
+                <Accordion 
+                  type="single" 
+                  collapsible 
+                  className="w-full" 
+                  value={argsAccordionValue} // Controlled value
+                  onValueChange={setArgsAccordionValue} // Update local state
+                >
                   <AccordionItem value="tool-args" className="border-b-0"> {/* Remove bottom border */}
                     <AccordionTrigger className="text-xs font-medium py-2 hover:no-underline">
                       Tool Arguments
@@ -1765,6 +1790,10 @@ const GitHubCellComponent: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpd
                     </AccordionContent>
                   </AccordionItem>
                 </Accordion>
+              )}
+              {/* Show a message if no tool is selected yet */}
+              {(!toolForms[0] || !toolForms[0].toolName) && (
+                <p className="text-xs text-gray-500 py-2">No tool selected for this cell.</p>
               )}
             </CardContent>
           </Card>
@@ -1792,22 +1821,35 @@ const GitHubCellComponent: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpd
           </div>
         )}
 
-        {/* Update error check to use result.error */}
+        {/* Update error check to use result.error */} 
+        {/* This error is the cell-level error, not specific tool execution error if the tool ran but failed internally */}
         {cell.status === "error" && cell.result?.error && (
           <div className="bg-red-50 border border-red-200 rounded p-2 mb-3 text-red-700">
             <div className="font-medium text-xs">Execution Error:</div>
-            <div className="text-xs mt-0.5">{cell.result.error}</div>
+            {/* Displaying cell.result.error which might be a string or an object */}
+            <div className="text-xs mt-0.5 whitespace-pre-wrap font-mono">
+                {typeof cell.result.error === 'object' ? JSON.stringify(cell.result.error, null, 2) : cell.result.error}
+            </div>
           </div>
         )}
 
-        {/* Results section - Only render if not queued/running and result exists */}
-        {cell.status !== 'queued' && cell.status !== 'running' && cell.result && (
+        {/* Results section - Only render if not queued/running AND result exists */}
+        {/* Also, ensure we don't try to render results if the cell itself is in a hard error state that prevented execution */}
+        {cell.status !== 'queued' && cell.status !== 'running' && cell.result && cell.status !== 'error' && (
           <div>
-            {renderResultData()}
+            {renderResultData()} 
           </div>
         )}
+        {/* If cell is in error status, but there's also a result (e.g. from a previous successful run), 
+            renderResultData might still be useful if it can show partial/error info from the result itself. 
+            The current logic in renderResultData handles toolResult.error, so we can try rendering it. */}
+        {cell.status === 'error' && cell.result && (
+            <div>
+                {renderResultData()} 
+            </div>
+        )}
         {/* Optional: Show loading indicator when running/queued */}
-        {(cell.status === 'queued' || cell.status === 'running') && (
+        {(cell.status === 'queued' || cell.status === 'running') && !cell.result && (
            <div className="p-2 text-xs text-gray-500 flex items-center">
              <div className="animate-spin h-3 w-3 border-2 border-gray-400 rounded-full border-t-transparent mr-1.5"></div>
              Processing...
@@ -1829,25 +1871,29 @@ const areEqual = (prevProps: GitHubCellProps, nextProps: GitHubCellProps) => {
   }
 
   // Shallow compare key fields that drive UI
-  const keysToCheck: (keyof typeof prevCell)[] = [
+  // Updated to reflect that isExecuting is a prop here.
+  if (prevProps.isExecuting !== nextProps.isExecuting) return false;
+  
+  const keysToCheck: (keyof Cell)[] = [
     "id",
     "type",
     "status",
     "tool_name",
-    "result",
+    // "content", // content rarely changes for GitHub cell once tool is set
+    // "result", // Comparing result by reference, complex objects need careful thought
+    // "tool_arguments" // Comparing tool_arguments by reference
   ];
 
   for (const key of keysToCheck) {
-    // Note: result is compared by reference; if backend sends same object instance, still equal
     if (prevCell[key] !== nextCell[key]) {
       return false;
     }
   }
 
-  // Also ensure isExecuting flag didn't change
-  if (prevProps.isExecuting !== nextProps.isExecuting) {
-    return false;
-  }
+  // Deep comparison for result and tool_arguments if they are objects
+  if (JSON.stringify(prevCell.result) !== JSON.stringify(nextCell.result)) return false;
+  if (JSON.stringify(prevCell.tool_arguments) !== JSON.stringify(nextCell.tool_arguments)) return false;
+
 
   return true;
 };

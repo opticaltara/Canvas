@@ -690,11 +690,60 @@ class ConnectionManager:
     # --- Tool Discovery (Uses Handler) --- 
     async def get_tools_for_connection_type(self, connection_type: str) -> List[MCPToolInfo]:
         """
-        List available tools for a given connection type using its default connection and handler.
+        List available tools for a given connection type using its default connection and handler,
+        or provide predefined tools for special types like "python".
         """
         correlation_id = str(uuid4())
         logger.info(f"Fetching tools for connection type: {connection_type}", extra={'correlation_id': correlation_id})
 
+        if connection_type == "python":
+            logger.info(f"Handling special case for 'python' tool type discovery.", extra={'correlation_id': correlation_id})
+            # Define tools and their schemas directly here.
+            # This schema should align with what PythonCell.tsx expects for its form rendering.
+            python_tools = [
+                MCPToolInfo(
+                    name="run_script",
+                    description="Runs a Python script.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "script": {
+                                "type": "string",
+                                "title": "Python Script",
+                                "description": "The Python script to execute.",
+                                "format": "textarea" # Suggests a textarea in the frontend
+                            }
+                        },
+                        "required": ["script"]
+                    }
+                ),
+                MCPToolInfo(
+                    name="load_csv",
+                    description="Loads a CSV file into a Pandas DataFrame.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "csv_path": {
+                                "type": "string",
+                                "title": "CSV File Path",
+                                "description": "The path to the CSV file to load."
+                            },
+                            "df_name": {
+                                "type": "string",
+                                "title": "DataFrame Name",
+                                "description": "The name to assign to the loaded DataFrame.",
+                                "default": "df"
+                            }
+                        },
+                        "required": ["csv_path", "df_name"]
+                    }
+                )
+                # Add other built-in Python tools here if they exist
+            ]
+            logger.info(f"Returning {len(python_tools)} predefined Python tools.", extra={'correlation_id': correlation_id})
+            return python_tools
+
+        # Existing logic for MCP-based connections:
         default_conn = await self.get_default_connection(connection_type)
         if not default_conn:
             # Log clearly, return empty list - API caller handles 'no connection' case.

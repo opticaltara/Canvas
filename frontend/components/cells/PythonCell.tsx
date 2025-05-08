@@ -2,15 +2,11 @@
 
 import React from "react"
 import { useState, useEffect } from "react"
-import { PlayIcon, CopyIcon, CheckIcon, Trash2Icon, AlertCircleIcon, ServerIcon, ChevronsUpDownIcon, CodeIcon } from "lucide-react"
+import { PlayIcon, CopyIcon, CheckIcon, Trash2Icon, AlertCircleIcon, ServerIcon, ChevronsUpDownIcon, CodeIcon, ChevronDownIcon, ChevronUpIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
-// Choose a style - you might want a different one for Python vs. GitHub
-import { materialLight } from 'react-syntax-highlighter/dist/esm/styles/prism' 
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable"
 import { Separator } from "@/components/ui/separator"
 import { Label } from "@/components/ui/label"
 import ReactMarkdown from 'react-markdown'; // Import react-markdown
@@ -19,7 +15,13 @@ import { useConnectionStore } from "@/app/store/connectionStore";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
-import { ChevronDownIcon, ChevronUpIcon } from "lucide-react"; // Might not be used but keep for parity
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion"; // Added Accordion
+
+// Import CodeMirror components
+import CodeMirror from '@uiw/react-codemirror';
+import { python } from '@codemirror/lang-python';
+import { githubLight } from '@uiw/codemirror-theme-github'; // Or choose another theme
+import type { ViewUpdate } from "@codemirror/view"; // Import type for onChange handler
 
 import { type Cell } from "@/store/types"
 
@@ -43,7 +45,6 @@ interface PythonCellProps {
   // onUpdate needed if we allow editing code later
   onUpdate: (cellId: string, content: string, metadata?: Record<string, any>) => void 
   onDelete: (cellId: string) => void
-  isExecuting: boolean // Use the cell.status instead?
 }
 
 const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpdate, onDelete }): React.ReactNode => {
@@ -51,10 +52,27 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
   const [copiedStdout, setCopiedStdout] = useState(false);
   const [copiedStderr, setCopiedStderr] = useState(false);
   const [copiedReturnValue, setCopiedReturnValue] = useState(false);
+  const [isResultExpanded, setIsResultExpanded] = useState(true); // State for result card expansion
 
   const isExecuting = cell.status === "running" || cell.status === "queued";
   const executionResult = cell.result?.content as PythonExecutionResult | null;
   const executionError = cell.result?.error; // General cell error, if any
+
+  // Global expansion state from store
+  const areAllCellsExpanded = useConnectionStore((state) => state.areAllCellsExpanded);
+
+  // State for controlled accordion for Tool Arguments
+  const [argsAccordionValue, setArgsAccordionValue] = useState<string>(areAllCellsExpanded ? "item-1" : "");
+
+  // Effect to sync Tool Arguments accordion with global state
+  useEffect(() => {
+    setArgsAccordionValue(areAllCellsExpanded ? "item-1" : "");
+  }, [areAllCellsExpanded]);
+
+  // Effect to sync Execution Result card expansion with global state
+  useEffect(() => {
+    setIsResultExpanded(areAllCellsExpanded);
+  }, [areAllCellsExpanded]);
 
   // Log cell rendering
   console.log(`[PythonCell ${cell.id}] Render with cell:`, JSON.stringify({ 
@@ -65,7 +83,10 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
     result_content_type: typeof cell.result?.content,
     result_content_keys: executionResult ? Object.keys(executionResult) : null,
     result_error: cell.result?.error,
-    code_length: cell.content?.length
+    // For run_script, cell.content might be a label like "Python: run_script". 
+    // The actual script is in tool_arguments.script.
+    // We log the length of cell.content for general info.
+    code_length: cell.content?.length 
   }));
 
   // Copy to clipboard utility
@@ -113,43 +134,36 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
        parsedResult = { status: 'error', stderr: executionError };
   }
 
-  const pythonCode = cell.content || "# No code provided";
+  // This pythonCode is primarily cell.content, which for run_script might just be a label.
+  // The actual script for run_script is handled via toolArgs.script
+  const pythonCode = cell.content || "# No code provided"; 
 
   /* ---------------------- Tool Metadata ---------------------- */
-  // Determine tool name / args from either top-level or metadata so we support older cells
   const toolName: string | undefined = (cell as any).tool_name || cell.metadata?.tool_name;
   const initialToolArgs: Record<string, any> = (cell as any).tool_arguments || cell.metadata?.tool_args || {};
 
-  /* ---------------------- State for load_csv ------------------ */
+  /* ---------------------- State for Tool Arguments --- */
   const [toolArgs, setToolArgs] = useState<Record<string, any>>(initialToolArgs);
 
-  // Sync local state when the cell ID changes (i.e., when a new cell instance is rendered)
   useEffect(() => {
     setToolArgs(initialToolArgs);
-  }, [cell.id]);
+  }, [cell.id, JSON.stringify(initialToolArgs)]); 
 
   /* ---------------------- Connection Store -------------------- */
-  // We fetch python tool definitions (load_csv, run_script, etc.) from the store so we can dynamically build a form.
-  // The connection type key is assumed to be "python" (matching backend). Adjust if needed.
   const toolDefinitions = useConnectionStore((state) => state.toolDefinitions.python);
   const toolLoadingStatus = useConnectionStore((state) => state.toolLoadingStatus.python);
-
-  // Identify the tool definition for the active tool (load_csv)
   const toolInfo = toolDefinitions?.find((def) => def.name === toolName);
 
   /* ---------------------- Helpers ----------------------------- */
   const handleToolArgChange = (argName: string, value: any) => {
     setToolArgs((prev) => {
       const updated = { ...prev, [argName]: value };
-      // Persist the change back via onUpdate so backend sees updated args before execution
       onUpdate(cell.id, cell.content, { toolName: toolName, toolArgs: updated });
       return updated;
     });
   };
 
-  // Render input controls for each tool argument (mirrors logic from FileSystemCell)
   const renderToolFormInputs = (): React.ReactNode => {
-    // Handle loading states gracefully
     if (!toolName) {
       return <div className="text-xs text-gray-500">No tool selected.</div>;
     }
@@ -183,7 +197,6 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
         (paramSchema.examples && paramSchema.examples[0]) || description || `Enter ${label}`;
       const currentValue = toolArgs[paramName] ?? paramSchema.default ?? "";
 
-      // Decide input type
       const schemaType = paramSchema.type;
       const schemaFormat = paramSchema.format;
       const enumValues = paramSchema.enum as string[] | undefined;
@@ -209,6 +222,26 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
             </SelectContent>
           </Select>
         );
+      } else if (paramName === 'script') { // Use CodeMirror for the script argument
+        inputElement = (
+           <div className="mt-1 border rounded-md overflow-hidden">
+             <CodeMirror
+               value={String(currentValue)}
+               height="200px" // Adjust height as needed
+               extensions={[python()]} 
+               theme={githubLight} // Use the imported theme
+               onChange={(value: string, viewUpdate: ViewUpdate) => handleToolArgChange(paramName, value)}
+               basicSetup={{
+                 foldGutter: false,
+                 dropCursor: false,
+                 allowMultipleSelections: false,
+                 indentOnInput: false,
+                 // Add other basic setup options if needed
+               }}
+               style={{ fontSize: '0.8rem' }} // Match font size if desired
+             />
+           </div>
+        );
       } else if (schemaType === "string" && (schemaFormat === "textarea" || (description && description.length > 50))) {
         inputElement = (
           <Textarea
@@ -217,7 +250,7 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
             onChange={(e) => handleToolArgChange(paramName, e.target.value)}
             placeholder={placeholder}
             required={isRequired}
-            className="mt-1 h-16 text-xs font-mono resize-none"
+            className="mt-1 h-32 text-xs font-mono resize-y" // Increased height for script
           />
         );
       } else if (schemaType === "number" || schemaType === "integer") {
@@ -281,33 +314,25 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
     );
   };
 
-  /* ============================================================
-     MAIN RENDER: Two modes
-     - run_script: show code panel + output (existing behavior)
-     - load_csv (or other non-script): show argument form + output
-  ============================================================ */
+  const isRunScriptTool = toolName === "run_script" || toolName === "run-script";
+  const scriptArgumentContent = toolArgs?.script || initialToolArgs?.script;
+  const codeForCopyButton = isRunScriptTool && typeof scriptArgumentContent === 'string'
+    ? scriptArgumentContent
+    : cell.content;
 
-  const isRunScript = toolName === "run_script" || toolName === "run-script";
-
-  // Helper function to render structured output from stdout
   const renderStructuredOutput = (stdout: string | null | undefined): React.ReactNode => {
     if (!stdout) return null;
-
     const outputParts: React.ReactNode[] = [];
-    let remainingStdout = stdout;
-
-    // Regex patterns for markers
     const dfRegex = /--- DataFrame ---\n([\s\S]*?)\n--- End DataFrame ---/g;
     const plotRegex = /<PLOT_BASE64>(.*?)<\/PLOT_BASE64>/g;
     const jsonRegex = /<JSON_OUTPUT>(.*?)<\/JSON_OUTPUT>/g;
 
-    // Function to process matches and remaining text
     const processChunk = (text: string) => {
       if (text.trim()) {
         outputParts.push(
-          <pre key={`text-${outputParts.length}`} className="whitespace-pre-wrap font-mono text-xs bg-gray-50 p-1.5 rounded border border-gray-200">
-            {text.trim()}
-          </pre>
+          <div key={`text-md-${outputParts.length}`} className="markdown-rendered-chunk my-1 text-xs">
+             <ReactMarkdown remarkPlugins={[remarkGfm]}>{text.trim()}</ReactMarkdown>
+          </div>
         );
       }
     };
@@ -318,8 +343,6 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
       { regex: plotRegex, type: 'plot' },
       { regex: jsonRegex, type: 'json' },
     ];
-
-    // Find all marker positions
     const allMatches: { index: number; length: number; type: string; content: string }[] = [];
     markers.forEach(({ regex, type }) => {
       let match;
@@ -327,16 +350,9 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
         allMatches.push({ index: match.index, length: match[0].length, type, content: match[1] });
       }
     });
-
-    // Sort matches by index
     allMatches.sort((a, b) => a.index - b.index);
-
-    // Process text and markers in order
     allMatches.forEach(match => {
-      // Process text before the marker
       processChunk(stdout.substring(lastIndex, match.index));
-
-      // Process the marker content
       if (match.type === 'dataframe') {
         outputParts.push(
           <div key={`df-${match.index}`} className="markdown-table-container my-1 border rounded p-1 bg-white">
@@ -369,28 +385,30 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
       }
       lastIndex = match.index + match.length;
     });
-
-    // Process any remaining text after the last marker
     processChunk(stdout.substring(lastIndex));
-
-    // If no markers were found, render the whole stdout as plain text
     if (outputParts.length === 0 && stdout.trim()) {
        processChunk(stdout);
     }
-
     return outputParts.length > 0 ? <>{outputParts}</> : null;
   };
+
+  // Keep Emerald theme for Python Cell
+  const headerBgColor = "bg-emerald-100";
+  const headerBorderColor = "border-emerald-200";
+  const cardBorderColor = "border-emerald-300"; // Slightly darker for card borders maybe
+  const resultCardBgColor = "bg-emerald-50";
+  const runButtonTextColor = "text-emerald-800 hover:text-emerald-900";
+  const runButtonIconColor = "text-emerald-700";
 
   return (
     <div className="border rounded-md overflow-hidden mb-3 mx-8 bg-white">
       {/* Header */}
-      <div className="bg-emerald-100 border-b border-emerald-200 p-2 flex justify-between items-center">
+      <div className={`${headerBgColor} ${headerBorderColor} border-b p-2 flex justify-between items-center`}>
         <div className="flex items-center">
-          <CodeIcon className="h-4 w-4 mr-2 text-emerald-700" />
-          <span className="font-medium text-sm text-emerald-800">Python Cell</span> 
-          {/* Display Tool Name if available in metadata */}
+          <CodeIcon className={`h-4 w-4 mr-2 ${runButtonIconColor}`} />
+          <span className={`font-medium text-sm ${runButtonTextColor.split(' ')[0]}`}>Python Cell</span> 
           {toolName && (
-            <span className="ml-2 text-xs text-emerald-600 bg-emerald-200 px-1.5 py-0.5 rounded">
+            <span className={`ml-2 text-xs text-emerald-600 bg-emerald-200 px-1.5 py-0.5 rounded`}>
               Tool: {toolName}
             </span>
           )}
@@ -402,24 +420,24 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
                 <Button
                   size="sm"
                   variant="ghost"
-                  className="text-gray-600 hover:bg-emerald-100 hover:text-emerald-700 h-7 w-7 px-0"
-                  onClick={() => copyToClipboard(pythonCode, setCopiedCode)}
+                  className={`text-gray-600 hover:${headerBgColor} hover:${runButtonIconColor} h-7 w-7 px-0`}
+                  onClick={() => copyToClipboard(codeForCopyButton, setCopiedCode)}
                 >
                   {copiedCode ? <CheckIcon className="h-4 w-4 text-green-600" /> : <CopyIcon className="h-4 w-4" />}
                 </Button>
               </TooltipTrigger>
-              <TooltipContent><p>Copy Code</p></TooltipContent>
+              <TooltipContent><p>Copy {isRunScriptTool ? "Script" : "Code/Content"}</p></TooltipContent>
             </Tooltip>
           </TooltipProvider>
           <Button
             size="sm"
             variant="outline"
-            className="bg-white hover:bg-emerald-50 border-emerald-300 h-7 px-2 text-xs text-emerald-800 hover:text-emerald-900"
+            className={`bg-white hover:bg-emerald-50 ${cardBorderColor} h-7 px-2 text-xs ${runButtonTextColor}`}
             onClick={() => onExecute(cell.id)}
-            disabled={isExecuting}
+            disabled={isExecuting || !toolName} // Disable if no tool is selected
           >
-            <PlayIcon className="h-3.5 w-3.5 mr-1 text-emerald-700" />
-            {isExecuting ? "Running..." : "Run Code"}
+            <PlayIcon className={`h-3.5 w-3.5 mr-1 ${runButtonIconColor}`} />
+            {isExecuting ? "Running..." : (toolName ? "Run Code" : "Select Tool")}
           </Button>
           <TooltipProvider delayDuration={100}>
              <Tooltip>
@@ -440,195 +458,195 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
         </div>
       </div>
 
-      {/* Tool Arguments / Form */}
-      {!isRunScript && (
-        <div className="px-3 py-2 border-b bg-gray-50">
-          {renderToolFormInputs()}
+      {/* Tool Arguments in Accordion */}
+      {toolName && (
+        <div className="p-3">
+          <Card className={cardBorderColor}>
+            <CardContent className="p-0"> {/* Remove padding from CardContent if Accordion handles it */}
+              <Accordion 
+                type="single" 
+                collapsible 
+                value={argsAccordionValue} // Controlled value
+                onValueChange={setArgsAccordionValue} // Update local state
+                className="w-full"
+              >
+                <AccordionItem value="item-1" className="border-b-0">
+                  <AccordionTrigger className="text-xs font-medium py-2 px-3 hover:no-underline">
+                    Tool Arguments ({toolName})
+                  </AccordionTrigger>
+                  <AccordionContent className="pt-2 px-3 pb-3">
+                    {renderToolFormInputs()}
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
+            </CardContent>
+          </Card>
         </div>
       )}
 
-      {/* For run_script we keep the code panel, for others we only show output */}
-      <ResizablePanelGroup direction="vertical" className="min-h-[350px]">
-        {isRunScript && (
-          <>
-            <ResizablePanel defaultSize={50} minSize={20}>
-              <ScrollArea className="h-full p-1 text-xs">
-                <SyntaxHighlighter
-                  language="python"
-                  style={materialLight}
-                  customStyle={{
-                    margin: 0,
-                    padding: "8px",
-                    fontSize: "0.8rem",
-                    backgroundColor: "#f8f9fa",
-                    borderRadius: "4px",
-                    height: "100%",
-                    overflow: "auto",
-                    boxSizing: "border-box",
-                  }}
-                  showLineNumbers={true}
-                  wrapLines={true}
-                  lineNumberStyle={{ color: "#adb5bd", fontSize: "0.75rem" }}
-                >
-                  {pythonCode}
-                </SyntaxHighlighter>
-              </ScrollArea>
-            </ResizablePanel>
-            <ResizableHandle withHandle />
-          </>
-        )}
+      {/* Execution Result Card */}
+      {(cell.status !== 'idle' || cell.result || isExecuting || parseError || executionError) && (
+        <div className="p-3 pt-0"> {/* Reduce top padding if arguments card exists */}
+            <Card className={`border ${cardBorderColor}`}>
+                <CardHeader className={`flex flex-row items-center justify-between p-2 ${resultCardBgColor} border-b ${headerBorderColor}`}>
+                    <CardTitle className={`text-sm font-semibold ${runButtonTextColor.split(' ')[0]}`}>
+                        Execution Result
+                    </CardTitle>
+                    <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setIsResultExpanded(!isResultExpanded)} // Local toggle still works
+                        className={`text-xs ${runButtonTextColor}`}
+                    >
+                        {isResultExpanded ? <><ChevronUpIcon className="h-4 w-4 mr-1" /> Hide</> : <><ChevronDownIcon className="h-4 w-4 mr-1" /> Show</>}
+                    </Button>
+                </CardHeader>
+                {isResultExpanded && ( // Controlled by local state, which is synced with global
+                    <CardContent className="p-2">
+                        <ScrollArea className="flex-grow text-xs max-h-[400px] overflow-auto pr-2">
+                            {/* Status Indicator */}
+                            {cell.status === "running" && (
+                                <div className="flex items-center text-xs text-amber-600 mb-2">
+                                <div className="animate-spin h-3 w-3 border-2 border-amber-600 rounded-full border-t-transparent mr-1.5"></div>
+                                Executing code...
+                                </div>
+                            )}
+                            {cell.status === "queued" && (
+                                <div className="flex items-center text-xs text-blue-600 mb-2">
+                                <div className="h-3 w-3 bg-blue-600 rounded-full mr-1.5 animate-pulse"></div>
+                                Queued for execution...
+                                </div>
+                            )}
+                            {cell.status === "stale" && (
+                                <div className="flex items-center text-xs text-gray-600 mb-2">
+                                <div className="h-3 w-3 border border-gray-600 rounded-full mr-1.5"></div>
+                                Stale (needs re-run)...
+                                </div>
+                            )}
 
-        {/* Output Panel (always present) */}
-        <ResizablePanel defaultSize={isRunScript ? 50 : 100} minSize={20}>
-          <div className="h-full flex flex-col">
-             <div className="flex justify-between items-center p-1.5 border-b bg-gray-50">
-                <span className="text-xs font-medium text-gray-700">Execution Result</span>
-                {/* Optional: Add clear output button? */} 
-             </div>
-             <ScrollArea className="flex-grow p-2 text-xs overflow-auto">
-              {/* Status Indicator */} 
-              {cell.status === "running" && (
-                <div className="flex items-center text-xs text-amber-600 mb-2">
-                  <div className="animate-spin h-3 w-3 border-2 border-amber-600 rounded-full border-t-transparent mr-1.5"></div>
-                  Executing code...
-                </div>
-              )}
-              {cell.status === "queued" && (
-                <div className="flex items-center text-xs text-blue-600 mb-2">
-                   <div className="h-3 w-3 bg-blue-600 rounded-full mr-1.5 animate-pulse"></div>
-                   Queued for execution...
-                </div>
-              )}
-              {cell.status === "stale" && (
-                <div className="flex items-center text-xs text-gray-600 mb-2">
-                   <div className="h-3 w-3 border border-gray-600 rounded-full mr-1.5"></div>
-                   Stale (needs re-run)... 
-                </div>
-              )}
+                            {/* Display Parse Error */}
+                            {parseError && (
+                                <div className="bg-yellow-50 border border-yellow-200 rounded p-1.5 mb-2 text-yellow-800 text-xs">
+                                    <div className="flex items-center">
+                                    <AlertCircleIcon className="h-3.5 w-3.5 mr-1 flex-shrink-0"/>
+                                    <span className="font-medium">Result Parsing Issue:</span>
+                                    </div>
+                                    <div className="ml-5 mt-0.5">{parseError}</div>
+                                </div>
+                            )}
 
-              {/* Display Parse Error */}
-              {parseError && (
-                  <div className="bg-yellow-50 border border-yellow-200 rounded p-1.5 mb-2 text-yellow-800 text-xs">
-                    <div className="flex items-center">
-                       <AlertCircleIcon className="h-3.5 w-3.5 mr-1 flex-shrink-0"/>
-                       <span className="font-medium">Result Parsing Issue:</span>
-                    </div>
-                    <div className="ml-5 mt-0.5">{parseError}</div>
-                  </div>
-              )}
+                            {/* Display General Cell Error */}
+                            {executionError && !parsedResult?.stderr && (
+                                <div className="bg-red-50 border border-red-200 rounded p-1.5 mb-2 text-red-700 text-xs">
+                                    <div className="flex items-center">
+                                    <AlertCircleIcon className="h-3.5 w-3.5 mr-1 flex-shrink-0"/>
+                                    <span className="font-medium">Cell Execution Error:</span>
+                                    </div>
+                                    <pre className="whitespace-pre-wrap font-mono text-xs mt-1 ml-5">{executionError}</pre>
+                                </div>
+                            )}
 
-              {/* Display General Cell Error */}
-              {executionError && !parsedResult?.stderr && (
-                 <div className="bg-red-50 border border-red-200 rounded p-1.5 mb-2 text-red-700 text-xs">
-                    <div className="flex items-center">
-                      <AlertCircleIcon className="h-3.5 w-3.5 mr-1 flex-shrink-0"/>
-                      <span className="font-medium">Cell Execution Error:</span>
-                    </div>
-                    <pre className="whitespace-pre-wrap font-mono text-xs mt-1 ml-5">{executionError}</pre>
-                  </div>
-              )}
+                            {/* Display Python Execution Results */} 
+                            {parsedResult && (
+                                <div className="space-y-3">
+                                {/* Render Structured Stdout or plain stdout */}
+                                {parsedResult.stdout && (
+                                    <div>
+                                    <div className="flex justify-between items-center mb-0.5">
+                                        <Label className="text-xs text-gray-600 font-medium">stdout</Label>
+                                        <TooltipProvider delayDuration={100}>
+                                            <Tooltip>
+                                            <TooltipTrigger asChild>
+                                                <Button variant="ghost" size="icon" className="h-5 w-5 text-gray-500 hover:bg-gray-100" onClick={() => copyToClipboard(parsedResult?.stdout, setCopiedStdout)}>
+                                                    {copiedStdout ? <CheckIcon className="h-3 w-3 text-green-600"/> : <CopyIcon className="h-3 w-3"/>}
+                                                </Button>
+                                            </TooltipTrigger>
+                                            <TooltipContent><p>Copy Raw stdout</p></TooltipContent>
+                                            </Tooltip>
+                                        </TooltipProvider>
+                                    </div>
+                                    <div className="output-content-area mt-1">
+                                        {renderStructuredOutput(parsedResult.stdout)}
+                                    </div>
+                                    </div>
+                                )}
 
-              {/* Display Python Execution Results */} 
-              {parsedResult && (
-                <div className="space-y-3">
-                  {/* Render Structured Stdout or plain stdout */}
-                  {parsedResult.stdout && (
-                     <div>
-                       <div className="flex justify-between items-center mb-0.5">
-                          <Label className="text-xs text-gray-600 font-medium">stdout</Label>
-                          <TooltipProvider delayDuration={100}>
-                             <Tooltip>
-                               <TooltipTrigger asChild>
-                                 <Button variant="ghost" size="icon" className="h-5 w-5 text-gray-500 hover:bg-gray-100" onClick={() => copyToClipboard(parsedResult?.stdout, setCopiedStdout)}>
-                                    {copiedStdout ? <CheckIcon className="h-3 w-3 text-green-600"/> : <CopyIcon className="h-3 w-3"/>}
-                                 </Button>
-                               </TooltipTrigger>
-                               <TooltipContent><p>Copy Raw stdout</p></TooltipContent>
-                             </Tooltip>
-                          </TooltipProvider>
-                       </div>
-                       {/* Use the new renderer */}
-                       <div className="output-content-area mt-1"> 
-                          {renderStructuredOutput(parsedResult.stdout)}
-                       </div>
-                     </div>
-                  )}
+                                {/* Stderr */} 
+                                {parsedResult.stderr && (
+                                    <div>
+                                    <div className="flex justify-between items-center mb-0.5">
+                                        <Label className="text-xs text-red-700 font-medium">stderr</Label>
+                                        <TooltipProvider delayDuration={100}>
+                                            <Tooltip>
+                                            <TooltipTrigger asChild>
+                                                <Button variant="ghost" size="icon" className="h-5 w-5 text-gray-500 hover:bg-gray-100" onClick={() => copyToClipboard(parsedResult?.stderr, setCopiedStderr)}>
+                                                    {copiedStderr ? <CheckIcon className="h-3 w-3 text-green-600"/> : <CopyIcon className="h-3 w-3"/>}
+                                                </Button>
+                                            </TooltipTrigger>
+                                            <TooltipContent><p>Copy stderr</p></TooltipContent>
+                                            </Tooltip>
+                                        </TooltipProvider>
+                                    </div>
+                                    <pre className="whitespace-pre-wrap font-mono text-xs bg-red-50 p-1.5 rounded border border-red-200 text-red-800 max-h-40 overflow-y-auto">{parsedResult.stderr}</pre>
+                                    </div>
+                                )}
+                                
+                                {/* Return Value */} 
+                                {parsedResult.return_value !== undefined && parsedResult.return_value !== null && (
+                                    <div>
+                                    <div className="flex justify-between items-center mb-0.5">
+                                        <Label className="text-xs text-gray-600 font-medium">Return Value</Label>
+                                        <TooltipProvider delayDuration={100}>
+                                            <Tooltip>
+                                            <TooltipTrigger asChild>
+                                                <Button variant="ghost" size="icon" className="h-5 w-5 text-gray-500 hover:bg-gray-100" onClick={() => copyToClipboard(JSON.stringify(parsedResult?.return_value, null, 2), setCopiedReturnValue)}>
+                                                    {copiedReturnValue ? <CheckIcon className="h-3 w-3 text-green-600"/> : <CopyIcon className="h-3 w-3"/>}
+                                                </Button>
+                                            </TooltipTrigger>
+                                            <TooltipContent><p>Copy Return Value (JSON)</p></TooltipContent>
+                                            </Tooltip>
+                                        </TooltipProvider>
+                                    </div>
+                                    <pre className="whitespace-pre-wrap font-mono text-xs bg-gray-50 p-1.5 rounded border border-gray-200 max-h-40 overflow-y-auto">
+                                        {typeof parsedResult.return_value === 'object' 
+                                        ? JSON.stringify(parsedResult.return_value, null, 2)
+                                        : String(parsedResult.return_value)}
+                                    </pre>
+                                    </div>
+                                )}
 
-                  {/* Stderr */} 
-                  {parsedResult.stderr && (
-                     <div>
-                       <div className="flex justify-between items-center mb-0.5">
-                          <Label className="text-xs text-red-700 font-medium">stderr</Label>
-                          <TooltipProvider delayDuration={100}>
-                             <Tooltip>
-                               <TooltipTrigger asChild>
-                                 <Button variant="ghost" size="icon" className="h-5 w-5 text-gray-500 hover:bg-gray-100" onClick={() => copyToClipboard(parsedResult?.stderr, setCopiedStderr)}>
-                                    {copiedStderr ? <CheckIcon className="h-3 w-3 text-green-600"/> : <CopyIcon className="h-3 w-3"/>}
-                                 </Button>
-                               </TooltipTrigger>
-                               <TooltipContent><p>Copy stderr</p></TooltipContent>
-                             </Tooltip>
-                          </TooltipProvider>
-                       </div>
-                       <pre className="whitespace-pre-wrap font-mono text-xs bg-red-50 p-1.5 rounded border border-red-200 text-red-800 max-h-40 overflow-y-auto">{parsedResult.stderr}</pre>
-                     </div>
-                  )}
-                  
-                  {/* Return Value */} 
-                  {parsedResult.return_value !== undefined && parsedResult.return_value !== null && (
-                    <div>
-                       <div className="flex justify-between items-center mb-0.5">
-                           <Label className="text-xs text-gray-600 font-medium">Return Value</Label>
-                           <TooltipProvider delayDuration={100}>
-                             <Tooltip>
-                               <TooltipTrigger asChild>
-                                 <Button variant="ghost" size="icon" className="h-5 w-5 text-gray-500 hover:bg-gray-100" onClick={() => copyToClipboard(JSON.stringify(parsedResult?.return_value, null, 2), setCopiedReturnValue)}>
-                                     {copiedReturnValue ? <CheckIcon className="h-3 w-3 text-green-600"/> : <CopyIcon className="h-3 w-3"/>}
-                                 </Button>
-                               </TooltipTrigger>
-                               <TooltipContent><p>Copy Return Value (JSON)</p></TooltipContent>
-                             </Tooltip>
-                           </TooltipProvider>
-                       </div>
-                       <pre className="whitespace-pre-wrap font-mono text-xs bg-gray-50 p-1.5 rounded border border-gray-200 max-h-40 overflow-y-auto">
-                         {/* Pretty print if object/array, otherwise display as string */} 
-                         {typeof parsedResult.return_value === 'object' 
-                           ? JSON.stringify(parsedResult.return_value, null, 2)
-                           : String(parsedResult.return_value)}
-                       </pre>
-                     </div>
-                  )}
-
-                  {/* Traceback (if error) */} 
-                  {parsedResult.status === 'error' && parsedResult.error_details?.traceback && (
-                     <div>
-                       <Label className="text-xs text-red-700 font-medium">Traceback</Label>
-                       <pre className="whitespace-pre-wrap font-mono text-xs bg-red-50 p-1.5 rounded border border-red-200 text-red-800 mt-0.5 max-h-60 overflow-y-auto">{parsedResult.error_details.traceback}</pre>
-                     </div>
-                  )}
-                  
-                  {/* Dependencies */} 
-                  {parsedResult.dependencies && parsedResult.dependencies.length > 0 && (
-                     <div>
-                       <Label className="text-xs text-gray-600 font-medium">Dependencies Used</Label>
-                       <div className="flex flex-wrap gap-1 mt-0.5">
-                          {parsedResult.dependencies.map(dep => (
-                            <span key={dep} className="text-xs bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded border">{dep}</span>
-                          ))}
-                       </div>
-                     </div>
-                  )}
-                </div>
-              )}
-              
-              {/* No output message */} 
-              {!isExecuting && !parsedResult && !parseError && !executionError && (
-                  <div className="text-xs text-gray-500 italic">No output received yet.</div>
-              )}
-             </ScrollArea>
-          </div>
-        </ResizablePanel>
-      </ResizablePanelGroup>
+                                {/* Traceback (if error) */} 
+                                {parsedResult.status === 'error' && parsedResult.error_details?.traceback && (
+                                    <div>
+                                    <Label className="text-xs text-red-700 font-medium">Traceback</Label>
+                                    <pre className="whitespace-pre-wrap font-mono text-xs bg-red-50 p-1.5 rounded border border-red-200 text-red-800 mt-0.5 max-h-60 overflow-y-auto">{parsedResult.error_details.traceback}</pre>
+                                    </div>
+                                )}
+                                
+                                {/* Dependencies */} 
+                                {parsedResult.dependencies && parsedResult.dependencies.length > 0 && (
+                                    <div>
+                                    <Label className="text-xs text-gray-600 font-medium">Dependencies Used</Label>
+                                    <div className="flex flex-wrap gap-1 mt-0.5">
+                                        {parsedResult.dependencies.map(dep => (
+                                            <span key={dep} className="text-xs bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded border">{dep}</span>
+                                        ))}
+                                    </div>
+                                    </div>
+                                )}
+                                </div>
+                            )}
+                            
+                            {/* No output message if not executing and no results/errors */}
+                            {!isExecuting && !parsedResult && !parseError && !executionError && cell.status !== 'stale' && (
+                                <div className="text-xs text-gray-500 italic ml-1 mt-1">No output received yet. Click 'Run Code' to execute.</div>
+                            )}
+                        </ScrollArea>
+                    </CardContent>
+                )}
+            </Card>
+        </div>
+      )}
     </div>
   )
 }

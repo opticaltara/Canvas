@@ -76,24 +76,28 @@ class SummarizationAgent:
     async def run_summarization(
         self,
         text_to_summarize: str,
-        original_request: Optional[str] = None
-    ) -> AsyncGenerator[Union[StatusUpdateEvent, SummaryUpdateEvent, SummarizationQueryResult], None]: # Updated yield type
+        original_request: Optional[str] = None,
+        session_id: str = "summarization",
+    ) -> AsyncGenerator[Union[StatusUpdateEvent, SummaryUpdateEvent, SummarizationQueryResult], None]:
         """Generate a summary for the provided text, yielding status updates."""
         query_description = original_request or f"Summarize the following text: {text_to_summarize[:100]}..."
-        summarization_agent_logger.info(f"Running summarization for request: '{query_description}'")
+        summarization_agent_logger.info(f"Running summarization for request: '{query_description}' (session {session_id})")
+
+        event_common = {"session_id": session_id, "notebook_id": self.notebook_id}
+
         # Yield StatusUpdateEvent
-        yield StatusUpdateEvent(status=StatusType.STARTING, agent_type=AgentType.SUMMARIZATION, message="Initializing summarization agent...", attempt=None, max_attempts=None, reason=None, step_id=None, original_plan_step_id=None)
+        yield StatusUpdateEvent(type=EventType.STATUS_UPDATE, status=StatusType.STARTING, agent_type=AgentType.SUMMARIZATION, message="Initializing summarization agent...", attempt=None, max_attempts=None, reason=None, step_id=None, original_plan_step_id=None, **event_common)
         
         try:
             if not self.agent:
                  self.agent = self._initialize_agent()
             # Yield StatusUpdateEvent
-            yield StatusUpdateEvent(status=StatusType.AGENT_CREATED, agent_type=AgentType.SUMMARIZATION, message="Summarization agent ready.", attempt=None, max_attempts=None, reason=None, step_id=None, original_plan_step_id=None)
+            yield StatusUpdateEvent(type=EventType.STATUS_UPDATE, status=StatusType.AGENT_CREATED, agent_type=AgentType.SUMMARIZATION, message="Summarization agent ready.", attempt=None, max_attempts=None, reason=None, step_id=None, original_plan_step_id=None, **event_common)
         except Exception as init_err:
             error_msg = f"Failed to initialize Summarization Agent: {init_err}"
             summarization_agent_logger.error(error_msg, exc_info=True)
             # Yield StatusUpdateEvent with error status
-            yield StatusUpdateEvent(status=StatusType.ERROR, agent_type=AgentType.SUMMARIZATION, message=error_msg, reason="Initialization failed", attempt=None, max_attempts=None, step_id=None, original_plan_step_id=None)
+            yield StatusUpdateEvent(type=EventType.STATUS_UPDATE, status=StatusType.ERROR, agent_type=AgentType.SUMMARIZATION, message=error_msg, reason="Initialization failed", attempt=None, max_attempts=None, step_id=None, original_plan_step_id=None, **event_common)
             yield SummarizationQueryResult(query=query_description, data="", error=error_msg)
             return
 
@@ -108,13 +112,13 @@ class SummarizationAgent:
 ---"""
 
         # Yield StatusUpdateEvent
-        yield StatusUpdateEvent(status=StatusType.STARTING_ATTEMPTS, agent_type=AgentType.SUMMARIZATION, message=f"Attempting summarization (max {max_attempts} attempts)...", max_attempts=max_attempts, attempt=None, reason=None, step_id=None, original_plan_step_id=None)
+        yield StatusUpdateEvent(type=EventType.STATUS_UPDATE, status=StatusType.STARTING_ATTEMPTS, agent_type=AgentType.SUMMARIZATION, message=f"Attempting summarization (max {max_attempts} attempts)...", max_attempts=max_attempts, attempt=None, reason=None, step_id=None, original_plan_step_id=None, **event_common)
 
         for attempt in range(max_attempts):
             current_attempt = attempt + 1
             summarization_agent_logger.info(f"Summarization Attempt {current_attempt}/{max_attempts}")
             # Yield StatusUpdateEvent
-            yield StatusUpdateEvent(status=StatusType.ATTEMPT_START, agent_type=AgentType.SUMMARIZATION, attempt=current_attempt, max_attempts=max_attempts, reason=None, step_id=None, original_plan_step_id=None, message=f"Starting attempt {current_attempt}")
+            yield StatusUpdateEvent(type=EventType.STATUS_UPDATE, status=StatusType.ATTEMPT_START, agent_type=AgentType.SUMMARIZATION, attempt=current_attempt, max_attempts=max_attempts, reason=None, step_id=None, original_plan_step_id=None, message=f"Starting attempt {current_attempt}", **event_common)
 
             try:
                 summarization_agent_logger.info(f"Running agent with prompt: {input_prompt[:200]}...")
@@ -132,7 +136,7 @@ class SummarizationAgent:
                     final_result_data.query = query_description 
                     summarization_agent_logger.info(f"Successfully processed result on attempt {current_attempt}.")
                     # Use SummaryUpdateEvent for success
-                    yield SummaryUpdateEvent(update_info={"message": f"Processing successful on attempt {current_attempt}"})
+                    yield SummaryUpdateEvent({"message": f"Processing successful on attempt {current_attempt}"}, **event_common)  # type: ignore[arg-type]
                     yield final_result_data
                     return # Success
                 elif run_result and hasattr(run_result, 'data'):
@@ -144,20 +148,20 @@ class SummarizationAgent:
                         error=None
                     )
                     # Use SummaryUpdateEvent for success
-                    yield SummaryUpdateEvent(update_info={"message": f"Processing successful (fallback) on attempt {current_attempt}"})
+                    yield SummaryUpdateEvent({"message": f"Processing successful (fallback) on attempt {current_attempt}"}, **event_common)  # type: ignore[arg-type]
                     yield final_result_data
                     return # Success with fallback
                 else:
                     summarization_agent_logger.error(f"Agent run attempt {current_attempt} produced invalid result: {run_result}")
                     last_error = f"Agent run produced invalid result type: {type(run_result)}"
                     # Use SummaryUpdateEvent for error
-                    yield SummaryUpdateEvent(update_info={"error": last_error, "attempt": current_attempt})
+                    yield SummaryUpdateEvent({"error": last_error, "attempt": current_attempt}, **event_common)  # type: ignore[arg-type]
 
             except UnexpectedModelBehavior as e:
                 error_str = f"Unexpected model behavior: {str(e)}"
                 summarization_agent_logger.error(f"UnexpectedModelBehavior during summarization attempt {current_attempt}: {e}", exc_info=True)
                 # Use SummaryUpdateEvent for error
-                yield SummaryUpdateEvent(update_info={"error": error_str, "attempt": current_attempt})
+                yield SummaryUpdateEvent({"error": error_str, "attempt": current_attempt}, **event_common)  # type: ignore[arg-type]
                 last_error = f"Summarization failed due to unexpected model behavior: {str(e)}"
                 # Potentially break if it's a model issue unlikely to resolve on retry
                 # break 
@@ -166,14 +170,14 @@ class SummarizationAgent:
                 error_str = f"General error: {str(e)}"
                 summarization_agent_logger.error(f"General error during summarization attempt {current_attempt}: {e}", exc_info=True)
                 # Use SummaryUpdateEvent for error
-                yield SummaryUpdateEvent(update_info={"error": error_str, "attempt": current_attempt})
+                yield SummaryUpdateEvent({"error": error_str, "attempt": current_attempt}, **event_common)  # type: ignore[arg-type]
                 last_error = f"Summarization failed unexpectedly: {str(e)}"
                 # break # Probably break on general errors
 
             # If loop continues (error occurred and didn't return/break), prepare for next attempt or final failure
             if attempt < max_attempts - 1:
                  # Yield StatusUpdateEvent
-                 yield StatusUpdateEvent(status=StatusType.RETRYING, agent_type=AgentType.SUMMARIZATION, attempt=current_attempt, reason=last_error or "unknown", max_attempts=max_attempts, step_id=None, original_plan_step_id=None, message=f"Retrying after error on attempt {current_attempt}")
+                 yield StatusUpdateEvent(type=EventType.STATUS_UPDATE, status=StatusType.RETRYING, agent_type=AgentType.SUMMARIZATION, attempt=current_attempt, reason=last_error or "unknown", max_attempts=max_attempts, step_id=None, original_plan_step_id=None, message=f"Retrying after error on attempt {current_attempt}", **event_common)
             else:
                  summarization_agent_logger.error(f"Summarization failed after {max_attempts} attempts.")
                  break # Exit loop after final attempt failure
@@ -183,7 +187,7 @@ class SummarizationAgent:
             final_error_msg = f"Summarization failed after {max_attempts} attempts. Last error: {last_error or 'Unknown failure'}"
             summarization_agent_logger.error(final_error_msg)
             # Yield StatusUpdateEvent with error
-            yield StatusUpdateEvent(status=StatusType.FINISHED_ERROR, agent_type=AgentType.SUMMARIZATION, message=final_error_msg, attempt=current_attempt, max_attempts=max_attempts, reason=last_error or 'Unknown failure', step_id=None, original_plan_step_id=None)
+            yield StatusUpdateEvent(type=EventType.STATUS_UPDATE, status=StatusType.FINISHED_ERROR, agent_type=AgentType.SUMMARIZATION, message=final_error_msg, attempt=current_attempt, max_attempts=max_attempts, reason=last_error or 'Unknown failure', step_id=None, original_plan_step_id=None, **event_common)
             yield SummarizationQueryResult(query=query_description, data="", error=final_error_msg)
 
 # Example usage (for testing, might be removed later)

@@ -18,6 +18,8 @@ from backend.core.file_utils import stage_file_content # Added
 from pydantic_ai.models.openai import OpenAIModel
 from backend.core.cell import CellType, CellStatus # Added CellStatus
 from backend.core.query_result import QueryResult, InvestigationReport # Added InvestigationReport
+from backend.services.notebook_manager import NotebookManager # Added import
+from sqlalchemy.ext.asyncio import AsyncSession # Added import
 
 # Tool/Service Imports
 from backend.ai.chat_tools import NotebookCellTools
@@ -45,11 +47,13 @@ class StepProcessor:
         self,
         notebook_id: str, 
         model: OpenAIModel,
-        connection_manager: ConnectionManager
+        connection_manager: ConnectionManager,
+        notebook_manager: Optional[NotebookManager] = None # Added notebook_manager
     ):
         self.notebook_id = notebook_id
         self.model = model
         self.connection_manager = connection_manager
+        self.notebook_manager = notebook_manager # Store notebook_manager
         self.cell_creator = CellCreator(notebook_id, connection_manager)
         
         # Initialize step agent registry
@@ -65,7 +69,8 @@ class StepProcessor:
             elif step_type == StepType.FILESYSTEM:
                 self._step_agents[step_type] = FileSystemStepAgent(self.notebook_id)
             elif step_type == StepType.PYTHON:
-                self._step_agents[step_type] = PythonStepAgent(self.notebook_id)
+                # Pass notebook_manager to PythonStepAgent
+                self._step_agents[step_type] = PythonStepAgent(self.notebook_id, notebook_manager=self.notebook_manager)
             elif step_type == StepType.INVESTIGATION_REPORT:
                 self._step_agents[step_type] = ReportStepAgent(self.notebook_id)
             else:
@@ -105,7 +110,12 @@ class StepProcessor:
                 
                 default_original_filename = f"staged_from_content_{dep_id}_output_{output_idx}.dat"
 
-                if isinstance(output_item, str) and len(output_item) > 10 and ('\\n' in output_item or ',' in output_item or output_item.startswith("Traceback")):
+                if isinstance(output_item, str) and len(output_item) > 10 and ('\n' in output_item or ',' in output_item or output_item.startswith("Traceback")):
+                    # This case implies output_item is likely direct file content (or large text).
+                    # If the FileSystemAgent.ToolSuccessEvent.tool_result for read_file is now a dict,
+                    # this branch will be less likely hit for read_file results.
+                    # If it *is* hit, and it's from a read_file that somehow didn't get structured,
+                    # it would use this string content. This is the old problematic path if content is truncated.
                     content = output_item
                     original_filename = default_original_filename
                 elif isinstance(output_item, list) and all(isinstance(p, str) and p.startswith('/') for p in output_item):
@@ -116,12 +126,30 @@ class StepProcessor:
                          ai_logger.info(f"Empty list from search_files for dep {dep_id}, output {output_idx}")
                          continue
                 elif isinstance(output_item, dict):
-                    if 'content' in output_item and isinstance(output_item['content'], str):
-                         content = output_item['content']
+                    # Check if this is a structured result from our modified FileSystemAgent for 'read_file'
+                    if output_item.get("tool_name") == "read_file" and "path" in output_item:
+                        fsmcp_path = output_item["path"]
+                        original_filename = os.path.basename(fsmcp_path) if fsmcp_path else default_original_filename
+                        # Crucially, ensure content is None to trigger the re-fetch logic below using fsmcp_path
+                        content = None 
+                        ai_logger.info(f"Identified structured 'read_file' result for {fsmcp_path}. Will re-fetch full content.")
+                    elif 'content' in output_item and isinstance(output_item['content'], str):
+                         # This handles other tools that might return content directly in a dict,
+                         # or our FileSystemAgent's 'content_preview' if the above 'read_file' check wasn't met.
+                         # If it's 'content_preview', it's truncated, but re-fetch should be preferred.
+                         content = output_item['content'] # This might be a preview.
                          original_filename = output_item.get('original_filename') or \
                                            (os.path.basename(output_item['path']) if output_item.get('path') and isinstance(output_item.get('path'), str) else None) or \
                                            default_original_filename
+                         # If we got here with a 'read_file' tool's preview, fsmcp_path might not be set yet.
+                         # Try to get it if available, to allow re-fetch to take precedence if content is just a preview.
+                         if output_item.get("tool_name") == "read_file" and output_item.get("path"):
+                             fsmcp_path = output_item.get("path")
+                             ai_logger.info(f"Found path {fsmcp_path} for read_file output that also had direct content/preview. Will prioritize re-fetching.")
+                             content = None # Force re-fetch
+
                     elif 'path' in output_item and isinstance(output_item['path'], str) and output_item['path'].startswith('/'):
+                         # This handles dicts that primarily provide a path (e.g., from search_files if it returned dicts)
                          fsmcp_path = output_item['path']
                          original_filename = output_item.get('original_filename') or \
                                            (os.path.basename(fsmcp_path) if fsmcp_path else None) or \
@@ -130,6 +158,7 @@ class StepProcessor:
                         ai_logger.warning(f"Unsupported dict structure in FS output for dep {dep_id}, output {output_idx}: {str(output_item)[:200]}")
                         continue
                 elif isinstance(output_item, str) and output_item.startswith('/'):
+                    # Handles if output_item is just a path string (e.g. from search_files)
                     fsmcp_path = output_item
                     original_filename = os.path.basename(fsmcp_path) if fsmcp_path else default_original_filename
                 else:
@@ -201,7 +230,8 @@ class StepProcessor:
         step_results: Dict[str, StepResult], # Changed Any to StepResult
         plan_step_id_to_cell_ids: Dict[str, List[UUID]],
         cell_tools: NotebookCellTools,
-        session_id: str
+        session_id: str,
+        db: AsyncSession # Added db parameter
     ) -> AsyncGenerator[Union[BaseEvent, StepExecutionCompleteEvent], None]:
         """Process a single investigation step and yield event updates"""
         step_type_value = step.step_type.value if step.step_type else "Unknown"
@@ -267,7 +297,7 @@ class StepProcessor:
             report_error = None
             report_result = None
             
-            generator = step_agent.execute(step, context.get("prompt", ""), session_id, context)
+            generator = step_agent.execute(step, context.get("prompt", ""), session_id, context, db=db)
             async for event in generator:
                 if isinstance(event, BaseEvent):
                     yield event
@@ -373,7 +403,7 @@ class StepProcessor:
                 )
                 return
 
-        generator = step_agent.execute(step, agent_input_data, session_id, context)
+        generator = step_agent.execute(step, agent_input_data, session_id, context, db=db)
         async for event in generator:
             if isinstance(event, StatusUpdateEvent):
                 ai_logger.info(f"Step {step.step_id} yielding StatusUpdateEvent: {event.status} - {event.message}")

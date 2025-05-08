@@ -3,8 +3,10 @@ Agent implementations for different step types.
 """
 
 import logging
-from typing import Any, Dict, AsyncGenerator, Union
+from typing import Any, Dict, AsyncGenerator, Union, Optional
 from abc import ABC, abstractmethod
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIModel
@@ -24,6 +26,7 @@ from backend.ai.python_agent import PythonAgent
 from backend.ai.models import PythonAgentInput, FileDataRef # Added for PythonStepAgent
 from backend.ai.prompts.investigation_prompts import MARKDOWN_GENERATOR_SYSTEM_PROMPT
 from backend.config import get_settings
+from backend.services.notebook_manager import NotebookManager # Added import
 
 ai_logger = logging.getLogger("ai")
 
@@ -38,7 +41,9 @@ class StepAgent(ABC):
                       step: InvestigationStepModel, 
                       agent_input_data: Union[str, PythonAgentInput], # Changed from prompt: str
                       session_id: str, 
-                      context: Dict[str, Any]) -> AsyncGenerator[Union[BaseEvent, Dict[str, Any]], None]:
+                      context: Dict[str, Any],
+                      db: Optional[AsyncSession] = None  # Added db parameter, make it optional for non-Python agents
+                      ) -> AsyncGenerator[Union[BaseEvent, Dict[str, Any]], None]:
         """Execute the step and yield events/results."""
         pass
     
@@ -66,7 +71,9 @@ class MarkdownStepAgent(StepAgent):
                      step: InvestigationStepModel, 
                      agent_input_data: Union[str, PythonAgentInput], # Changed from prompt
                      session_id: str, 
-                     context: Dict[str, Any]) -> AsyncGenerator[Union[BaseEvent, Dict[str, Any]], None]:
+                     context: Dict[str, Any],
+                     db: Optional[AsyncSession] = None # Added db parameter
+                     ) -> AsyncGenerator[Union[BaseEvent, Dict[str, Any]], None]:
         """Generate markdown content for the step"""
         if not isinstance(agent_input_data, str):
             # This case should ideally not happen for MarkdownStepAgent
@@ -111,7 +118,9 @@ class GitHubStepAgent(StepAgent):
                      step: InvestigationStepModel, 
                      agent_input_data: Union[str, PythonAgentInput], # Changed from prompt
                      session_id: str, 
-                     context: Dict[str, Any]) -> AsyncGenerator[Union[BaseEvent, Dict[str, Any]], None]:
+                     context: Dict[str, Any],
+                     db: Optional[AsyncSession] = None # Added db parameter
+                     ) -> AsyncGenerator[Union[BaseEvent, Dict[str, Any]], None]:
         """Execute a GitHub query step"""
         if not isinstance(agent_input_data, str):
             raise TypeError(f"GitHubStepAgent expects a string prompt, got {type(agent_input_data)}")
@@ -125,20 +134,20 @@ class GitHubStepAgent(StepAgent):
         ai_logger.info(f"Processing GitHub step {step.step_id} using run_query generator...")
         
         # Forward events from the GitHub agent
-        async for event_data in self.github_generator.run_query(
+        async for event in self.github_generator.run_query(
             prompt,
             session_id=session_id,
             notebook_id=self.notebook_id
         ):
             # Forward specific event types
-            if isinstance(event_data, (StatusUpdateEvent, ToolSuccessEvent, ToolErrorEvent)):
-                yield event_data
-            elif isinstance(event_data, FinalStatusEvent):
-                ai_logger.info(f"GitHub query finished for step {step.step_id} with status: {event_data.status}")
-            elif isinstance(event_data, BaseEvent):
-                ai_logger.warning(f"Unexpected BaseEvent type {type(event_data)} from GitHub agent: {event_data!r}")
+            if isinstance(event, (StatusUpdateEvent, ToolSuccessEvent, ToolErrorEvent)):
+                yield event
+            elif isinstance(event, FinalStatusEvent):
+                ai_logger.info(f"GitHub query finished for step {step.step_id} with status: {event.status}")
+            elif isinstance(event, BaseEvent):
+                ai_logger.warning(f"Unexpected BaseEvent type {type(event)} from GitHub agent: {event!r}")
             else:
-                ai_logger.warning(f"Unexpected non-BaseEvent type {type(event_data)} from GitHub agent: {event_data!r}")
+                ai_logger.warning(f"Unexpected non-BaseEvent type {type(event)} from GitHub agent: {event!r}")
         
         # Signal completion of this step
         yield GitHubStepProcessingCompleteEvent(
@@ -161,7 +170,9 @@ class FileSystemStepAgent(StepAgent):
                      step: InvestigationStepModel, 
                      agent_input_data: Union[str, PythonAgentInput], # Changed from prompt
                      session_id: str, 
-                     context: Dict[str, Any]) -> AsyncGenerator[Union[BaseEvent, Dict[str, Any]], None]:
+                     context: Dict[str, Any],
+                     db: Optional[AsyncSession] = None # Added db parameter
+                     ) -> AsyncGenerator[Union[BaseEvent, Dict[str, Any]], None]:
         """Execute a filesystem query step"""
         if not isinstance(agent_input_data, str):
             raise TypeError(f"FileSystemStepAgent expects a string prompt, got {type(agent_input_data)}")
@@ -175,20 +186,20 @@ class FileSystemStepAgent(StepAgent):
         ai_logger.info(f"Processing Filesystem step {step.step_id} using run_query generator...")
         
         # Forward events from the filesystem agent
-        async for event_data in self.filesystem_generator.run_query(
+        async for event in self.filesystem_generator.run_query(
             prompt,
             session_id=session_id,
             notebook_id=self.notebook_id
         ):
             # Forward relevant events
-            if isinstance(event_data, (ToolSuccessEvent, ToolErrorEvent, StatusUpdateEvent)):
-                yield event_data
-            elif isinstance(event_data, FinalStatusEvent):
-                ai_logger.info(f"FileSystem query finished for step {step.step_id} with status: {event_data.status}")
-            elif isinstance(event_data, BaseEvent):
-                ai_logger.warning(f"Unexpected BaseEvent type {type(event_data)} from Filesystem agent: {event_data!r}")
+            if isinstance(event, (ToolSuccessEvent, ToolErrorEvent, StatusUpdateEvent)):
+                yield event
+            elif isinstance(event, FinalStatusEvent):
+                ai_logger.info(f"FileSystem query finished for step {step.step_id} with status: {event.status}")
+            elif isinstance(event, BaseEvent):
+                ai_logger.warning(f"Unexpected BaseEvent type {type(event)} from Filesystem agent: {event!r}")
             else:
-                ai_logger.warning(f"Unexpected non-BaseEvent type {type(event_data)} from Filesystem agent: {event_data!r}")
+                ai_logger.warning(f"Unexpected non-BaseEvent type {type(event)} from Filesystem agent: {event!r}")
         
         # Signal completion of this step
         yield FileSystemStepProcessingCompleteEvent(
@@ -200,9 +211,10 @@ class FileSystemStepAgent(StepAgent):
 
 class PythonStepAgent(StepAgent):
     """Agent for executing Python steps"""
-    def __init__(self, notebook_id: str):
+    def __init__(self, notebook_id: str, notebook_manager: Optional[NotebookManager] = None):
         super().__init__(notebook_id)
-        self.python_generator = None  # Lazily initialized
+        self.python_generator: Optional[PythonAgent] = None  # Lazily initialized
+        self.notebook_manager = notebook_manager # Store notebook_manager
     
     def get_agent_type(self) -> AgentType:
         return AgentType.PYTHON
@@ -211,7 +223,9 @@ class PythonStepAgent(StepAgent):
                      step: InvestigationStepModel, 
                      agent_input_data: Union[str, PythonAgentInput], # Changed parameter name
                      session_id: str, # session_id is available here but PythonAgent.run_query might not need it if it's in agent_input_data
-                     context: Dict[str, Any]) -> AsyncGenerator[Union[BaseEvent, Dict[str, Any]], None]:
+                     context: Dict[str, Any],
+                     db: Optional[AsyncSession] = None # Added db parameter, used by PythonAgent
+                     ) -> AsyncGenerator[Union[BaseEvent, Dict[str, Any]], None]:
         """Execute a Python query step"""
         if not isinstance(agent_input_data, PythonAgentInput):
             # This case should ideally not happen if step_processor correctly sets agent_input_data
@@ -220,22 +234,23 @@ class PythonStepAgent(StepAgent):
         # Lazy initialization
         if self.python_generator is None:
             ai_logger.info("Lazily initializing PythonAgent for Python steps.")
-            self.python_generator = PythonAgent(notebook_id=self.notebook_id) # notebook_id is from self
+            self.python_generator = PythonAgent(notebook_id=self.notebook_id, notebook_manager=self.notebook_manager)
         
         ai_logger.info(f"Processing Python step {step.step_id} using run_query generator...")
         
         # Forward events from the Python agent
         # PythonAgent.run_query should expect PythonAgentInput which contains notebook_id and session_id
-        async for event_data in self.python_generator.run_query(agent_input=agent_input_data):
+        # Also pass db session to PythonAgent.run_query
+        async for event in self.python_generator.run_query(agent_input=agent_input_data, db=db):
             # Forward relevant events
-            if isinstance(event_data, (ToolSuccessEvent, ToolErrorEvent, StatusUpdateEvent, FatalErrorEvent)):
-                yield event_data
-            elif isinstance(event_data, FinalStatusEvent):
-                ai_logger.info(f"Python query finished for step {step.step_id} with status: {event_data.status}")
-            elif isinstance(event_data, BaseEvent):
-                ai_logger.warning(f"Unexpected BaseEvent type {type(event_data)} from Python agent: {event_data!r}")
+            if isinstance(event, (ToolSuccessEvent, ToolErrorEvent, StatusUpdateEvent, FatalErrorEvent)):
+                yield event
+            elif isinstance(event, FinalStatusEvent):
+                ai_logger.info(f"Python query finished for step {step.step_id} with status: {event.status}")
+            elif isinstance(event, BaseEvent):
+                ai_logger.warning(f"Unexpected BaseEvent type {type(event)} from Python agent: {event!r}")
             else:
-                ai_logger.warning(f"Unexpected non-BaseEvent type {type(event_data)} from Python agent: {event_data!r}")
+                ai_logger.warning(f"Unexpected non-BaseEvent type {type(event)} from Python agent: {event!r}")
         
         # Signal completion of this step
         yield PythonStepProcessingCompleteEvent( # Corrected event
@@ -258,7 +273,9 @@ class ReportStepAgent(StepAgent):
                      step: InvestigationStepModel, 
                      agent_input_data: Union[str, PythonAgentInput], # Changed from prompt
                      session_id: str, 
-                     context: Dict[str, Any]) -> AsyncGenerator[Union[BaseEvent, Dict[str, Any]], None]:
+                     context: Dict[str, Any],
+                     db: Optional[AsyncSession] = None # Added db parameter
+                     ) -> AsyncGenerator[Union[BaseEvent, Dict[str, Any]], None]:
         """Generate an investigation report"""
         if not isinstance(agent_input_data, str):
             raise TypeError(f"ReportStepAgent expects a string prompt, got {type(agent_input_data)}")

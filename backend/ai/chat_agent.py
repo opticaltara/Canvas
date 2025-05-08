@@ -57,7 +57,8 @@ from backend.ai.events import (
     PythonToolCellCreatedEvent
 )
 from backend.ai.models import SafeOpenAIModel # Import the custom model
-from backend.ai.utils import _truncate_output, TOOL_RESULT_MAX_CHARS as DEFAULT_TRUNCATE_LIMIT # Import from utils
+from backend.ai.utils.context_utils import _truncate_output, TOOL_RESULT_MAX_CHARS as DEFAULT_TRUNCATE_LIMIT # Import from utils
+from backend.core.cell import CellStatus # Added import for CellStatus enum
 
 # Initialize logger
 chat_agent_logger = logging.getLogger("ai.chat_agent")
@@ -273,8 +274,19 @@ class ChatAgentService:
         # Setup Clarification Agent (chat_agent)
         system_prompt = self._generate_system_prompt() # Uses fetched tool info
         chat_agent_logger.info(f"System prompt generated for chat agent (notebook: {self.notebook_id}).")
+
+        # -----------------------------------------------------------
+        # Attach notebook retrieval tools (list_cells / get_cell)
+        # -----------------------------------------------------------
+        try:
+            from backend.ai.notebook_context_tools import create_notebook_context_tools
+            notebook_tools = create_notebook_context_tools(self.notebook_id, self.notebook_manager)
+        except Exception as tool_err:
+            chat_agent_logger.error("Failed to create notebook context tools for chat_agent: %s", tool_err, exc_info=True)
+            notebook_tools = []
+
         self.chat_agent = Agent(
-            model=SafeOpenAIModel( # Use the SafeOpenAIModel
+            model=SafeOpenAIModel(  # Use the SafeOpenAIModel
                 self.settings.ai_model,
                 provider=OpenAIProvider(
                     base_url='https://openrouter.ai/api/v1',
@@ -282,7 +294,8 @@ class ChatAgentService:
                 ),
             ),
             system_prompt=system_prompt,
-            result_type=ClarificationResult
+            result_type=ClarificationResult,
+            tools=notebook_tools,  # type: ignore[arg-type]
         )
 
         # Setup Investigation Agent (ai_agent)
@@ -359,142 +372,18 @@ class ChatAgentService:
         ts_str = cell_data.get(field)
         if ts_str:
             try:
-                return datetime.fromisoformat(ts_str)
+                # Handle 'Z' suffix for UTC explicitly
+                if ts_str.endswith('Z'):
+                    ts_str = ts_str[:-1] + '+00:00'
+                dt = datetime.fromisoformat(ts_str)
+                # If datetime is naive, assume UTC
+                if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+                    return dt.replace(tzinfo=timezone.utc)
+                return dt
             except ValueError:
+                chat_agent_logger.warning(f"Could not parse timestamp: '{ts_str}' in _get_timestamp. Using min datetime.")
                 return datetime.min.replace(tzinfo=timezone.utc) # Fallback for bad format
         return datetime.min.replace(tzinfo=timezone.utc) # Fallback for missing
-
-    async def _prepare_notebook_context(self, notebook_id_str: str, current_query: str) -> str:
-        """
-        Fetches relevant cells from the notebook, summarizes them, 
-        and formats them into a string for the planner's prompt.
-        """
-        if not self.cell_tools:
-            chat_agent_logger.warning("Cell tools not available in _prepare_notebook_context. Returning empty context.")
-            return ""
-
-        try:
-            list_params = ListCellsParams(notebook_id=notebook_id_str)
-            cells_result = await self.cell_tools.list_cells(params=list_params)
-
-            if not cells_result.get("success") or not cells_result.get("cells"):
-                # Check if success is True but cells is empty - this means list_cells worked but found nothing
-                if cells_result.get("success") and not cells_result.get("cells"):
-                    chat_agent_logger.info(f"Notebook {notebook_id_str} contains no cells. Returning empty context.")
-                    return "" # Return empty string instead of message
-                # Otherwise, list_cells actually failed
-                chat_agent_logger.warning(f"Failed to list cells for notebook {notebook_id_str}. Error: {cells_result.get('error')}. Returning empty context.")
-                return "" # Return empty string instead of error message
-
-            all_cells: List[Dict[str, Any]] = cells_result["cells"]
-            
-            # --- Keyword Extraction from current_query ---
-            query_words = set()
-            entities_in_query = set(re.findall(r"`([^`]+)`", current_query.lower()))
-            cleaned_query = re.sub(r"`[^`]+`", "", current_query.lower())
-            words = re.findall(r'\b\w+\b', cleaned_query)
-            query_words.update([word for word in words if word not in STOP_WORDS and len(word) > 1])
-            query_keywords = query_words.union(entities_in_query)
-            chat_agent_logger.debug(f"Query keywords for context relevance: {query_keywords}")
-
-            # --- Relevance Scoring and Selection ---
-            scored_cells = []
-            for cell_data in all_cells:
-                score = 0
-                # Recency will be used as a tie-breaker after scoring
-
-                cell_type_str = cell_data.get('cell_type', '')
-                if any(kw in query_keywords for kw in ["python", "code", "script", "analyze", "dataframe", "df", "plot"]):
-                    if cell_type_str == "python": score += 50
-                if any(kw in query_keywords for kw in ["markdown", "summary", "text", "report"]):
-                    if cell_type_str == "markdown": score += 30
-                
-                content_snippet_str = str(cell_data.get('content', '')).lower()
-                output_data = cell_data.get('output')
-                output_snippet_str = ""
-                if output_data and output_data.get('content') is not None:
-                    output_snippet_str = str(output_data.get('content')).lower()
-                elif output_data and output_data.get('error') is not None:
-                    output_snippet_str = str(output_data.get('error')).lower()
-
-                for kw in query_keywords:
-                    if kw in content_snippet_str: score += 10
-                    if kw in output_snippet_str: score += 10
-                    if kw in entities_in_query and (kw in content_snippet_str or kw in output_snippet_str):
-                        score += 20 
-
-                scored_cells.append({"data": cell_data, "score": score, "original_updated_at": self._get_timestamp(cell_data, 'updated_at')})
-
-            scored_cells.sort(key=lambda c: (c["score"], c["original_updated_at"]), reverse=True)
-            
-            MAX_CONTEXT_CELLS = 5 
-            relevant_cells_data = [cell["data"] for cell in scored_cells[:MAX_CONTEXT_CELLS]]
-            
-            if not relevant_cells_data:
-                return "No relevant cells found in the notebook based on the query."
-
-            # --- Summarization and Formatting ---
-            # Use a specific limit for context summaries, overriding the default from utils if needed
-            CONTEXT_SUMMARY_TRUNCATE_LIMIT = 500
-            context_lines = [f"--- Existing Notebook Context (Top {len(relevant_cells_data)} Relevant Cells based on Query) ---"]
-            for i, cell_data in enumerate(relevant_cells_data):
-                cell_id = cell_data.get('id', 'unknown_id')
-                cell_type = cell_data.get('cell_type', 'unknown_type')
-                status = cell_data.get('status', 'unknown_status')
-                
-                # Truncate content, but DO NOT replace newline characters for the prompt string yet
-                content_snippet = _truncate_output(cell_data.get('content', ''), limit=CONTEXT_SUMMARY_TRUNCATE_LIMIT)
-                # Replace newlines only when constructing the final f-string line
-                content_for_prompt_line = content_snippet.replace('\n', '\\n')
-                
-                output_summary = "No output."
-                cell_output_data = cell_data.get('output')
-                if cell_output_data:
-                    if cell_output_data.get('error'):
-                        output_summary = f"Error: {_truncate_output(cell_output_data.get('error'), limit=CONTEXT_SUMMARY_TRUNCATE_LIMIT)}"
-                    elif cell_output_data.get('content') is not None: 
-                        raw_output_content = cell_output_data.get('content')
-                        
-                        if cell_data.get('cell_type') == 'python' and isinstance(raw_output_content, str):
-                            df_match = re.search(r"--- DataFrame ---(.*?)--- End DataFrame ---", raw_output_content, re.DOTALL)
-                            plot_match = re.search(r"<PLOT_BASE64>(.*?)</PLOT_BASE64>", raw_output_content)
-                            json_match = re.search(r"<JSON_OUTPUT>(.*?)</JSON_OUTPUT>", raw_output_content, re.DOTALL)
-
-                            if df_match:
-                                output_summary = f"Python Output: DataFrame displayed (first few rows): {_truncate_output(df_match.group(1).strip(), limit=CONTEXT_SUMMARY_TRUNCATE_LIMIT)}"
-                            elif plot_match:
-                                output_summary = "Python Output: Plot generated (BASE64 content not shown in context)."
-                            elif json_match:
-                                output_summary = f"Python Output: JSON data provided: {_truncate_output(json_match.group(1).strip(), limit=CONTEXT_SUMMARY_TRUNCATE_LIMIT)}"
-                            # This elif for list was specific to a direct list output, might be less common for python string output of a list
-                            # else if isinstance(raw_output_content, list): 
-                            #    joined_raw_output = '\n'.join(raw_output_content) 
-                            #    output_summary = f"Python Output: {_truncate_output(joined_raw_output, limit=CONTEXT_SUMMARY_TRUNCATE_LIMIT)}"
-                            else: 
-                                output_summary = f"Python Output: {_truncate_output(str(raw_output_content), limit=CONTEXT_SUMMARY_TRUNCATE_LIMIT)}"
-                        elif isinstance(raw_output_content, list):
-                            joined_raw_output = '\n'.join(raw_output_content)
-                            output_summary = f"Output: {_truncate_output(joined_raw_output, limit=CONTEXT_SUMMARY_TRUNCATE_LIMIT)}"
-                        elif isinstance(raw_output_content, dict):
-                             output_summary = f"Output (structured): {_truncate_output(json.dumps(raw_output_content), limit=CONTEXT_SUMMARY_TRUNCATE_LIMIT)}"
-                        else:
-                            output_summary = f"Output: {_truncate_output(str(raw_output_content), limit=CONTEXT_SUMMARY_TRUNCATE_LIMIT)}"
-
-                # Replace newlines only when constructing the final f-string line
-                output_for_prompt_line = output_summary.replace('\n', '\\n')
-
-                context_lines.append(
-                    f"[Cell {i+1} - ID: {cell_id[:8]} - Type: {cell_type} - Status: {status}]\\n"
-                    f"  Content: {content_for_prompt_line}\\n"
-                    f"  Output: {output_for_prompt_line}"
-                )
-            
-            context_lines.append("--- End of Existing Notebook Context ---")
-            return "\n".join(context_lines)
-
-        except Exception as e:
-            chat_agent_logger.error(f"Error preparing notebook context for {notebook_id_str}: {e}", exc_info=True)
-            return "" # Also return empty string for unexpected errors
 
     async def handle_message(
         self,
@@ -618,9 +507,9 @@ class ChatAgentService:
                  log_msg = f"Proceeding to investigation for session {session_id} (Clarification not needed)."
             chat_agent_logger.info(log_msg)
         
-            # Prepare notebook context
-            notebook_context_summary = await self._prepare_notebook_context(self.notebook_id, prompt)
-            chat_agent_logger.info(f"Prepared notebook context for planner:\\n{notebook_context_summary}")
+            # Notebook context summary no longer pre-computed; agents can call
+            # list_cells/get_cell tools on demand.  Pass None to investigate.
+            notebook_context_summary = None
 
             async for event in self.ai_agent.investigate(
                 prompt, # Pass the potentially context-enhanced prompt
@@ -628,7 +517,7 @@ class ChatAgentService:
                 notebook_id=self.notebook_id,
                 message_history=message_history, # Pass history including the user's latest message
                 cell_tools=self.cell_tools,
-                notebook_context_summary=notebook_context_summary # New argument
+                notebook_context_summary=notebook_context_summary  # remains None
             ):
                 # Now expect event model instances directly
                 event_type_enum = getattr(event, 'type', None)
@@ -664,26 +553,13 @@ class ChatAgentService:
                             agent_type=agent_type_str,
                             result=result_dict
                         )
-                    case StepErrorEvent(cell_id=cid, cell_params=cp, status=st, result=r, error=err):
-                        chat_agent_logger.info(f"Creating CellResponsePart for {event_type_str}")
-                        
-                        if r is not None:
-                            result_dict = r.model_dump() if isinstance(r, BaseModel) else {"content": str(r)}
-                        else:
-                            result_dict = {}
- 
-                        if err is not None:
-                            if isinstance(result_dict, dict): 
-                                result_dict['error'] = err
-                            else:
-                                result_dict = {"original_result": result_dict, "error": err}
- 
-                        response_part = CellResponsePart(
-                            cell_id=str(cid) if cid else "",
-                            cell_params=cp or {},
-                            status_type=st.value,
-                            agent_type=agent_type_str,
-                            result=result_dict
+                    case StepErrorEvent(step_id=event_step_id, agent_type=event_agent_type, error=event_error, session_id=event_session_id, notebook_id=event_notebook_id):
+                        # session_id and notebook_id are captured for potential logging or future use, though not directly in this StatusResponsePart
+                        chat_agent_logger.info(f"Creating StatusResponsePart for StepErrorEvent (Step: {event_step_id}, Session: {event_session_id}, Notebook: {event_notebook_id})")
+                        error_message = f"Error in step {event_step_id} ({event_agent_type.value if event_agent_type else 'Unknown Agent'}): {event_error}"
+                        response_part = StatusResponsePart(
+                            content=error_message, 
+                            agent_type=event_agent_type.value if event_agent_type else AgentType.UNKNOWN.value
                         )
                     case GitHubToolCellCreatedEvent(cell_id=cid, cell_params=cp, status=st, result=r, tool_name=tn):
                         chat_agent_logger.info(f"Creating CellResponsePart for {event_type_str}")

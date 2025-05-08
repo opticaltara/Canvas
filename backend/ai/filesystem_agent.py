@@ -37,7 +37,7 @@ from backend.ai.events import (
 )
 from backend.services.connection_manager import get_connection_manager
 from backend.services.connection_handlers.registry import get_handler
-from backend.ai.utils import _truncate_output, TOOL_RESULT_MAX_CHARS as DEFAULT_TRUNCATE_LIMIT # Import from utils
+from backend.ai.utils.context_utils import _truncate_output, TOOL_RESULT_MAX_CHARS as DEFAULT_TRUNCATE_LIMIT
 
 # Updated logger name
 filesystem_agent_logger = logging.getLogger("ai.filesystem_agent")
@@ -360,6 +360,33 @@ class FileSystemAgent:
                                                         # when it constructs the ToolMessage to send to the LLM.
                                                         event.result.content = truncated_content_for_llm
                                                         
+                                                        app_event_tool_result: Any
+                                                        tool_name_from_call = call_info["tool_name"]
+                                                        tool_args_from_call = call_info["tool_args"]
+
+                                                        if tool_name_from_call == "read_file":
+                                                            path_arg = tool_args_from_call.get("path") if isinstance(tool_args_from_call, dict) else None
+                                                            if path_arg:
+                                                                app_event_tool_result = {
+                                                                    "tool_name": "read_file",
+                                                                    "path": path_arg,
+                                                                    "content_preview": truncated_content_for_llm, # Pass truncated as preview for our event
+                                                                                                                # original_tool_content (full) is NOT included here to keep event small
+                                                                }
+                                                                filesystem_agent_logger.info(f"Prepared structured result for read_file: {path_arg}")
+                                                            else:
+                                                                filesystem_agent_logger.warning(f"read_file tool call missing 'path' in args: {tool_args_from_call}. Falling back to sending (potentially truncated) content preview as result.")
+                                                                app_event_tool_result = truncated_content_for_llm # Fallback, less ideal
+                                                        elif tool_name_from_call == "search_files":
+                                                            # search_files usually returns a list of paths or structured data (original_tool_content).
+                                                            # This data is typically not large raw file content, so passing it as is in our event is fine.
+                                                            app_event_tool_result = original_tool_content
+                                                        else:
+                                                            # For other tools, pass the original, untruncated result from the MCP tool call
+                                                            # into our application's ToolSuccessEvent. The LLM history part (event.result.content)
+                                                            # has already been set to the truncated version if the original_tool_content was a string.
+                                                            app_event_tool_result = original_tool_content
+                                                        
                                                         # Yield a ToolSuccessEvent for our application's event stream.
                                                         # This event should also contain the (potentially) truncated result.
                                                         yield ToolSuccessEvent(
@@ -369,8 +396,8 @@ class FileSystemAgent:
                                                             attempt=attempt_completed,
                                                             tool_call_id=tool_call_id,
                                                             tool_name=call_info["tool_name"],
-                                                            tool_args=tool_arguments, # Use the stored arguments
-                                                            tool_result=truncated_content_for_llm, # Pass the truncated content
+                                                            tool_args=tool_args_from_call, # Use the stored arguments
+                                                            tool_result=app_event_tool_result, # Pass the new structured/original content
                                                             original_plan_step_id=None,
                                                             session_id=session_id,
                                                             notebook_id=notebook_id

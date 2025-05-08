@@ -11,6 +11,9 @@ import json
 import os
 import re # Added for parsing
 import uuid # For unique filenames
+from uuid import UUID # Import UUID
+
+from pydantic import UUID4 # To convert notebook_id string to UUID
 
 from pydantic_ai import Agent, UnexpectedModelBehavior, CallToolsNode
 from pydantic_ai.messages import (
@@ -24,6 +27,10 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.mcp import MCPServerStdio
 # from mcp.shared.exceptions import McpError # Not directly used by PythonAgent for calling other MCPs now
 from mcp import StdioServerParameters
+from backend.core.cell import CellStatus # Added import
+# Potential import if NotebookManager is injected - for type hinting
+from backend.services.notebook_manager import NotebookManager # For type hinting
+from sqlalchemy.ext.asyncio import AsyncSession # Added import
 
 from backend.config import get_settings
 from backend.ai.events import (
@@ -47,7 +54,7 @@ IMPORTED_DATA_BASE_PATH = "data/imported_datasets"
 
 class PythonAgent:
     """Agent for interacting with Python MCP server using stdio."""
-    def __init__(self, notebook_id: str): # notebook_id is now part of PythonAgentInput
+    def __init__(self, notebook_id: str, notebook_manager: Optional[NotebookManager] = None): # Added notebook_manager
         python_agent_logger.info(f"Initializing PythonAgent (notebook_id will be from input)")
         self.settings = get_settings()
         self.model = SafeOpenAIModel(
@@ -57,9 +64,35 @@ class PythonAgent:
                     api_key=self.settings.openrouter_api_key,
                 ),
         )
-        # self.notebook_id = notebook_id # Will be set from PythonAgentInput
         self.agent = None # Will be initialized in run_query
+        self.notebook_manager: Optional[NotebookManager] = notebook_manager # Assign passed manager
         python_agent_logger.info(f"PythonAgent class initialized (model configured, agent instance created per run).")
+
+    async def _fetch_all_cells_data(self, notebook_id: str, db: AsyncSession) -> Optional[List[Dict[str, Any]]]: # db type AsyncSession
+        """Fetches all cell data for a given notebook_id."""
+        # This method assumes self.notebook_manager is available.
+        # It also assumes 'db' (AsyncSession) is passed appropriately or available.
+        if not self.notebook_manager: # Direct check now that it's an attribute
+            python_agent_logger.error("NotebookManager not available in PythonAgent. Cannot fetch cell data.")
+            return None
+        try:
+            notebook_uuid = UUID(notebook_id)
+            python_agent_logger.info(f"Fetching notebook {notebook_uuid} to get all cells data.")
+            # The 'db' session needs to be an AsyncSession instance here
+            notebook = await self.notebook_manager.get_notebook(db, notebook_uuid)
+            if notebook and notebook.cells:
+                cells_data = [cell.model_dump(mode='json') for cell in notebook.cells.values()]
+                python_agent_logger.info(f"Successfully fetched {len(cells_data)} cells for notebook {notebook_id}.")
+                return cells_data
+            else:
+                python_agent_logger.warning(f"Notebook {notebook_id} not found or has no cells.")
+                return None
+        except ValueError: # For invalid UUID string
+            python_agent_logger.error(f"Invalid notebook_id format: {notebook_id}. Cannot fetch cells.", exc_info=True)
+            return None
+        except Exception as e:
+            python_agent_logger.error(f"Error fetching all cells data for notebook {notebook_id}: {e}", exc_info=True)
+            return None
 
     async def _prepare_local_file(
         self, 
@@ -229,26 +262,33 @@ class PythonAgent:
             python_agent_logger.error(f"Error reading system prompt file {prompt_file_path}: {e}", exc_info=True)
             return "You are a helpful AI assistant interacting with a Python execution MCP server."
 
-    def _initialize_agent(self, stdio_server: MCPServerStdio) -> Agent:
-        """Initializes the Pydantic AI Agent with Python specific configuration."""
+    def _initialize_agent(self, stdio_server: MCPServerStdio, extra_tools: Optional[list] = None) -> Agent:
+        """Initializes the Pydantic AI Agent with Python specific configuration.
+
+        The caller can supply *extra_tools* (e.g. `list_cells` / `get_cell`) which
+        will be registered with the underlying Agent instance.
+        """
         system_prompt = self._read_system_prompt()
         agent = Agent(
             self.model,
             mcp_servers=[stdio_server],
             system_prompt=system_prompt,
+            tools=extra_tools or [],  # type: ignore[arg-type]
         )
-        python_agent_logger.info(f"Agent instance created with MCPServerStdio.")
+        python_agent_logger.info("Agent instance created with MCPServerStdio and %d extra tools.", len(extra_tools or []))
         return agent
 
     async def run_query(
         self,
-        agent_input: PythonAgentInput # Signature updated
+        agent_input: PythonAgentInput,
+        db: Optional[AsyncSession] = None  # Added db parameter, make it optional for now
     ) -> AsyncGenerator[Any, None]:
         # Extract necessary fields from agent_input
         notebook_id = agent_input.notebook_id
         session_id = agent_input.session_id
         user_query = agent_input.user_query
-        # data_references are accessed via agent_input.data_references later
+        # all_cells_data, max_context_cells, and context_summary_truncate_limit 
+        # are no longer passed via agent_input.
 
         python_agent_logger.info(f"Running Python query for notebook {notebook_id}, session {session_id}. User query: '{user_query}'")
         
@@ -304,8 +344,16 @@ class PythonAgent:
         )
 
         try:
-            # Initialize the Pydantic AI Agent here, as it's per-run with MCP server
-            self.agent = self._initialize_agent(stdio_server)
+            # Build notebook-aware retrieval tools (list_cells / get_cell)
+            try:
+                from backend.ai.notebook_context_tools import create_notebook_context_tools
+                notebook_tools = create_notebook_context_tools(notebook_id, self.notebook_manager)
+            except Exception as tool_err:
+                python_agent_logger.error("Failed to create notebook context tools: %s", tool_err, exc_info=True)
+                notebook_tools = []
+
+            # Initialize the Pydantic AI Agent here, as it's per-run with MCP server and extra tools
+            self.agent = self._initialize_agent(stdio_server, extra_tools=notebook_tools)
             yield StatusUpdateEvent(
                 type=EventType.STATUS_UPDATE, status=StatusType.AGENT_CREATED, agent_type=AgentType.PYTHON,
                 message="Pydantic AI agent instance created.", notebook_id=notebook_id, session_id=session_id,
@@ -321,7 +369,7 @@ class PythonAgent:
             return
 
         current_time_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S %Z')
-        
+
         data_info_parts = []
         if local_file_paths_map:
             data_info_parts.append("The following datasets have been prepared from previous steps and are available for you to load using their EXACT ABSOLUTE local paths with the `load-csv` tool:")

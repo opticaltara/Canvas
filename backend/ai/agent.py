@@ -109,11 +109,20 @@ class AIAgent:
             available_data_sources_str=available_data_sources_str
         )
 
+        # Build notebook context tools (list_cells & get_cell)
+        try:
+            from backend.ai.notebook_context_tools import create_notebook_context_tools
+            self._notebook_tools = create_notebook_context_tools(self.notebook_id, self.notebook_manager)
+        except Exception as tool_err:
+            ai_logger.error("Failed to create notebook context tools for AIAgent: %s", tool_err, exc_info=True)
+            self._notebook_tools = []
+
         # Initialize the step processor
         self.step_processor = StepProcessor(
             notebook_id=self.notebook_id,
             model=self.model,
-            connection_manager=self.connection_manager
+            connection_manager=self.connection_manager,
+            notebook_manager=self.notebook_manager
         )
 
         # Initialize the investigation planner
@@ -121,7 +130,8 @@ class AIAgent:
             self.model,
             deps_type=InvestigationDependencies,
             output_type=InvestigationPlanModel,
-            system_prompt=formatted_planner_prompt
+            system_prompt=formatted_planner_prompt,
+            tools=self._notebook_tools,  # type: ignore[arg-type]
         )
 
         # Other agents will be initialized on demand
@@ -130,7 +140,8 @@ class AIAgent:
             self.model,
             output_type=str,  # Just using str as output for simplicity
             mcp_servers=list(self.mcp_server_map.values()),
-            system_prompt=MARKDOWN_GENERATOR_SYSTEM_PROMPT
+            system_prompt=MARKDOWN_GENERATOR_SYSTEM_PROMPT,
+            tools=self._notebook_tools,  # type: ignore[arg-type]
         )
         
         ai_logger.info(f"AIAgent initialized for notebook {notebook_id}.")
@@ -225,7 +236,8 @@ class AIAgent:
                     step_results=step_results,
                     plan_step_id_to_cell_ids=plan_step_id_to_cell_ids,
                     cell_tools=cell_tools,
-                    session_id=session_id
+                    session_id=session_id,
+                    db=db
                 ):
                     # Process specific events for AIAgent's internal state first
                     processed_internally = False
@@ -431,7 +443,8 @@ class AIAgent:
                 self.model,
                 deps_type=PlanRevisionRequest,
                 output_type=PlanRevisionResult,
-                system_prompt=PLAN_REVISER_SYSTEM_PROMPT
+                system_prompt=PLAN_REVISER_SYSTEM_PROMPT,
+                tools=self._notebook_tools,  # type: ignore[arg-type]
             )
             
         # Create revision request

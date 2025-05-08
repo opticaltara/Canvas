@@ -35,9 +35,9 @@ Sherlog Canvas now includes a convenient startup script that handles all compone
    cp .env.example .env
    ```
 
-3. Edit the `.env` file to add your Anthropic API key:
+3. Edit the `.env` file to add your OpenRouter API key:
    ```bash
-   ANTHROPIC_API_KEY=your_anthropic_api_key_here
+   OPENROUTER_API_KEY=your_openrouter_api_key_here
    ```
 
 4. Start all services with a single command:
@@ -53,6 +53,149 @@ The start script handles:
 - Starting the backend API server in Docker
 
 All services are managed through Docker Compose for consistency and ease of use.
+
+## Detailed Setup Guide
+
+This guide provides more comprehensive instructions for setting up Sherlog Canvas. You can choose between a Docker-based setup or a manual setup.
+
+### Prerequisites
+
+Before you begin, ensure you have the following installed:
+
+*   **Git**: For cloning the repository.
+*   **Docker and Docker Compose**: (Recommended for an easier setup) For running the application and its dependencies in containers.
+*   **Python 3.9+**: If you choose the manual setup for the backend.
+*   **Node.js 16+**: If you choose the manual setup for the frontend (not covered in this guide, assuming pre-built frontend or separate setup).
+*   **Go 1.18+**: If you plan to build or run Go-based MCP servers manually (e.g., `mcp-grafana`).
+
+### Option 1: Docker-Based Setup (Recommended)
+
+This is the easiest way to get Sherlog Canvas up and running. The `start.sh` script utilizes Docker Compose to manage all services.
+
+1.  **Clone the repository**:
+    ```bash
+    git clone https://github.com/yourusername/sherlog-canvas.git
+    cd sherlog-canvas
+    ```
+
+2.  **Create and configure your environment file**:
+    Copy the example environment file:
+    ```bash
+    cp .env.example .env
+    ```
+    Open the `.env` file and add your `OPENROUTER_API_KEY`. You may also configure other variables as needed (see the [Configuration](#configuration) section).
+    ```env
+    OPENROUTER_API_KEY=your_openrouter_api_key_here
+    SHERLOG_DB_TYPE=sqlite # Default configuration uses SQLite
+    # To use PostgreSQL instead, uncomment and configure the following:
+    # SHERLOG_DB_TYPE=postgresql
+    # POSTGRES_USER=your_db_user
+    # POSTGRES_PASSWORD=your_db_password
+    # POSTGRES_DB=sherlog_canvas_db
+    # DATABASE_URL=postgresql://your_db_user:your_db_password@your_db_host:5432/sherlog_canvas_db
+    ```
+    By default, the Docker setup uses a SQLite database stored in `./data/sherlog.db` (persisted via a Docker volume). If you prefer to use an external PostgreSQL database, set `SHERLOG_DB_TYPE=postgresql` and configure the relevant `DATABASE_URL` or other PostgreSQL variables in your `.env` file.
+
+3.  **Run the startup script**:
+    ```bash
+    ./start.sh
+    ```
+    This script will:
+    *   Build the backend Docker image (if not already built).
+    *   Start the backend API server.
+    *   Start common MCP servers like `mcp-grafana` as defined in `docker-compose.yml`.
+    *   If `SHERLOG_DB_TYPE` is explicitly set to `postgresql` in your `.env` file (and you haven't provided an external `DATABASE_URL`), it will also start a PostgreSQL container and the `pg-mcp` server.
+    *   By default (with `SHERLOG_DB_TYPE=sqlite`), a PostgreSQL container and `pg-mcp` will not be started.
+
+4.  **Access the application**:
+    Open your web browser and navigate to `http://localhost:3000` (or the configured frontend port).
+
+5.  **Stopping the application**:
+    To stop all services, run:
+    ```bash
+    ./stop.sh
+    ```
+    Or, from the `sherlog-canvas` directory:
+    ```bash
+    docker-compose down
+    ```
+
+### Option 2: Manual Backend Setup
+
+If you prefer to run the backend server manually without Docker:
+
+1.  **Clone the repository**:
+    ```bash
+    git clone https://github.com/yourusername/sherlog-canvas.git
+    cd sherlog-canvas
+    ```
+
+2.  **Set up a Python virtual environment**:
+    ```bash
+    python3 -m venv venv
+    source venv/bin/activate  # On Windows: venv\Scripts\activate
+    ```
+
+3.  **Install Python dependencies**:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+4.  **Configure environment variables**:
+    You can set environment variables directly in your shell or create a `.env` file and use a library like `python-dotenv` (though the application loads `.env` by default if present). Essential variables include:
+    *   `OPENROUTER_API_KEY`: Your OpenRouter API key.
+    *   `SHERLOG_DB_TYPE`: Set to `sqlite` (default) or `postgresql`.
+    *   If `SHERLOG_DB_TYPE=sqlite`, `SHERLOG_DB_FILE` specifies the path (default: `./data/sherlog.db`).
+    *   If `SHERLOG_DB_TYPE=postgresql`, ensure `DATABASE_URL` is set (e.g., `postgresql://user:pass@host:port/dbname`).
+    *   Refer to the [Configuration](#configuration) section for more variables.
+
+    Example for `.env` file (defaulting to SQLite):
+    ```env
+    OPENROUTER_API_KEY=your_openrouter_api_key_here
+    SHERLOG_DB_TYPE=sqlite
+    SHERLOG_DB_FILE=./data/sherlog.db
+
+    # Example for PostgreSQL (if you choose to use it):
+    # SHERLOG_DB_TYPE=postgresql
+    # DATABASE_URL=postgresql://sherlog:sherlog@localhost:5432/sherlog
+    ```
+
+5.  **Run database migrations (if applicable)**:
+    If you are using PostgreSQL and setting up the database for the first time, or if there are schema changes, you might need to run migrations. (Assuming Alembic is used, though not explicitly stated in provided context - adapt if different).
+    ```bash
+    # Example if Alembic is set up in backend/db
+    # alembic upgrade head
+    ```
+    For SQLite, the database and tables are typically created automatically on first access if they don't exist, based on the SQLAlchemy models.
+
+6.  **Start the backend server**:
+    ```bash
+    python -m uvicorn backend.server:app --reload --host 0.0.0.0 --port 8000
+    ```
+    The backend will be accessible at `http://localhost:8000`.
+
+7.  **Manually Start MCP Servers**:
+    If you are not using the Docker setup, you will need to start any required MCP servers manually. Refer to the [MCP Servers](#mcp-servers) section for instructions on setting up servers like `mcp-grafana` or `pg-mcp`. Ensure they are configured and running so the backend can connect to them.
+
+### Configuring Data Connections
+
+Once Sherlog Canvas is running, you can configure connections to your data sources:
+
+1.  **Access Sherlog Canvas**: Open the application in your browser (e.g., `http://localhost:5173`).
+2.  **Navigate to Data Connections**: Find the "Data Connections" or "Settings" section in the UI.
+3.  **Add a New Connection**:
+    *   Click "Add Connection" or a similar button.
+    *   Select the type of data source you want to connect to (e.g., Grafana, PostgreSQL, Prometheus, Loki, S3).
+4.  **Provide Connection Details**:
+    *   **Grafana**: URL of your Grafana instance and an API key with viewer or editor permissions.
+    *   **PostgreSQL**: A standard PostgreSQL connection string (e.g., `postgresql://username:password@host:port/database_name`).
+    *   **Prometheus**: URL of your Prometheus server.
+    *   **Loki**: URL of your Loki server.
+    *   **S3**: S3 endpoint URL, bucket name, access key ID, and secret access key.
+5.  **Save Connection**:
+    Sherlog Canvas will store these connection details (by default in `./data/connections.json` or as configured by `SHERLOG_CONNECTION_STORAGE_TYPE`). When a connection is added or used, Sherlog Canvas will typically ensure the relevant MCP server is running (if managed by Sherlog, e.g., via Docker) or attempt to connect to an existing one.
+
+This setup allows the AI agents within Sherlog Canvas to query and interact with your configured data sources.
 
 ## MCP Servers
 
@@ -245,44 +388,4 @@ sherlog-canvas/
 ### Adding a New MCP Server Integration
 
 1. Find or create an MCP server for your data source
-2. Add connection type to `backend/services/connection_manager.py`
-3. Add MCP server startup logic in `backend/mcp/manager.py`
-4. Add appropriate agent tools in `backend/ai/agent.py`
-
-### Creating a Custom MCP Server
-
-If you need to integrate a data source that doesn't have an existing MCP server:
-
-1. Create a new MCP server using the MCP specification
-2. Basic structure:
-   ```javascript
-   const express = require('express');
-   const app = express();
-   app.use(express.json());
-   
-   app.post('/mcp/query', async (req, res) => {
-     const { query, parameters } = req.body;
-     // Connect to your data source and execute query
-     const result = await executeQuery(query, parameters);
-     res.json({ data: result });
-   });
-   
-   app.listen(process.env.PORT || 9000);
-   ```
-
-3. Register your MCP server in the MCP server manager
-4. Add appropriate agent tools 
-
-### Adding a New Cell Type
-
-1. Add the new cell type to `backend/core/cell.py`
-2. Create a cell executor in `backend/core/execution.py`
-3. Update pydantic-ai tools to handle the new cell type
-
-## Contributing
-
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
-
-## License
-
-This project is licensed under the MIT License - see [LICENSE](LICENSE) for details.
+2. Add connection type to `

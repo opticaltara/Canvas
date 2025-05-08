@@ -20,6 +20,9 @@ interface ConnectionState {
   loading: boolean
   error: string | null
 
+  // Global UI states
+  areAllCellsExpanded: boolean
+
   // Actions
   loadConnections: () => Promise<void>
   loadAvailableTypes: () => Promise<void>
@@ -29,6 +32,7 @@ interface ConnectionState {
   setDefaultConnection: (id: string) => Promise<boolean>
   testConnection: (connectionData: Partial<Connection>) => Promise<{ valid: boolean; message: string }>
   fetchToolsForConnection: (connectionType: string) => Promise<void>
+  toggleAllCellsExpanded: () => void
 
   // Utility
   getConnectionsByType: (type: string) => Connection[]
@@ -47,6 +51,12 @@ export const useConnectionStore = create<ConnectionState>()(
         toolLoadingStatus: {},
         mcpStatuses: {}, // Initialize mcpStatuses
         availableTypes: [],
+        areAllCellsExpanded: true,
+
+        // Toggle all cells expanded state
+        toggleAllCellsExpanded: () => {
+          set((state) => ({ areAllCellsExpanded: !state.areAllCellsExpanded }))
+        },
 
         // Load all connections
         loadConnections: async () => {
@@ -77,7 +87,7 @@ export const useConnectionStore = create<ConnectionState>()(
             // Explicitly assert the type to match the state definition
             set({ connections: connections as Connection[], loading: false })
 
-            // After loading connections, fetch tools for each unique type
+            // After loading connections, fetch tools for each unique type found
             const connectionTypes = [...new Set(connections.map(conn => conn.type))];
             connectionTypes.forEach(type => {
               // Don't re-fetch if already loading or loaded
@@ -85,6 +95,13 @@ export const useConnectionStore = create<ConnectionState>()(
                  get().fetchToolsForConnection(type);
               }
             });
+
+            // Explicitly ensure Python tools are loaded if they haven't been attempted yet
+            const pythonToolStatus = get().toolLoadingStatus['python'];
+            if (!pythonToolStatus || pythonToolStatus === 'idle' || pythonToolStatus === 'error') {
+                console.log("Explicitly fetching tools for 'python' type.");
+                get().fetchToolsForConnection('python');
+            }
 
             // Wait for types to load as well (if needed before proceeding)
             // or just let it run in background if types aren't needed immediately after loadConnections

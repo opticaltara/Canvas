@@ -48,6 +48,17 @@ const FileSystemCell: React.FC<FileSystemCellProps> = ({
 
   const toolDefinitions = useConnectionStore((state) => state.toolDefinitions.filesystem);
   const toolLoadingStatus = useConnectionStore((state) => state.toolLoadingStatus.filesystem);
+  const areAllCellsExpanded = useConnectionStore((state) => state.areAllCellsExpanded);
+
+  const [accordionValue, setAccordionValue] = useState<string>(areAllCellsExpanded ? "item-1" : "");
+
+  useEffect(() => {
+    setAccordionValue(areAllCellsExpanded ? "item-1" : "");
+  }, [areAllCellsExpanded]);
+
+  useEffect(() => {
+    setIsResultExpanded(areAllCellsExpanded);
+  }, [areAllCellsExpanded]);
   
   const toolInfo = toolDefinitions?.find(def => def.name === toolName);
   
@@ -388,7 +399,13 @@ const FileSystemCell: React.FC<FileSystemCellProps> = ({
         <div className="mb-4">
            <Card className={cardBorderColor}>
             <CardContent className="p-3">
-               <Accordion type="single" collapsible defaultValue="item-1" className="w-full">
+               <Accordion 
+                 type="single" 
+                 collapsible 
+                 value={accordionValue}
+                 onValueChange={setAccordionValue}
+                 className="w-full"
+               >
                  <AccordionItem value="item-1" className="border-b-0">
                    <AccordionTrigger className="text-xs font-medium py-2 hover:no-underline">
                      Command Arguments ({toolName || "No tool selected"})

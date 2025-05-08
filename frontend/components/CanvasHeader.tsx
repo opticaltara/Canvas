@@ -2,12 +2,13 @@
 
 import type React from "react"
 import { useState } from "react"
-import { ShareIcon, CopyIcon, PlayCircleIcon, Database } from "lucide-react"
+import { ShareIcon, CopyIcon, PlayCircleIcon, Database, ChevronsUpDownIcon } from "lucide-react"
 import dynamic from 'next/dynamic'
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 // import DataConnectionsDialog from "./DataConnectionsDialog" // Will be dynamically imported
-import { useConnectionStore } from "../store/connectionStore"
+import { useConnectionStore } from "@/store/connectionStore"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 
 const DataConnectionsDialog = dynamic(() => import('./DataConnectionsDialog'), {
   ssr: false,
@@ -24,6 +25,8 @@ const CanvasHeader: React.FC<CanvasHeaderProps> = ({ name, onNameChange }) => {
   const [editedName, setEditedName] = useState(name)
   const [isConnectionsDialogOpen, setIsConnectionsDialogOpen] = useState(false)
   const { connections, mcpStatuses } = useConnectionStore()
+  const areAllCellsExpanded = useConnectionStore((state) => state.areAllCellsExpanded)
+  const toggleAllCellsExpanded = useConnectionStore((state) => state.toggleAllCellsExpanded)
 
   // Count active connections
   const activeConnections = connections.filter((conn) => mcpStatuses[conn.id]?.status === "running").length
@@ -77,15 +80,48 @@ const CanvasHeader: React.FC<CanvasHeaderProps> = ({ name, onNameChange }) => {
           </div>
         </div>
         <div className="flex space-x-2">
-          <button className="text-gray-600 hover:text-gray-800">
-            <ShareIcon className="w-5 h-5" />
-          </button>
-          <button className="text-gray-600 hover:text-gray-800">
-            <CopyIcon className="w-5 h-5" />
-          </button>
-          <button className="text-gray-600 hover:text-gray-800">
-            <PlayCircleIcon className="w-5 h-5" />
-          </button>
+          <TooltipProvider delayDuration={100}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button className="text-gray-600 hover:text-gray-800" onClick={toggleAllCellsExpanded}>
+                  <ChevronsUpDownIcon className="w-5 h-5" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>
+                <p>{areAllCellsExpanded ? "Collapse All Cells" : "Expand All Cells"}</p>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+          <TooltipProvider delayDuration={100}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button className="text-gray-600 hover:text-gray-800">
+                  <ShareIcon className="w-5 h-5" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent><p>Share Canvas (soon)</p></TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+          <TooltipProvider delayDuration={100}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button className="text-gray-600 hover:text-gray-800">
+                  <CopyIcon className="w-5 h-5" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent><p>Copy Canvas Link (soon)</p></TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+          <TooltipProvider delayDuration={100}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button className="text-gray-600 hover:text-gray-800">
+                  <PlayCircleIcon className="w-5 h-5" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent><p>Run All Cells (soon)</p></TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         </div>
       </div>
 
