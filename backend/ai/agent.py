@@ -111,7 +111,7 @@ class AIAgent:
 
         # Build notebook context tools (list_cells & get_cell)
         try:
-            from backend.ai.notebook_context_tools import create_notebook_context_tools
+            from .notebook_context_tools import create_notebook_context_tools
             self._notebook_tools = create_notebook_context_tools(self.notebook_id, self.notebook_manager)
         except Exception as tool_err:
             ai_logger.error("Failed to create notebook context tools for AIAgent: %s", tool_err, exc_info=True)
