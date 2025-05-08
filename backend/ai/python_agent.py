@@ -71,18 +71,23 @@ class PythonAgent:
         Ensures the CSV data is available as a local file and returns its path.
         Currently assumes data_ref.type is 'content_string'.
         If data_ref.type is 'fsmcp_path', it's the responsibility of the
-        StepProcessor to resolve it to content before calling PythonAgent.
+        StepProcessor to resolve it to content before calling PythonAgent, or
+        if type is 'local_staged_path', the value is the already prepared path.
         """
-        if data_ref.type != "content_string":
-            # This agent is not responsible for calling Filesystem MCP.
-            # That should be handled by the StepProcessor or a dedicated FileSystemAgent.
-            err_msg = f"PythonAgent._prepare_local_file received unsupported data_ref type '{data_ref.type}'. Expected 'content_string'."
-            python_agent_logger.error(err_msg)
-            # Consider raising a specific exception type here
-            raise ValueError(err_msg)
-
-        # Sanitize original_filename if provided, or use a generic name
-        base_filename = "dataset"
+        if data_ref.type == "local_staged_path":
+            # Value is the path to the already staged file. Validate and return.
+            local_path = data_ref.value
+            if not os.path.exists(local_path):
+                err_msg = f"Local staged file path provided does not exist: {local_path}"
+                python_agent_logger.error(err_msg)
+                raise FileNotFoundError(err_msg)
+            python_agent_logger.info(f"Using already staged local file: {local_path}")
+            return local_path
+        elif data_ref.type == "content_string":
+            # Save the provided content to a new permanent file
+            python_agent_logger.info(f"Received content_string. Staging data to permanent local file...")
+            # Sanitize original_filename if provided, or use a generic name
+            base_filename = "dataset"
         if data_ref.original_filename:
             # Basic sanitization: replace non-alphanumeric with underscore
             sanitized_name = re.sub(r'[^\w\.-]', '_', data_ref.original_filename)
@@ -121,6 +126,11 @@ class PythonAgent:
         except IOError as e:
             python_agent_logger.error(f"Failed to write to local file {local_permanent_path}: {e}", exc_info=True)
             raise # Re-raise to be caught by run_query
+        else:
+            # Handle unsupported types
+            err_msg = f"PythonAgent._prepare_local_file received unsupported data_ref type '{data_ref.type}'. Expected 'content_string' or 'local_staged_path'."
+            python_agent_logger.error(err_msg)
+            raise ValueError(err_msg)
 
     def _parse_python_mcp_output(self, raw_output: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -232,11 +242,13 @@ class PythonAgent:
 
     async def run_query(
         self,
-        agent_input: PythonAgentInput
+        agent_input: PythonAgentInput # Signature updated
     ) -> AsyncGenerator[Any, None]:
+        # Extract necessary fields from agent_input
         notebook_id = agent_input.notebook_id
         session_id = agent_input.session_id
         user_query = agent_input.user_query
+        # data_references are accessed via agent_input.data_references later
 
         python_agent_logger.info(f"Running Python query for notebook {notebook_id}, session {session_id}. User query: '{user_query}'")
         
@@ -312,29 +324,40 @@ class PythonAgent:
         
         data_info_parts = []
         if local_file_paths_map:
-            data_info_parts.append("The following datasets have been prepared from previous steps and are available for you to load using their full local paths with the `load-csv` tool:")
+            data_info_parts.append("The following datasets have been prepared from previous steps and are available for you to load using their EXACT ABSOLUTE local paths with the `load-csv` tool:")
             for name, path in local_file_paths_map.items():
-                data_info_parts.append(f"- Dataset '{name}': {path}")
+                # Ensure path is absolute for clarity in prompt
+                abs_path = os.path.abspath(path) 
+                data_info_parts.append(f"- Dataset '{name}': {abs_path}")
         else:
             data_info_parts.append("No datasets were explicitly passed from previous steps.")
         
         data_info_str = "\n".join(data_info_parts)
 
+        # Enhanced Prompt Instructions
         current_description = (
             f"Current time is {current_time_utc}.\n"
-            "You have access to a data exploration server with the following tools:\n"
-            "1. `load-csv`: Loads a CSV file into a DataFrame. Arguments:\n"
-            "   - `csv_path` (string, required): The ABSOLUTE path to the CSV file within the server's environment.\n"
-            "   - `df_name` (string, optional): Name for the DataFrame. Defaults to df_1, df_2, etc.\n"
-            "2. `run-script`: Executes a Python script. Arguments:\n"
-            "   - `script` (string, required): The Python script to execute. This script can operate on DataFrames loaded by `load-csv` if their `df_name` is known.\n"
-            f"\n{data_info_str}\n\n"
+            "You are a data analysis assistant. You have access to a Python execution environment via the `mcp-server-data-exploration` server with the following tools:\n"
+            "1. `load_csv`: Loads a CSV file into a pandas DataFrame.\n"
+            "   - `csv_path` (string, required): The **ABSOLUTE** path to the CSV file within the server's environment (e.g., '/app/data/imported_datasets/...').\n"
+            "   - `df_name` (string, optional): Variable name for the loaded DataFrame (e.g., 'df1'). Defaults to df_1, df_2, etc.\n"
+            "2. `run_script`: Executes a Python script.\n"
+            "   - `script` (string, required): The Python script to execute. This script can operate on DataFrames loaded by `load_csv` using their assigned `df_name`.\n"
+            
+            f"\n--- Available Datasets ---\n{data_info_str}\n-------------------------\n\n"
+            
             f"User Query for this Python cell: {user_query}\n\n"
-            "Instructions:\n"
-            "- If the User Query requires loading data from one of the prepared datasets listed above, use the `load-csv` tool with its full provided path.\n"
-            "- If the User Query refers to a file path not listed above (e.g., 'load my_other_data.csv'), assume this path is directly accessible by the server and use it with `load-csv`.\n"
-            "- After loading necessary data, use the `run-script` tool to execute Python code that addresses the User Query.\n"
-            "- Ensure your Python script prints all results and outputs clearly to stdout for them to be captured."
+            
+            "Instructions:\\n"\
+            "1. **Load Data:** If the User Query requires data from the 'Available Datasets' list, use the `load_csv` tool with the EXACT absolute path provided for that dataset. Assign a meaningful `df_name`.\\n"\
+            "2. **Handle Other Paths:** If the User Query mentions loading a file path *not* listed in 'Available Datasets', **DO NOT GUESS THE PATH**. First, respond asking the user to provide the correct absolute path or to use a filesystem tool step to locate the file.\\n"\
+            "3. **Execute Analysis:** Once data is loaded, use the `run_script` tool to write and execute Python code (using pandas, numpy, etc.) to address the User Query, operating on the loaded DataFrame(s).\\n"\
+            "4. **Output Formatting:** Structure the output printed by your Python script within `run_script`:\\n"\
+            "   - **DataFrames:** If showing a DataFrame `df`, print it using `print('--- DataFrame ---')`, then `print(df.to_markdown(index=False, numalign='left', stralign='left'))`, then `print('--- End DataFrame ---')`.\\n"\
+            "   - **Plots:** If generating a plot (e.g., with matplotlib), save it to '/tmp/plot.png'. Then read the file, encode it to base64, import the 'base64' library, and print the result EXACTLY as: `print(f'<PLOT_BASE64>{base64.b64encode(plot_file.read()).decode()}</PLOT_BASE64>')`.\\n"\
+            "   - **JSON:** If the result is a dict or list `d`, import 'json' and print it EXACTLY as: `print(f'<JSON_OUTPUT>{json.dumps(d)}</JSON_OUTPUT>')`.\\n"\
+            "   - **Other Text:** Print any other textual results or summaries directly.\\n"\
+            "5. **Clarity:** Ensure all necessary results are printed to stdout within the `run_script` tool."
         )
         
         max_attempts = 5

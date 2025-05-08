@@ -143,10 +143,10 @@ class TestPythonAgentPrepareLocalFile:
         # sanitized_name = re.sub(r'[^\w\.-]', '_', "My Data File (Special!).txt") -> "My_Data_File_Special__.txt"
         # name_part, ext_part = os.path.splitext("My_Data_File_Special__.txt") -> ("My_Data_File_Special__", ".txt")
         # ext_part.lower() != ".csv" is true.
-        # sanitized_name = name_part + ".csv" -> "My_Data_File_Special__.csv"
-        # base_filename = "My_Data_File_Special__.csv"
-        # filename = f"{os.path.splitext(base_filename)[0]}_{unique_id}.csv" -> "My_Data_File_Special___special.csv"
-        expected_special_ext_filename = "My_Data_File_Special___special.csv"
+        # sanitized_name = name_part + ".csv" -> "My_Data_File__Special__.csv"
+        # base_filename = "My_Data_File__Special__.csv"
+        # filename = f"{os.path.splitext(base_filename)[0]}_{unique_id}.csv" -> "My_Data_File__Special___special.csv"
+        expected_special_ext_filename = "My_Data_File__Special___special.csv" # Corrected: two underscores after "File"
         expected_path_special_ext = os.path.join(expected_dir, expected_special_ext_filename)
         result_path_special_ext = await python_agent_instance._prepare_local_file(data_ref_special_ext, notebook_id, session_id)
         assert result_path_special_ext == expected_path_special_ext
@@ -156,14 +156,56 @@ class TestPythonAgentPrepareLocalFile:
     @pytest.mark.asyncio
     async def test_prepare_local_file_unsupported_type(self, python_agent_instance):
         data_ref = FileDataRef(
-            type="fsmcp_path", 
+            type="some_unknown_type", 
             value="/path/on/mcp.csv", 
             original_filename="mcp_file.csv", # Optional, but good to include
             source_cell_id="cell_fsmcp_err"
         )
         with pytest.raises(ValueError) as excinfo:
             await python_agent_instance._prepare_local_file(data_ref, "nb_err", "sess_err")
-        assert "unsupported data_ref type 'fsmcp_path'" in str(excinfo.value)
+        assert "received unsupported data_ref type 'some_unknown_type'" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    @patch("backend.ai.python_agent.os.path.exists")
+    async def test_prepare_local_file_local_staged_path_success(self, mock_os_path_exists, python_agent_instance):
+        """Test _prepare_local_file with type 'local_staged_path' successfully."""
+        mock_os_path_exists.return_value = True
+        staged_file_path = "/tmp/data/imported_datasets/nb_staged/sess_staged/staged_file_abc.csv"
+        data_ref = FileDataRef(
+            type="local_staged_path",
+            value=staged_file_path,
+            original_filename="staged_file.csv", # Can be different from value's basename
+            source_cell_id="cell_staged"
+        )
+        notebook_id = "nb_staged" # These are not used for path construction for local_staged_path
+        session_id = "sess_staged"
+
+        result_path = await python_agent_instance._prepare_local_file(data_ref, notebook_id, session_id)
+        
+        assert result_path == staged_file_path
+        mock_os_path_exists.assert_called_once_with(staged_file_path)
+        # No os.makedirs or file open/write should be called for local_staged_path
+
+    @pytest.mark.asyncio
+    @patch("backend.ai.python_agent.os.path.exists")
+    async def test_prepare_local_file_local_staged_path_not_exists(self, mock_os_path_exists, python_agent_instance):
+        """Test _prepare_local_file with 'local_staged_path' when file doesn't exist."""
+        mock_os_path_exists.return_value = False
+        non_existent_path = "/tmp/data/imported_datasets/nb_staged/sess_staged/non_existent.csv"
+        data_ref = FileDataRef(
+            type="local_staged_path",
+            value=non_existent_path,
+            original_filename="non_existent.csv",
+            source_cell_id="cell_staged_err"
+        )
+        notebook_id = "nb_staged_err"
+        session_id = "sess_staged_err"
+
+        with pytest.raises(FileNotFoundError) as excinfo:
+            await python_agent_instance._prepare_local_file(data_ref, notebook_id, session_id)
+        
+        assert f"Local staged file path provided does not exist: {non_existent_path}" in str(excinfo.value)
+        mock_os_path_exists.assert_called_once_with(non_existent_path)
 
     @pytest.mark.asyncio
     @patch("backend.ai.python_agent.os.makedirs")

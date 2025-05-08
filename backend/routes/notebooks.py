@@ -4,7 +4,7 @@ Notebook API Endpoints
 
 import logging
 from typing import Dict, List, Optional, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 from datetime import datetime, timezone
 
 import json # Added for parsing incoming WebSocket messages
@@ -235,7 +235,7 @@ async def delete_notebook(
 async def create_cell(
     notebook_id: UUID,
     cell_data: CellCreate,
-    tool_call_id: ToolCallID,
+    tool_call_id: Optional[ToolCallID] = None,
     notebook_manager: NotebookManager = Depends(get_notebook_manager),
     connection_manager: ConnectionManager = Depends(get_connection_manager),
     db: AsyncSession = Depends(get_async_db_session)
@@ -251,6 +251,11 @@ async def create_cell(
         The created cell data
     """
     route_logger.info(f"Creating new cell in notebook: {notebook_id} with type {cell_data.cell_type}")
+    
+    # If client did not provide a tool_call_id, generate one automatically
+    if tool_call_id is None:
+        tool_call_id = uuid4()
+        route_logger.debug(f"Generated new tool_call_id {tool_call_id} for cell creation request.")
     
     connection_id_to_use: Optional[str] = cell_data.connection_id
     

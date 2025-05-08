@@ -472,7 +472,7 @@ class AIAgent:
             # Execute the step
             generator = await agent.execute(
                 step=current_step,
-                prompt=description,
+                agent_input_data=description,
                 session_id=session_id or "",
                 context=context
             )

@@ -41,6 +41,23 @@ from backend.services.connection_handlers.registry import get_handler
 # Updated logger name
 filesystem_agent_logger = logging.getLogger("ai.filesystem_agent")
 
+# CONSTANTS
+TOOL_RESULT_MAX_CHARS = 10000  # maximum characters to keep from a tool result
+
+# Helper to truncate long strings clearly
+
+def _truncate_output(content: Any, limit: int = TOOL_RESULT_MAX_CHARS) -> Any:
+    """Truncate the given string if it exceeds *limit* characters, appending an indicator.
+
+    Non-string content is returned unchanged so the caller can forward it as-is.
+    """
+    if not isinstance(content, str):
+        return content  # Non-string results are returned unchanged
+    if len(content) <= limit:
+        return content
+    truncated = content[:limit]
+    return truncated + f"\n\n...[output truncated – original length {len(content)} characters]"
+
 class FileSystemAgent:
     """Agent for interacting with Filesystem MCP server using stdio."""
     def __init__(self, notebook_id: str):
@@ -200,7 +217,7 @@ class FileSystemAgent:
         base_description = f"Current time is {current_time_utc}. User query: {description}"
         current_description = base_description
         
-        max_attempts = 5 # Same max attempts as GitHub agent
+        max_attempts = 2 # Same max attempts as GitHub agent
         last_error = None
         attempt_completed = 0
         success_occurred = False
@@ -319,11 +336,31 @@ class FileSystemAgent:
                                                 
                                                 elif isinstance(event, FunctionToolResultEvent):
                                                     tool_call_id = event.tool_call_id
-                                                    tool_result = event.result.content
+                                                    # original_tool_content = event.result.content # Old way
+
                                                     if tool_call_id in pending_tool_calls:
                                                         call_info = pending_tool_calls.pop(tool_call_id)
-                                                        args_data = call_info["tool_args"]
+                                                        tool_arguments = call_info["tool_args"] # Arguments used when tool was called
+                                                        original_tool_content = event.result.content # Get original content
+
+                                                        # Truncate the result that pydantic-ai will use for the next LLM call
+                                                        truncated_content_for_llm = _truncate_output(original_tool_content)
                                                         
+                                                        if isinstance(original_tool_content, str) and \
+                                                           isinstance(truncated_content_for_llm, str) and \
+                                                           len(original_tool_content) > len(truncated_content_for_llm):
+                                                            filesystem_agent_logger.info(
+                                                                f"Attempt {attempt_completed}: Truncating tool result for '{call_info['tool_name']}' (ID: {tool_call_id}). "
+                                                                f"Original length: {len(original_tool_content)}, Truncated length: {len(truncated_content_for_llm)}."
+                                                            )
+                                                        
+                                                        # THIS IS THE KEY CHANGE: Update the event's content field.
+                                                        # We assume pydantic-ai will use this modified event.result.content
+                                                        # when it constructs the ToolMessage to send to the LLM.
+                                                        event.result.content = truncated_content_for_llm
+                                                        
+                                                        # Yield a ToolSuccessEvent for our application's event stream.
+                                                        # This event should also contain the (potentially) truncated result.
                                                         yield ToolSuccessEvent(
                                                             type=EventType.TOOL_SUCCESS,
                                                             status=StatusType.TOOL_SUCCESS,
@@ -331,14 +368,14 @@ class FileSystemAgent:
                                                             attempt=attempt_completed,
                                                             tool_call_id=tool_call_id,
                                                             tool_name=call_info["tool_name"],
-                                                            tool_args=args_data,
-                                                            tool_result=tool_result,
+                                                            tool_args=tool_arguments, # Use the stored arguments
+                                                            tool_result=truncated_content_for_llm, # Pass the truncated content
                                                             original_plan_step_id=None,
                                                             session_id=session_id,
                                                             notebook_id=notebook_id
                                                         )
-                                                        success_occurred = True # Mark overall success
-                                                        filesystem_agent_logger.info(f"Attempt {attempt_completed}: Yielded success for tool: {call_info['tool_name']} (ID: {tool_call_id})")
+                                                        success_occurred = True 
+                                                        filesystem_agent_logger.info(f"Attempt {attempt_completed}: Yielded success for tool: {call_info['tool_name']} (ID: {tool_call_id}) with (potentially) truncated result sent to LLM.")
                                                     else:
                                                         filesystem_agent_logger.warning(f"Attempt {attempt_completed}: Received result for unknown/processed ID: {tool_call_id}")
                                     
@@ -412,11 +449,16 @@ class FileSystemAgent:
                             )
                         finally:
                             # Capture history after the agent_run block finishes or if an error occurs within it.
-                            if hasattr(agent_run, 'ctx') and hasattr(agent_run.ctx, 'state') and hasattr(agent_run.ctx.state, 'message_history'):
-                                accumulated_message_history = agent_run.ctx.state.message_history[:]
-                                filesystem_agent_logger.info(f"Attempt {attempt_completed} (finally): Captured message history of length {len(accumulated_message_history)}.")
-                            else: # This case should ideally not happen if agent_run is always valid here
-                                filesystem_agent_logger.warning(f"Attempt {attempt_completed} (finally): Could not capture message history from agent_run.ctx.state.")
+                            raw_history = agent_run.ctx.state.message_history[:]
+                            # Truncate any very large message contents (especially read_file outputs)
+                            for _msg in raw_history:
+                                _cnt = getattr(_msg, "content", None)
+                                if isinstance(_cnt, str):  # Only truncate textual content
+                                    setattr(_msg, "content", _truncate_output(_cnt))
+                            accumulated_message_history = raw_history
+                            filesystem_agent_logger.info(
+                                f"Attempt {attempt_completed} (finally): Captured message history of length {len(accumulated_message_history)} (after truncation)."
+                            )
                             
                             yield StatusUpdateEvent( # Consistent with other agents
                                 type=EventType.STATUS_UPDATE,
@@ -451,15 +493,23 @@ class FileSystemAgent:
                 elif attempt_failed:
                      last_error = last_error_for_attempt # Update overall last error for final reporting
                      
-                     # Check if the error is the specific timestamp error
-                     if last_error_for_attempt == "TypeError: OpenAI API response likely missing 'created' timestamp.":
+                     # Check if the error is the specific timestamp error OR context length error
+                     is_context_length_error = "maximum context" in str(last_error_for_attempt).lower()
+                     is_timestamp_error_msg = last_error_for_attempt == "TypeError: OpenAI API response likely missing 'created' timestamp."
+
+                     if is_timestamp_error_msg:
                          filesystem_agent_logger.error(f"Persistent timestamp error encountered on attempt {attempt_completed}. Not retrying further for this error. Error: {last_error_for_attempt}")
                          break # Break the loop immediately for this specific persistent error
+                     
+                     if is_context_length_error:
+                         filesystem_agent_logger.error(f"Context length error encountered on attempt {attempt_completed}. Not retrying further for this error. Error: {last_error_for_attempt}")
+                         break # Also break immediately for context length errors as retrying likely won't help
 
                      if attempt < max_attempts - 1:
-                         # Retry only if an error occurred and we have attempts left
-                         error_context = f"\\n\\nINFO: Attempt {attempt_completed} failed with error: {last_error_for_attempt}. Retrying..."
-                         current_description += error_context
+                         # Retry only if an error occurred and we have attempts left (and it's not timestamp/context)
+                         # Make error context added to prompt more concise
+                         error_context_for_prompt = f"\n\nINFO: Attempt {attempt_completed} failed. Retrying..." # Avoid putting full error back in prompt
+                         current_description += error_context_for_prompt
                          yield StatusUpdateEvent(
                              type=EventType.STATUS_UPDATE, status=StatusType.RETRYING, 
                              agent_type=AgentType.FILESYSTEM,

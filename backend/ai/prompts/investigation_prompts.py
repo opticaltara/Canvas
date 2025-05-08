@@ -31,6 +31,7 @@ Instructions:
 5. Ensure dependencies create a valid execution order (DAG).
 6. Be specific in step descriptions, especially for GitHub and Filesystem actions.
 7. Aim for a reasonable number of steps. Combine simple related actions if possible, but separate distinct analysis phases.
+- **CONSOLIDATE TOOL USAGE:** Whenever two or more consecutive (or dependency-free) actions use the *same* data-source/agent (e.g., two filesystem reads), merge them into **one** step. This is mandatory for `filesystem` actions unless there is a *clear need* (e.g., conditional branching) for more than one filesystem step.
 
 Example Plan Fragment:
 ```json

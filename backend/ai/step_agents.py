@@ -36,7 +36,7 @@ class StepAgent(ABC):
     @abstractmethod
     async def execute(self, 
                       step: InvestigationStepModel, 
-                      prompt: str,
+                      agent_input_data: Union[str, PythonAgentInput], # Changed from prompt: str
                       session_id: str, 
                       context: Dict[str, Any]) -> AsyncGenerator[Union[BaseEvent, Dict[str, Any]], None]:
         """Execute the step and yield events/results."""
@@ -64,10 +64,16 @@ class MarkdownStepAgent(StepAgent):
     
     async def execute(self, 
                      step: InvestigationStepModel, 
-                     prompt: str,
+                     agent_input_data: Union[str, PythonAgentInput], # Changed from prompt
                      session_id: str, 
                      context: Dict[str, Any]) -> AsyncGenerator[Union[BaseEvent, Dict[str, Any]], None]:
         """Generate markdown content for the step"""
+        if not isinstance(agent_input_data, str):
+            # This case should ideally not happen for MarkdownStepAgent
+            # Or handle it by converting/logging if necessary
+            raise TypeError(f"MarkdownStepAgent expects a string prompt, got {type(agent_input_data)}")
+        prompt = agent_input_data
+
         yield StatusUpdateEvent(
             status=StatusType.AGENT_ITERATING, 
             agent_type=self.get_agent_type(), 
@@ -103,10 +109,14 @@ class GitHubStepAgent(StepAgent):
     
     async def execute(self, 
                      step: InvestigationStepModel, 
-                     prompt: str,
+                     agent_input_data: Union[str, PythonAgentInput], # Changed from prompt
                      session_id: str, 
                      context: Dict[str, Any]) -> AsyncGenerator[Union[BaseEvent, Dict[str, Any]], None]:
         """Execute a GitHub query step"""
+        if not isinstance(agent_input_data, str):
+            raise TypeError(f"GitHubStepAgent expects a string prompt, got {type(agent_input_data)}")
+        prompt = agent_input_data
+
         # Lazy initialization
         if self.github_generator is None:
             ai_logger.info("Lazily initializing GitHubQueryAgent.")
@@ -149,10 +159,14 @@ class FileSystemStepAgent(StepAgent):
     
     async def execute(self, 
                      step: InvestigationStepModel, 
-                     prompt: str,
+                     agent_input_data: Union[str, PythonAgentInput], # Changed from prompt
                      session_id: str, 
                      context: Dict[str, Any]) -> AsyncGenerator[Union[BaseEvent, Dict[str, Any]], None]:
         """Execute a filesystem query step"""
+        if not isinstance(agent_input_data, str):
+            raise TypeError(f"FileSystemStepAgent expects a string prompt, got {type(agent_input_data)}")
+        prompt = agent_input_data
+        
         # Lazy initialization
         if self.filesystem_generator is None:
             ai_logger.info("Lazily initializing FileSystemAgent.")
@@ -195,43 +209,24 @@ class PythonStepAgent(StepAgent):
     
     async def execute(self, 
                      step: InvestigationStepModel, 
-                     prompt: str,
-                     session_id: str, 
+                     agent_input_data: Union[str, PythonAgentInput], # Changed parameter name
+                     session_id: str, # session_id is available here but PythonAgent.run_query might not need it if it's in agent_input_data
                      context: Dict[str, Any]) -> AsyncGenerator[Union[BaseEvent, Dict[str, Any]], None]:
         """Execute a Python query step"""
+        if not isinstance(agent_input_data, PythonAgentInput):
+            # This case should ideally not happen if step_processor correctly sets agent_input_data
+            raise TypeError(f"PythonStepAgent expects PythonAgentInput, got {type(agent_input_data)}")
+        
         # Lazy initialization
         if self.python_generator is None:
             ai_logger.info("Lazily initializing PythonAgent for Python steps.")
-            self.python_generator = PythonAgent(notebook_id=self.notebook_id) # Pass notebook_id to __init__
+            self.python_generator = PythonAgent(notebook_id=self.notebook_id) # notebook_id is from self
         
         ai_logger.info(f"Processing Python step {step.step_id} using run_query generator...")
-
-        # Construct PythonAgentInput
-        # For now, data_references will be empty.
-        # StepProcessor would need to be enhanced to populate this from context if FileSystemAgent ran before.
-        # Example of how StepProcessor *could* provide data_references:
-        # resolved_data_refs = []
-        # if "previous_file_outputs" in context:
-        #     for file_output in context["previous_file_outputs"]: # Assuming a list of dicts
-        #         # Here, StepProcessor would have already called Filesystem MCP if type was 'fsmcp_path'
-        #         # and converted it to 'content_string'
-        #         if file_output.get("type") == "content_string":
-        #             resolved_data_refs.append(FileDataRef(
-        #                 source_cell_id=file_output.get("source_cell_id"),
-        #                 type="content_string",
-        #                 value=file_output.get("value"),
-        #                 original_filename=file_output.get("original_filename")
-        #             ))
-        
-        agent_input = PythonAgentInput(
-            user_query=prompt, # This is the content/query for the Python cell
-            data_references=[], # Start with empty; StepProcessor should populate this in the future.
-            notebook_id=self.notebook_id,
-            session_id=session_id
-        )
         
         # Forward events from the Python agent
-        async for event_data in self.python_generator.run_query(agent_input=agent_input):
+        # PythonAgent.run_query should expect PythonAgentInput which contains notebook_id and session_id
+        async for event_data in self.python_generator.run_query(agent_input=agent_input_data):
             # Forward relevant events
             if isinstance(event_data, (ToolSuccessEvent, ToolErrorEvent, StatusUpdateEvent, FatalErrorEvent)):
                 yield event_data
@@ -261,13 +256,17 @@ class ReportStepAgent(StepAgent):
     
     async def execute(self, 
                      step: InvestigationStepModel, 
-                     prompt: str,
+                     agent_input_data: Union[str, PythonAgentInput], # Changed from prompt
                      session_id: str, 
                      context: Dict[str, Any]) -> AsyncGenerator[Union[BaseEvent, Dict[str, Any]], None]:
         """Generate an investigation report"""
+        if not isinstance(agent_input_data, str):
+            raise TypeError(f"ReportStepAgent expects a string prompt, got {type(agent_input_data)}")
+        # prompt = agent_input_data # Not directly used by report_generator.run_report_generation
+
         # Extract required context
         findings_text = context.get("findings_text", "")
-        original_query = context.get("original_query", "")
+        original_query = context.get("original_query", "") # This seems to be the main "prompt" for the report
         
         # Lazy initialization
         if self.report_generator is None:

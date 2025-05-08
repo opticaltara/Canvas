@@ -13,6 +13,7 @@ from pydantic_ai.providers.openai import OpenAIProvider # Though not directly us
 # Corrected imports for OpenAI response types
 from openai.types.chat import ChatCompletion as ChatCompletions # OpenAI's ChatCompletion is the response type
 from pydantic_ai.messages import ModelResponse # Import ModelResponse directly
+from pydantic import model_validator  # For custom validation logic
 
 class StepType(str, Enum):
     """Enumeration of possible step types in an investigation."""
@@ -65,6 +66,36 @@ class InvestigationPlanModel(BaseModel):
         description="Current working hypothesis",
         default=None
     )
+
+    # ------------------------------------------------------------------
+    # Validation helpers
+    # ------------------------------------------------------------------
+
+    @model_validator(mode='after')
+    def _validate_single_filesystem_step(self):
+        """Ensure that the plan does not contain more than one FILESYSTEM step.
+
+        Rationale:
+            Empirically, merging multiple filesystem actions into one step
+            improves reliability and avoids redundant I/O. Plans that contain
+            more than one FILESYSTEM step are therefore considered invalid
+            and should be re-generated or revised by the planner.
+
+        Notes:
+            • Markdown steps are exempt because they are purely narrative.
+            • We only apply the constraint to FILESYSTEM for now, but this
+              logic can be extended to other StepTypes if desired.
+        """
+        steps = self.steps if self.steps is not None else []
+        filesystem_steps = [s for s in steps if s.step_type == StepType.FILESYSTEM]
+        if len(filesystem_steps) > 1:
+            step_ids = ", ".join(s.step_id for s in filesystem_steps)
+            raise ValueError(
+                f"Investigation plan contains multiple FILESYSTEM steps "
+                f"({len(filesystem_steps)} found: {step_ids}). Combine related "
+                "filesystem actions into a single step."
+            )
+        return self
 
 
 class InvestigationDependencies(BaseModel):
