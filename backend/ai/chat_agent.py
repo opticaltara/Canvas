@@ -15,6 +15,7 @@ from pathlib import Path
 import redis.asyncio as redis
 from redis.asyncio.client import Redis as AsyncRedis
 from uuid import UUID
+import re
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
@@ -29,7 +30,7 @@ from pydantic_ai.messages import (
 )
 
 from backend.config import get_settings
-from backend.ai.chat_tools import NotebookCellTools
+from backend.ai.chat_tools import NotebookCellTools, ListCellsParams
 from backend.services.notebook_manager import NotebookManager
 from backend.ai.agent import AIAgent
 from backend.services.connection_manager import ConnectionManager, get_connection_manager
@@ -56,6 +57,7 @@ from backend.ai.events import (
     PythonToolCellCreatedEvent
 )
 from backend.ai.models import SafeOpenAIModel # Import the custom model
+from backend.ai.utils import _truncate_output, TOOL_RESULT_MAX_CHARS as DEFAULT_TRUNCATE_LIMIT # Import from utils
 
 # Initialize logger
 chat_agent_logger = logging.getLogger("ai.chat_agent")
@@ -153,6 +155,22 @@ class ClarificationResult(BaseModel):
     needs_clarification: bool = Field(description="Whether the query needs clarification")
     clarification_message: Optional[str] = Field(description="Message to ask for clarification if needed", default=None)
 
+# Simple stop words list for keyword extraction (MODULE LEVEL)
+STOP_WORDS = set([
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being", 
+    "have", "has", "had", "do", "does", "did", "will", "would", "should", "can", 
+    "could", "may", "might", "must", "about", "above", "after", "again", "against", 
+    "all", "am", "and", "any", "as", "at", "because", "before", "below", 
+    "between", "both", "but", "by", "com", "for", "from", "further", "here", 
+    "how", "i", "if", "in", "into", "it", "its", "itself", "just", "k", "me", 
+    "more", "most", "my", "myself", "no", "nor", "not", "now", "o", "of", "on", 
+    "once", "only", "or", "other", "our", "ours", "ourselves", "out", "over", 
+    "own", "r", "s", "same", "she", "so", "some", "such", "t", "than", "that", 
+    "their", "theirs", "them", "themselves", "then", "there", "these", "they", 
+    "this", "those", "through", "to", "too", "under", "until", "up", "very", 
+    "we", "what", "when", "where", "which", "while", "who", "whom", "why", 
+    "with", "you", "your", "yours", "yourself", "yourselves", "please", "ok", "good"
+])
 
 def to_chat_message(message: ModelMessage, agent: Optional[str] = None) -> ChatMessage:
     """Convert a ModelMessage to a ChatMessage"""
@@ -249,7 +267,8 @@ class ChatAgentService:
         await self._fetch_and_set_available_tools_info()
 
         # Setup Cell Tools
-        self.cell_tools = NotebookCellTools(notebook_manager=self.notebook_manager)
+        if not self.cell_tools: # Initialize only if not already set (e.g. by constructor)
+            self.cell_tools = NotebookCellTools(notebook_manager=self.notebook_manager)
 
         # Setup Clarification Agent (chat_agent)
         system_prompt = self._generate_system_prompt() # Uses fetched tool info
@@ -334,6 +353,148 @@ class ChatAgentService:
         except Exception as e:
             chat_agent_logger.error(f"Unexpected error formatting system prompt: {e}")
             return self._load_system_prompt_template() # Fallback
+
+    # Moved _get_timestamp helper method into the class
+    def _get_timestamp(self, cell_data: Dict[str, Any], field: str) -> datetime:
+        ts_str = cell_data.get(field)
+        if ts_str:
+            try:
+                return datetime.fromisoformat(ts_str)
+            except ValueError:
+                return datetime.min.replace(tzinfo=timezone.utc) # Fallback for bad format
+        return datetime.min.replace(tzinfo=timezone.utc) # Fallback for missing
+
+    async def _prepare_notebook_context(self, notebook_id_str: str, current_query: str) -> str:
+        """
+        Fetches relevant cells from the notebook, summarizes them, 
+        and formats them into a string for the planner's prompt.
+        """
+        if not self.cell_tools:
+            chat_agent_logger.warning("Cell tools not available in _prepare_notebook_context. Returning empty context.")
+            return ""
+
+        try:
+            list_params = ListCellsParams(notebook_id=notebook_id_str)
+            cells_result = await self.cell_tools.list_cells(params=list_params)
+
+            if not cells_result.get("success") or not cells_result.get("cells"):
+                # Check if success is True but cells is empty - this means list_cells worked but found nothing
+                if cells_result.get("success") and not cells_result.get("cells"):
+                    chat_agent_logger.info(f"Notebook {notebook_id_str} contains no cells. Returning empty context.")
+                    return "" # Return empty string instead of message
+                # Otherwise, list_cells actually failed
+                chat_agent_logger.warning(f"Failed to list cells for notebook {notebook_id_str}. Error: {cells_result.get('error')}. Returning empty context.")
+                return "" # Return empty string instead of error message
+
+            all_cells: List[Dict[str, Any]] = cells_result["cells"]
+            
+            # --- Keyword Extraction from current_query ---
+            query_words = set()
+            entities_in_query = set(re.findall(r"`([^`]+)`", current_query.lower()))
+            cleaned_query = re.sub(r"`[^`]+`", "", current_query.lower())
+            words = re.findall(r'\b\w+\b', cleaned_query)
+            query_words.update([word for word in words if word not in STOP_WORDS and len(word) > 1])
+            query_keywords = query_words.union(entities_in_query)
+            chat_agent_logger.debug(f"Query keywords for context relevance: {query_keywords}")
+
+            # --- Relevance Scoring and Selection ---
+            scored_cells = []
+            for cell_data in all_cells:
+                score = 0
+                # Recency will be used as a tie-breaker after scoring
+
+                cell_type_str = cell_data.get('cell_type', '')
+                if any(kw in query_keywords for kw in ["python", "code", "script", "analyze", "dataframe", "df", "plot"]):
+                    if cell_type_str == "python": score += 50
+                if any(kw in query_keywords for kw in ["markdown", "summary", "text", "report"]):
+                    if cell_type_str == "markdown": score += 30
+                
+                content_snippet_str = str(cell_data.get('content', '')).lower()
+                output_data = cell_data.get('output')
+                output_snippet_str = ""
+                if output_data and output_data.get('content') is not None:
+                    output_snippet_str = str(output_data.get('content')).lower()
+                elif output_data and output_data.get('error') is not None:
+                    output_snippet_str = str(output_data.get('error')).lower()
+
+                for kw in query_keywords:
+                    if kw in content_snippet_str: score += 10
+                    if kw in output_snippet_str: score += 10
+                    if kw in entities_in_query and (kw in content_snippet_str or kw in output_snippet_str):
+                        score += 20 
+
+                scored_cells.append({"data": cell_data, "score": score, "original_updated_at": self._get_timestamp(cell_data, 'updated_at')})
+
+            scored_cells.sort(key=lambda c: (c["score"], c["original_updated_at"]), reverse=True)
+            
+            MAX_CONTEXT_CELLS = 5 
+            relevant_cells_data = [cell["data"] for cell in scored_cells[:MAX_CONTEXT_CELLS]]
+            
+            if not relevant_cells_data:
+                return "No relevant cells found in the notebook based on the query."
+
+            # --- Summarization and Formatting ---
+            # Use a specific limit for context summaries, overriding the default from utils if needed
+            CONTEXT_SUMMARY_TRUNCATE_LIMIT = 500
+            context_lines = [f"--- Existing Notebook Context (Top {len(relevant_cells_data)} Relevant Cells based on Query) ---"]
+            for i, cell_data in enumerate(relevant_cells_data):
+                cell_id = cell_data.get('id', 'unknown_id')
+                cell_type = cell_data.get('cell_type', 'unknown_type')
+                status = cell_data.get('status', 'unknown_status')
+                
+                # Truncate content, but DO NOT replace newline characters for the prompt string yet
+                content_snippet = _truncate_output(cell_data.get('content', ''), limit=CONTEXT_SUMMARY_TRUNCATE_LIMIT)
+                # Replace newlines only when constructing the final f-string line
+                content_for_prompt_line = content_snippet.replace('\n', '\\n')
+                
+                output_summary = "No output."
+                cell_output_data = cell_data.get('output')
+                if cell_output_data:
+                    if cell_output_data.get('error'):
+                        output_summary = f"Error: {_truncate_output(cell_output_data.get('error'), limit=CONTEXT_SUMMARY_TRUNCATE_LIMIT)}"
+                    elif cell_output_data.get('content') is not None: 
+                        raw_output_content = cell_output_data.get('content')
+                        
+                        if cell_data.get('cell_type') == 'python' and isinstance(raw_output_content, str):
+                            df_match = re.search(r"--- DataFrame ---(.*?)--- End DataFrame ---", raw_output_content, re.DOTALL)
+                            plot_match = re.search(r"<PLOT_BASE64>(.*?)</PLOT_BASE64>", raw_output_content)
+                            json_match = re.search(r"<JSON_OUTPUT>(.*?)</JSON_OUTPUT>", raw_output_content, re.DOTALL)
+
+                            if df_match:
+                                output_summary = f"Python Output: DataFrame displayed (first few rows): {_truncate_output(df_match.group(1).strip(), limit=CONTEXT_SUMMARY_TRUNCATE_LIMIT)}"
+                            elif plot_match:
+                                output_summary = "Python Output: Plot generated (BASE64 content not shown in context)."
+                            elif json_match:
+                                output_summary = f"Python Output: JSON data provided: {_truncate_output(json_match.group(1).strip(), limit=CONTEXT_SUMMARY_TRUNCATE_LIMIT)}"
+                            # This elif for list was specific to a direct list output, might be less common for python string output of a list
+                            # else if isinstance(raw_output_content, list): 
+                            #    joined_raw_output = '\n'.join(raw_output_content) 
+                            #    output_summary = f"Python Output: {_truncate_output(joined_raw_output, limit=CONTEXT_SUMMARY_TRUNCATE_LIMIT)}"
+                            else: 
+                                output_summary = f"Python Output: {_truncate_output(str(raw_output_content), limit=CONTEXT_SUMMARY_TRUNCATE_LIMIT)}"
+                        elif isinstance(raw_output_content, list):
+                            joined_raw_output = '\n'.join(raw_output_content)
+                            output_summary = f"Output: {_truncate_output(joined_raw_output, limit=CONTEXT_SUMMARY_TRUNCATE_LIMIT)}"
+                        elif isinstance(raw_output_content, dict):
+                             output_summary = f"Output (structured): {_truncate_output(json.dumps(raw_output_content), limit=CONTEXT_SUMMARY_TRUNCATE_LIMIT)}"
+                        else:
+                            output_summary = f"Output: {_truncate_output(str(raw_output_content), limit=CONTEXT_SUMMARY_TRUNCATE_LIMIT)}"
+
+                # Replace newlines only when constructing the final f-string line
+                output_for_prompt_line = output_summary.replace('\n', '\\n')
+
+                context_lines.append(
+                    f"[Cell {i+1} - ID: {cell_id[:8]} - Type: {cell_type} - Status: {status}]\\n"
+                    f"  Content: {content_for_prompt_line}\\n"
+                    f"  Output: {output_for_prompt_line}"
+                )
+            
+            context_lines.append("--- End of Existing Notebook Context ---")
+            return "\n".join(context_lines)
+
+        except Exception as e:
+            chat_agent_logger.error(f"Error preparing notebook context for {notebook_id_str}: {e}", exc_info=True)
+            return "" # Also return empty string for unexpected errors
 
     async def handle_message(
         self,
@@ -457,13 +618,17 @@ class ChatAgentService:
                  log_msg = f"Proceeding to investigation for session {session_id} (Clarification not needed)."
             chat_agent_logger.info(log_msg)
         
-        
+            # Prepare notebook context
+            notebook_context_summary = await self._prepare_notebook_context(self.notebook_id, prompt)
+            chat_agent_logger.info(f"Prepared notebook context for planner:\\n{notebook_context_summary}")
+
             async for event in self.ai_agent.investigate(
                 prompt, # Pass the potentially context-enhanced prompt
                 session_id,
                 notebook_id=self.notebook_id,
                 message_history=message_history, # Pass history including the user's latest message
-                cell_tools=self.cell_tools
+                cell_tools=self.cell_tools,
+                notebook_context_summary=notebook_context_summary # New argument
             ):
                 # Now expect event model instances directly
                 event_type_enum = getattr(event, 'type', None)
@@ -663,3 +828,18 @@ class ChatAgentService:
                 exc_info=True
             )
             raise
+
+    # Helper to truncate long strings clearly (copied from filesystem_agent.py for now)
+    # TODO: Move to a shared utility module
+    TOOL_RESULT_MAX_CHARS = 500  # Adjusted for context summary
+
+    def _truncate_output(self, content: Any, limit: int = TOOL_RESULT_MAX_CHARS) -> Any:
+        """Truncate the given string if it exceeds *limit* characters, appending an indicator.
+        Non-string content is returned unchanged so the caller can forward it as-is.
+        """
+        if not isinstance(content, str):
+            return content
+        if len(content) <= limit:
+            return content
+        truncated = content[:limit]
+        return truncated + f"... (truncated, original length {len(content)})"

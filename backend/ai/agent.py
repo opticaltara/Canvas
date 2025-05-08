@@ -141,7 +141,8 @@ class AIAgent:
         session_id: str, 
         notebook_id: Optional[str] = None,
         message_history: List[ModelMessage] = [],
-        cell_tools: Optional[NotebookCellTools] = None
+        cell_tools: Optional[NotebookCellTools] = None,
+        notebook_context_summary: Optional[str] = None
     ) -> AsyncGenerator[BaseEvent, None]:
         """
         Investigate a query by creating and executing a plan.
@@ -167,7 +168,7 @@ class AIAgent:
                 raise ValueError(f"Failed to fetch notebook {notebook_id_str}")
 
             # Create the investigation plan
-            plan = await self.create_investigation_plan(query, notebook_id_str, message_history)
+            plan = await self.create_investigation_plan(query, notebook_id_str, message_history, notebook_context_summary)
             
             # Yield plan created event
             yield PlanCreatedEvent(thinking=plan.thinking, session_id=session_id, notebook_id=notebook_id_str)
@@ -361,8 +362,8 @@ class AIAgent:
         
         return agent_type_map.get(step_type, AgentType.UNKNOWN)
 
-    async def create_investigation_plan(self, query: str, notebook_id: Optional[str] = None, message_history: List[ModelMessage] = []) -> InvestigationPlanModel:
-        """Create an investigation plan for the given query, incorporating history into the prompt."""
+    async def create_investigation_plan(self, query: str, notebook_id: Optional[str] = None, message_history: List[ModelMessage] = [], notebook_context_summary: Optional[str] = None) -> InvestigationPlanModel:
+        """Create an investigation plan for the given query, incorporating history and notebook context into the prompt."""
         notebook_id = notebook_id or self.notebook_id
         if not notebook_id:
             raise ValueError("notebook_id is required for creating investigation plan")
@@ -370,6 +371,10 @@ class AIAgent:
         # Format the history and combine with query
         formatted_history = format_message_history(message_history)
         combined_prompt = f"Conversation History:\n---\n{formatted_history}\n---\n\nLatest User Query: {query}"
+
+        if notebook_context_summary:
+            combined_prompt += f"\n\n--- Existing Notebook Context ---\n{notebook_context_summary}\n--- End of Existing Notebook Context ---"
+        
         ai_logger.info(f"Planner combined prompt:\n{combined_prompt}")
 
         # Create dependencies

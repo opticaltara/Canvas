@@ -37,6 +37,7 @@ from backend.ai.events import (
 )
 from backend.services.connection_manager import get_connection_manager
 from backend.services.connection_handlers.registry import get_handler
+from backend.ai.utils import _truncate_output, TOOL_RESULT_MAX_CHARS as DEFAULT_TRUNCATE_LIMIT # Import from utils
 
 # Updated logger name
 filesystem_agent_logger = logging.getLogger("ai.filesystem_agent")
@@ -344,7 +345,7 @@ class FileSystemAgent:
                                                         original_tool_content = event.result.content # Get original content
 
                                                         # Truncate the result that pydantic-ai will use for the next LLM call
-                                                        truncated_content_for_llm = _truncate_output(original_tool_content)
+                                                        truncated_content_for_llm = _truncate_output(original_tool_content, limit=DEFAULT_TRUNCATE_LIMIT)
                                                         
                                                         if isinstance(original_tool_content, str) and \
                                                            isinstance(truncated_content_for_llm, str) and \
@@ -454,7 +455,7 @@ class FileSystemAgent:
                             for _msg in raw_history:
                                 _cnt = getattr(_msg, "content", None)
                                 if isinstance(_cnt, str):  # Only truncate textual content
-                                    setattr(_msg, "content", _truncate_output(_cnt))
+                                    setattr(_msg, "content", _truncate_output(_cnt, limit=DEFAULT_TRUNCATE_LIMIT))
                             accumulated_message_history = raw_history
                             filesystem_agent_logger.info(
                                 f"Attempt {attempt_completed} (finally): Captured message history of length {len(accumulated_message_history)} (after truncation)."

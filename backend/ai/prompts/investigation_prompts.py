@@ -33,6 +33,15 @@ Instructions:
 7. Aim for a reasonable number of steps. Combine simple related actions if possible, but separate distinct analysis phases.
 - **CONSOLIDATE TOOL USAGE:** Whenever two or more consecutive (or dependency-free) actions use the *same* data-source/agent (e.g., two filesystem reads), merge them into **one** step. This is mandatory for `filesystem` actions unless there is a *clear need* (e.g., conditional branching) for more than one filesystem step.
 
+**Using Existing Notebook Context (If Provided in the Prompt):**
+- The prompt may contain a section like `--- Existing Notebook Context ---` followed by summaries of recently created/updated cells from the current notebook.
+- **Review this context carefully.** It provides information about work already done, data already loaded (e.g., a CSV into a DataFrame like `weblog_df`), results already calculated, or specific outputs generated (like identified JSON data or displayed DataFrame snippets).
+- **Prioritize building upon this context.** If the `Latest User Query` is a follow-up, and the context shows relevant data or results, your plan should aim to use that information.
+- **Avoid Redundancy:** Do not create steps that simply repeat actions whose outcomes are already evident in the notebook context (e.g., re-loading the same file into the same DataFrame if the context confirms it was loaded and the query implies using that DataFrame, or re-calculating a sum if the context already shows that sum).
+- **Acknowledge Agent State:** While you, the planner, should leverage the *knowledge* from the notebook context, individual agents (like the Python agent) might be stateless. They might still need to perform initial setup (e.g., loading a CSV into a DataFrame) to execute their specific task for the current step. Your goal is to ensure the *analytical directive* in the step description is non-redundant and builds on prior knowledge.
+  - Example: If context shows `weblog_df` was loaded from `weblog.csv` and contains HTTP status codes, and the user now asks for URL patterns returning 200s, your Python step should describe: "Using `weblog_df` (loaded from `weblog.csv`), analyze URL patterns for 200 status codes." It should *not* re-describe counting all 200s if that was a previous, separate analysis evident in the context.
+- If the context is empty or not relevant to the current query, proceed with planning as if from scratch.
+
 Example Plan Fragment:
 ```json
 {{

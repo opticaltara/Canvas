@@ -4,6 +4,8 @@ import pytest
 import uuid
 import json # For parsing streamed JSON lines
 from typing import Optional, List, Dict, Any
+from unittest.mock import patch, AsyncMock, MagicMock # Added patch and MagicMock
+from datetime import datetime, timezone, timedelta
 
 # Get the backend URL from an environment variable
 # This will be 'http://backend:8000' when running in Docker Compose
@@ -708,3 +710,128 @@ def test_chat_message_triggers_filesystem_investigation(
 
     # For the current fix, ensuring the investigation completes is the primary goal.
     # The unit test covers the specific event ordering logic more directly.
+
+# ---- New Integration Test for Context-Aware Planner ----
+def test_chat_follow_up_includes_notebook_context(
+    client: httpx.Client,
+    test_notebook: dict,
+    test_chat_session: dict,
+    setup_filesystem_connection: dict # Ensure a connection exists for agent init if needed
+):
+    """
+    Test that a follow-up chat message triggers context retrieval 
+    and includes the context in the planner's prompt.
+    """
+    session_id = test_chat_session["session_id"]
+    notebook_id = test_notebook["id"]
+    follow_up_prompt = "Analyze the `results_df` further for anomalies."
+
+    # 1. Define Mock Cell Data (representing previous state)
+    # Use the same helper structure as unit tests if possible, or define dict directly
+    # Make sure timestamps are correct ISO format strings
+    now_iso = datetime.now(timezone.utc).isoformat()
+    past_iso = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+    
+    mock_cell_data = [
+        {
+            "id": str(uuid.uuid4()),
+            "cell_type": "python",
+            "content": "import pandas as pd\\nresults_df = pd.read_csv('data.csv')\\nprint(results_df.head())",
+            "status": "completed",
+            "output": {
+                "content": "--- DataFrame ---\\n| colA | colB |\\n|---|---|\\n| 1 | 2 |\\n--- End DataFrame ---",
+                "error": None,
+                "execution_time": 1.2,
+                "timestamp": past_iso
+            },
+            "metadata": {},
+            "created_at": past_iso,
+            "updated_at": past_iso,
+            "dependencies": [],
+            "tool_call_id": str(uuid.uuid4()),
+            "tool_name": None,
+            "tool_arguments": None,
+            "connection_id": None
+        },
+        {
+            "id": str(uuid.uuid4()),
+            "cell_type": "markdown",
+            "content": "# Initial Analysis\\nData loaded successfully.",
+            "status": "completed",
+            "output": None,
+            "metadata": {},
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "dependencies": [],
+            "tool_call_id": str(uuid.uuid4()),
+            "tool_name": None,
+            "tool_arguments": None,
+            "connection_id": None
+        }
+    ]
+
+    # 2. Mock list_cells and InvestigationPlanner.run
+    # Target the locations where these are used/instantiated
+    # Mocking list_cells within ChatAgentService
+    mock_list_cells = AsyncMock(return_value={"success": True, "cells": mock_cell_data})
+    
+    # Mocking the Planner Agent's run method within AIAgent
+    mock_planner_run = AsyncMock()
+    
+    # Use a context manager for patching
+    with patch('backend.ai.chat_tools.NotebookCellTools.list_cells', mock_list_cells), \
+         patch('backend.ai.agent.Agent', new_callable=MagicMock) as MockAgentPlanner:
+         
+        # Configure the mock Agent instance that AIAgent will create for its planner
+        mock_planner_instance = MockAgentPlanner.return_value # Get the instance that will be created
+        mock_planner_instance.run = mock_planner_run # Assign our async mock to its run method
+         
+        # Set a dummy return value for the planner run to avoid errors downstream
+        # Planner output should be InvestigationPlanModel, but we only care about the input here
+        mock_planner_run.return_value = MagicMock(output=MagicMock(steps=[], thinking="mocked", hypothesis=None))
+
+        # 3. Send Follow-up Message
+        try:
+            with client.stream(
+                "POST", 
+                f"{API_BASE_URL}/chat/sessions/{session_id}/messages", 
+                data={"prompt": follow_up_prompt}, # Use data for form encoding
+                timeout=60
+            ) as response:
+                response.raise_for_status() 
+                # Read the stream to trigger the backend processing
+                stream_content = response.read() 
+                # We don't need to assert the stream content itself for this test
+                print(f"Integration test received stream (length: {len(stream_content)}), planner call expected.")
+        except httpx.HTTPStatusError as e:
+            pytest.fail(f"HTTP error during chat message POST: {e.response.status_code} - {e.response.text}")
+        except httpx.ReadTimeout:
+            pytest.fail("Reading from chat stream timed out during integration test.")
+
+    # 4. Assertions
+    mock_list_cells.assert_awaited_once() # Verify context retrieval was attempted
+    
+    # Verify the planner mock was called
+    mock_planner_run.assert_awaited_once() # Ensure the planner's run method was hit
+    
+    # Check the arguments passed to the planner's run method
+    call_args, call_kwargs = mock_planner_run.call_args
+    assert 'user_prompt' in call_kwargs
+    planner_prompt = call_kwargs['user_prompt']
+    
+    # Assert prompt contains the follow-up query
+    assert f"Latest User Query: {follow_up_prompt}" in planner_prompt
+    
+    # Assert prompt contains the context section header
+    assert "--- Existing Notebook Context" in planner_prompt
+    
+    # Assert prompt contains summaries derived from mock data
+    # Check for summary of the python cell
+    assert "ID: " in planner_prompt # Basic check for cell ID presence
+    assert "Type: python" in planner_prompt
+    assert "Content: import pandas as pd" in planner_prompt # Check content snippet
+    assert "Output: Python Output: DataFrame displayed" in planner_prompt # Check smart output summary
+    # Check for summary of the markdown cell
+    assert "Type: markdown" in planner_prompt
+    assert "Content: # Initial Analysis" in planner_prompt
+    assert "Output: No output." in planner_prompt

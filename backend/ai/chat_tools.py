@@ -113,7 +113,7 @@ class NotebookCellTools:
             # Temporarily disable registration of other tools
             # update_cell_tool, 
             # execute_cell_tool, 
-            # list_cells_tool,
+            list_cells_tool, # Re-enable list_cells
             # get_cell_tool,
         ]
     
@@ -182,12 +182,79 @@ class NotebookCellTools:
         # ... (original implementation commented out) ...
    
     async def list_cells(self, params: ListCellsParams) -> Dict:
-        """List all cells in a notebook"""
-        # Temporarily disabled
-        return {"success": False, "error": "List cells tool temporarily disabled"}
-        # db_gen = get_db()
-        # db: Session = next(db_gen)
-        # ... (original implementation commented out) ...
+        """List all cells in a notebook, providing detailed information."""
+        async with get_db_session() as db:
+            try:
+                notebook_id_uuid = UUID(params.notebook_id)
+                tools_logger.info(f"Listing cells for notebook: {notebook_id_uuid}")
+                
+                # Fetch the entire notebook object, which contains the cells
+                notebook = await self.notebook_manager.get_notebook(db=db, notebook_id=notebook_id_uuid)
+                
+                cells_data = list(notebook.cells.values()) # Get list of Cell models
+
+                detailed_cells = []
+                if cells_data:
+                    for cell_model in cells_data: # Iterate over Cell Pydantic models
+                        # Safely access attributes from the Cell Pydantic model
+                        cell_id = str(getattr(cell_model, 'id', None))
+                        cell_type_enum = getattr(cell_model, 'type', None)
+                        content = getattr(cell_model, 'content', None)
+                        metadata = getattr(cell_model, 'metadata', {}) # metadata is 'cell_metadata' in Cell model
+                        if not metadata: # Fallback if 'cell_metadata' was intended from DB layer
+                             metadata = getattr(cell_model, 'cell_metadata', {})
+
+                        status_enum = getattr(cell_model, 'status', None)
+                        result_obj: Optional[CellResult] = getattr(cell_model, 'result', None)
+                        created_at_dt = getattr(cell_model, 'created_at', None)
+                        updated_at_dt = getattr(cell_model, 'updated_at', None)
+
+                        # Process result (output)
+                        output_details = None
+                        if result_obj and isinstance(result_obj, CellResult):
+                            output_details = {
+                                # 'content' is the primary store for outputs (stdout, structured data)
+                                "content": result_obj.content, 
+                                "error": result_obj.error,
+                                "execution_time": result_obj.execution_time,
+                                # Use result_obj.timestamp for when the result was generated
+                                "timestamp": result_obj.timestamp.isoformat() if result_obj.timestamp else None
+                            }
+                        elif isinstance(result_obj, dict): # If result was stored as a dict somehow (less likely for CellResult)
+                            output_details = result_obj
+
+
+                        detailed_cells.append({
+                            "id": cell_id,
+                            "cell_type": cell_type_enum.value if cell_type_enum else None,
+                            "content": content,
+                            "metadata": metadata,
+                            "status": status_enum.value if status_enum else None,
+                            "output": output_details, 
+                            "created_at": created_at_dt.isoformat() if created_at_dt else None,
+                            "updated_at": updated_at_dt.isoformat() if updated_at_dt else None,
+                            # Include dependencies and tool info from Cell model directly
+                            "dependencies": [str(dep_id) for dep_id in getattr(cell_model, 'dependencies', set())],
+                            "tool_call_id": str(getattr(cell_model, 'tool_call_id', None)),
+                            "tool_name": getattr(cell_model, 'tool_name', None),
+                            "tool_arguments": getattr(cell_model, 'tool_arguments', None),
+                            "connection_id": getattr(cell_model, 'connection_id', None)
+                        })
+                
+                tools_logger.info(f"Found {len(detailed_cells)} cells for notebook {notebook_id_uuid}")
+                return {
+                    "success": True,
+                    "notebook_id": params.notebook_id,
+                    "cells": detailed_cells
+                }
+            except Exception as e:
+                tools_logger.error(f"Error listing cells for notebook {params.notebook_id}: {str(e)}", exc_info=True)
+                return {
+                    "success": False,
+                    "error": str(e),
+                    "notebook_id": params.notebook_id,
+                    "cells": []
+                }
    
     async def get_cell(self, params: GetCellParams) -> Dict:
         """Get a specific cell by ID"""
