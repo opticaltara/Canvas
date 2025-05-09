@@ -184,16 +184,15 @@ class SafeOpenAIModel(OpenAIModel):
 
 
 class FileDataRef(BaseModel):
-    source_cell_id: Optional[str] = Field(None, description="ID of the cell that originally produced this data reference.")
     type: str = Field(..., description="Type of data reference, e.g., 'content_string' or 'fsmcp_path'.") # content_string, fsmcp_path
     value: str = Field(..., description="The actual CSV content string or the path string on the Filesystem MCP.")
     original_filename: Optional[str] = Field(None, description="The original filename, if known. Useful for naming the local permanent file.")
+    source_cell_id: Optional[str] = Field(None, description="ID of the cell that originally produced this data reference.")
     # mime_type: Optional[str] = Field(None, description="MIME type of the file, e.g., 'text/csv'.") # Future enhancement
 
 
 class PythonAgentInput(BaseModel):
     user_query: str = Field(..., description="The user's direct instruction or code for the Python cell.")
-    data_references: List[FileDataRef] = Field(default_factory=list, description="List of file data references, typically from previous cell outputs.")
     notebook_id: str # Changed from UUID to str to match PythonAgent's notebook_id type
     session_id: str # Added session_id as it's useful for namespacing stored files
-    # current_working_directory: Optional[str] = Field(None, description="Directory context for script execution, if applicable.") # Future enhancement
+    dependency_cell_ids: Optional[Dict[str, List[str]]] = Field(default_factory=dict)

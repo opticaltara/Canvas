@@ -4,17 +4,15 @@ Step processor for executing and processing individual investigation steps.
 
 import logging
 import os
-import hashlib
 import traceback # Added
 from typing import Any, Dict, List, Optional, Tuple, Union, Type, AsyncGenerator
 from uuid import UUID, uuid4
 
 # Model Imports
-from backend.ai.models import StepType, InvestigationStepModel, PythonAgentInput, FileDataRef # Added PythonAgentInput, FileDataRef
+from backend.ai.models import StepType, InvestigationStepModel, PythonAgentInput # Added PythonAgentInput
 from backend.ai.step_result import StepResult
 from backend.ai.step_agents import StepAgent, MarkdownStepAgent, GitHubStepAgent, FileSystemStepAgent, PythonStepAgent, ReportStepAgent
 from backend.ai.cell_creator import CellCreator
-from backend.core.file_utils import stage_file_content # Added
 from pydantic_ai.models.openai import OpenAIModel
 from backend.core.cell import CellType, CellStatus # Added CellStatus
 from backend.core.query_result import QueryResult, InvestigationReport # Added InvestigationReport
@@ -43,6 +41,8 @@ ai_logger = logging.getLogger("ai")
 
 class StepProcessor:
     """Handles the execution and processing of individual investigation steps"""
+    INTERNAL_NOTEBOOK_CONTEXT_TOOLS = ["list_cells", "get_cell"]
+
     def __init__(
         self,
         notebook_id: str, 
@@ -78,160 +78,15 @@ class StepProcessor:
                 
         return self._step_agents[step_type]
 
-    async def _prepare_data_references(
-        self, 
-        step: InvestigationStepModel, 
-        step_results: Dict[str, StepResult], 
-        session_id: str
-    ) -> List[FileDataRef]:
-        """
-        Prepares FileDataRef objects for PythonAgent, resolving paths from Filesystem MCP
-        if necessary, and staging content locally.
-        Raises exceptions on critical failures (IOError, ConnectionError, McpError).
-        """
-        resolved_refs: List[FileDataRef] = []
-        staged_files_tracker: Dict[str, str] = {} # Track content hash -> staged_path
-
-        for dep_id in step.dependencies:
-            dep_result_obj = step_results.get(dep_id)
-            if not isinstance(dep_result_obj, StepResult) or \
-               dep_result_obj.step_type != StepType.FILESYSTEM or \
-               not dep_result_obj.outputs or \
-               dep_result_obj.has_error(): # Skip if dependency step itself had errors
-                continue
-
-            source_cell_id = str(dep_result_obj.cell_ids[0]) if dep_result_obj.cell_ids else None
-            ai_logger.info(f"Processing outputs from FileSystem dependency step: {dep_id} for Python step {step.step_id}, session: {session_id}")
-
-            for output_idx, output_item in enumerate(dep_result_obj.outputs):
-                content: Optional[str] = None
-                original_filename: Optional[str] = None
-                fsmcp_path: Optional[str] = None
-                
-                default_original_filename = f"staged_from_content_{dep_id}_output_{output_idx}.dat"
-
-                if isinstance(output_item, str) and len(output_item) > 10 and ('\n' in output_item or ',' in output_item or output_item.startswith("Traceback")):
-                    # This case implies output_item is likely direct file content (or large text).
-                    # If the FileSystemAgent.ToolSuccessEvent.tool_result for read_file is now a dict,
-                    # this branch will be less likely hit for read_file results.
-                    # If it *is* hit, and it's from a read_file that somehow didn't get structured,
-                    # it would use this string content. This is the old problematic path if content is truncated.
-                    content = output_item
-                    original_filename = default_original_filename
-                elif isinstance(output_item, list) and all(isinstance(p, str) and p.startswith('/') for p in output_item):
-                     if output_item:
-                         fsmcp_path = output_item[0] 
-                         original_filename = os.path.basename(fsmcp_path) if fsmcp_path else default_original_filename
-                     else:
-                         ai_logger.info(f"Empty list from search_files for dep {dep_id}, output {output_idx}")
-                         continue
-                elif isinstance(output_item, dict):
-                    # Check if this is a structured result from our modified FileSystemAgent for 'read_file'
-                    if output_item.get("tool_name") == "read_file" and "path" in output_item:
-                        fsmcp_path = output_item["path"]
-                        original_filename = os.path.basename(fsmcp_path) if fsmcp_path else default_original_filename
-                        # Crucially, ensure content is None to trigger the re-fetch logic below using fsmcp_path
-                        content = None 
-                        ai_logger.info(f"Identified structured 'read_file' result for {fsmcp_path}. Will re-fetch full content.")
-                    elif 'content' in output_item and isinstance(output_item['content'], str):
-                         # This handles other tools that might return content directly in a dict,
-                         # or our FileSystemAgent's 'content_preview' if the above 'read_file' check wasn't met.
-                         # If it's 'content_preview', it's truncated, but re-fetch should be preferred.
-                         content = output_item['content'] # This might be a preview.
-                         original_filename = output_item.get('original_filename') or \
-                                           (os.path.basename(output_item['path']) if output_item.get('path') and isinstance(output_item.get('path'), str) else None) or \
-                                           default_original_filename
-                         # If we got here with a 'read_file' tool's preview, fsmcp_path might not be set yet.
-                         # Try to get it if available, to allow re-fetch to take precedence if content is just a preview.
-                         if output_item.get("tool_name") == "read_file" and output_item.get("path"):
-                             fsmcp_path = output_item.get("path")
-                             ai_logger.info(f"Found path {fsmcp_path} for read_file output that also had direct content/preview. Will prioritize re-fetching.")
-                             content = None # Force re-fetch
-
-                    elif 'path' in output_item and isinstance(output_item['path'], str) and output_item['path'].startswith('/'):
-                         # This handles dicts that primarily provide a path (e.g., from search_files if it returned dicts)
-                         fsmcp_path = output_item['path']
-                         original_filename = output_item.get('original_filename') or \
-                                           (os.path.basename(fsmcp_path) if fsmcp_path else None) or \
-                                           default_original_filename
-                    else:
-                        ai_logger.warning(f"Unsupported dict structure in FS output for dep {dep_id}, output {output_idx}: {str(output_item)[:200]}")
-                        continue
-                elif isinstance(output_item, str) and output_item.startswith('/'):
-                    # Handles if output_item is just a path string (e.g. from search_files)
-                    fsmcp_path = output_item
-                    original_filename = os.path.basename(fsmcp_path) if fsmcp_path else default_original_filename
-                else:
-                    ai_logger.warning(f"Skipping unrecognized output item type from FS dep {dep_id}, output {output_idx}: {type(output_item)}, data: {str(output_item)[:100]}")
-                    continue
-                         
-                if fsmcp_path and content is None:
-                    ai_logger.info(f"Attempting to read content from Filesystem MCP for path: {fsmcp_path}")
-                    try:
-                        fs_handler_instance = get_handler("filesystem")
-                        if not isinstance(fs_handler_instance, FileSystemConnectionHandler):
-                            raise ConnectionError("Filesystem handler not correctly configured or not found.")
-                        
-                        default_conn = await self.connection_manager.get_default_connection("filesystem")
-                        if not default_conn or not default_conn.config:
-                            raise ConnectionError("Default filesystem connection or its config not found.")
-                        
-                        read_result = await fs_handler_instance.execute_tool_call(
-                            tool_name="read_file",
-                            tool_args={"path": fsmcp_path},
-                            db_config=default_conn.config, 
-                            correlation_id=session_id
-                        )
-                        if isinstance(read_result, str):
-                            content = read_result
-                            ai_logger.info(f"Successfully read content for {fsmcp_path}")
-                        else:
-                            ai_logger.warning(f"Filesystem MCP read_file for {fsmcp_path} returned non-string: {type(read_result)}. Result: {str(read_result)[:100]}")
-                            continue 
-                    except (ConnectionError, McpError, Exception) as e:
-                        ai_logger.error(f"Failed to read file from Filesystem MCP ({fsmcp_path}): {e}", exc_info=True)
-                        raise IOError(f"Failed to resolve fsmcp_path {fsmcp_path} for notebook {self.notebook_id}: {e}") from e
-
-                if content is not None:
-                    effective_original_filename = original_filename or default_original_filename
-                    content_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()
-                    if content_hash in staged_files_tracker:
-                        staged_path = staged_files_tracker[content_hash]
-                        ai_logger.info(f"Reusing already staged file for content hash {content_hash[:8]}: {staged_path} (original: {effective_original_filename})")
-                    else:
-                        try:
-                            staged_path = await stage_file_content(
-                                content=content,
-                                original_filename=effective_original_filename,
-                                notebook_id=self.notebook_id,
-                                session_id=session_id,
-                                source_cell_id=source_cell_id
-                            )
-                            staged_files_tracker[content_hash] = staged_path
-                            ai_logger.info(f"Successfully staged content for {effective_original_filename} to {staged_path}")
-                        except Exception as e:
-                            ai_logger.error(f"Failed to stage file content (source: {effective_original_filename}): {e}", exc_info=True)
-                            continue 
-                    
-                    resolved_refs.append(FileDataRef(
-                        source_cell_id=source_cell_id,
-                        type="local_staged_path", 
-                        value=staged_path, 
-                        original_filename=effective_original_filename
-                    ))
-                elif fsmcp_path and content is None:
-                    ai_logger.warning(f"No content obtained for fsmcp_path {fsmcp_path}, cannot stage.")
-        return resolved_refs
-    
     async def process_step(
         self,
         step: InvestigationStepModel,
         executed_steps: Dict[str, Any],
-        step_results: Dict[str, StepResult], # Changed Any to StepResult
-        plan_step_id_to_cell_ids: Dict[str, List[UUID]],
+        step_results: Dict[str, StepResult], 
+        plan_step_id_to_cell_ids: Dict[str, List[UUID]], # Changed from Any to List[UUID]
         cell_tools: NotebookCellTools,
         session_id: str,
-        db: AsyncSession # Added db parameter
+        db: AsyncSession 
     ) -> AsyncGenerator[Union[BaseEvent, StepExecutionCompleteEvent], None]:
         """Process a single investigation step and yield event updates"""
         step_type_value = step.step_type.value if step.step_type else "Unknown"
@@ -351,58 +206,46 @@ class StepProcessor:
             ai_logger.info(f"Step {step.step_id} agent type: {agent_type}, initial agent_input_data type: PythonAgentInput (details logged separately if Python step)")
 
         if step.step_type == StepType.PYTHON:
-            ai_logger.info(f"Preparing data references for Python step {step.step_id}")
+            
+            dependency_cell_ids_for_agent: Dict[str, List[str]] = {}
+            if step.dependencies:
+                for dep_id in step.dependencies:
+                    if dep_id in plan_step_id_to_cell_ids and plan_step_id_to_cell_ids[dep_id]:
+                        dependency_cell_ids_for_agent[dep_id] = [str(uuid_val) for uuid_val in plan_step_id_to_cell_ids[dep_id]]
+            
+            query_for_python_agent = step.description
+            if not query_for_python_agent:
+                query_for_python_agent = "# No specific description provided for Python step."
+            
             try:
-                resolved_data_refs = await self._prepare_data_references(step, step_results, session_id)
-                query_for_python_agent = step.description
-                if not query_for_python_agent:
-                    query_for_python_agent = "# No specific description provided for Python step."
-                    ai_logger.warning(f"Python step {step.step_id} has no description. Using default query.")
-                
                 python_agent_input_obj = PythonAgentInput(
-                    user_query=query_for_python_agent, # Renamed 'query' to 'user_query'
-                    data_references=resolved_data_refs,
-                    notebook_id=self.notebook_id, # Added notebook_id
-                    session_id=session_id # Added session_id
+                    user_query=query_for_python_agent,
+                    notebook_id=self.notebook_id, 
+                    session_id=session_id,
+                    dependency_cell_ids=dependency_cell_ids_for_agent 
                 )
                 agent_input_data = python_agent_input_obj
-                ai_logger.info(f"PythonAgentInput prepared for step {step.step_id} with {len(resolved_data_refs)} data refs.")
-                ai_logger.info(f"Step {step.step_id} Python agent input: {python_agent_input_obj.model_dump_json(indent=2)}")
-            except (IOError, ConnectionError, McpError) as e:
-                error_msg = f"Critical error preparing data references for Python step {step.step_id}: {e}"
+                ai_logger.info(f"PythonAgentInput created for step {step.step_id} with {len(dependency_cell_ids_for_agent)} dependency_cell_id mappings.")
+                ai_logger.debug(f"PythonAgentInput: {python_agent_input_obj.model_dump_json(indent=2)}")
+            except Exception as e: # Catch potential Pydantic validation errors if model mismatch
+                error_msg = f"Error creating PythonAgentInput for step {step.step_id}: {e}\\n{traceback.format_exc()}"
                 ai_logger.error(error_msg, exc_info=True)
                 yield StepErrorEvent(
-                    step_id=step.step_id, error=error_msg, agent_type=AgentType.PYTHON,
-                    step_type=StepType.PYTHON, session_id=session_id, notebook_id=self.notebook_id,
-                    cell_id=None, cell_params=None, result=None
+                    step_id=step.step_id, 
+                    error=error_msg, 
+                    agent_type=AgentType.PYTHON, 
+                    step_type=StepType.PYTHON, 
+                    session_id=session_id, 
+                    notebook_id=self.notebook_id,
+                    cell_id=None,      # Explicitly pass None
+                    cell_params=None,  # Explicitly pass None
+                    result=None        # Explicitly pass None
                 )
                 step_result.add_error(error_msg)
                 step_results[step.step_id] = step_result
-                yield StepExecutionCompleteEvent(
-                    step_id=step.step_id, final_result_data=None, step_outputs=step_result.outputs,
-                    step_error=step_result.get_combined_error(), github_step_has_tool_errors=False,
-                    filesystem_step_has_tool_errors=False, python_step_has_tool_errors=True,
-                    session_id=session_id, notebook_id=self.notebook_id
-                )
+                yield StepExecutionCompleteEvent(step_id=step.step_id, final_result_data=None, step_outputs=step_result.outputs, step_error=step_result.get_combined_error(), github_step_has_tool_errors=False, filesystem_step_has_tool_errors=False, python_step_has_tool_errors=True, session_id=session_id, notebook_id=self.notebook_id)
                 return
-            except Exception as e:
-                error_msg = f"Unexpected error preparing data references for Python step {step.step_id}: {e}\n{traceback.format_exc()}"
-                ai_logger.error(error_msg, exc_info=True)
-                yield StepErrorEvent(
-                    step_id=step.step_id, error=error_msg, agent_type=AgentType.PYTHON,
-                    step_type=StepType.PYTHON, session_id=session_id, notebook_id=self.notebook_id,
-                    cell_id=None, cell_params=None, result=None
-                )
-                step_result.add_error(error_msg)
-                step_results[step.step_id] = step_result
-                yield StepExecutionCompleteEvent(
-                    step_id=step.step_id, final_result_data=None, step_outputs=step_result.outputs,
-                    step_error=step_result.get_combined_error(), github_step_has_tool_errors=False,
-                    filesystem_step_has_tool_errors=False, python_step_has_tool_errors=True,
-                    session_id=session_id, notebook_id=self.notebook_id
-                )
-                return
-
+        
         generator = step_agent.execute(step, agent_input_data, session_id, context, db=db)
         async for event in generator:
             if isinstance(event, StatusUpdateEvent):
@@ -528,9 +371,10 @@ class StepProcessor:
         created_event_class: Type, # This should be Type[BaseEvent] or similar
         step_result: StepResult
     ) -> Tuple[Any, BaseEvent]:
-        """Process a tool success event and create a cell for it"""
+        """Process a tool success event and conditionally create a cell for it"""
         dependency_cell_ids = [cid for dep_id in step.dependencies for cid in plan_step_id_to_cell_ids.get(dep_id, [])]
         
+        # Determine cell_type (needed if cell is created)
         agent_to_cell_type_map = {
             AgentType.GITHUB: CellType.GITHUB, AgentType.FILESYSTEM: CellType.FILESYSTEM,
             AgentType.PYTHON: CellType.PYTHON, AgentType.SQL: CellType.SQL,
@@ -544,38 +388,58 @@ class StepProcessor:
                 f"that executed tool '{event.tool_name}'. Defaulting cell to AI_QUERY."
             )
 
-        created_cell_id, cell_params, cell_error = await self.cell_creator.create_tool_cell(
-            cell_tools=cell_tools, step=step, cell_type=cell_type,
-            agent_type=agent_type, tool_event=event,
-            dependency_cell_ids=dependency_cell_ids, session_id=session_id
-        )
-        
         tool_name_str = event.tool_name or "unknown_tool"
         serialized_result = self.cell_creator._serialize_tool_result(event.tool_result, tool_name_str)
-        step_result.add_output(serialized_result)
-        
-        if cell_error:
-            ai_logger.warning(f"Error creating cell for {step_type.value} tool {event.tool_name}: {cell_error}")
-            step_result.add_error(cell_error)
-            tool_event = created_event_class(
-                original_plan_step_id=step.step_id, cell_id=None,
-                tool_name=event.tool_name or "", tool_args=event.tool_args or {},
-                result=event.tool_result, cell_params=cell_params.model_dump() if cell_params else {},
-                session_id=session_id, notebook_id=self.notebook_id
-            )
-            return serialized_result, tool_event
-        
-        if created_cell_id:
-            step_result.add_cell_id(created_cell_id)
-            plan_step_id_to_cell_ids.setdefault(step.step_id, []).append(created_cell_id)
+        step_result.add_output(serialized_result) # Add output to step_result regardless of cell creation
 
+        created_cell_id: Optional[UUID] = None
+        cell_params_model: Optional[Any] = None # To store the Pydantic model for cell_params
+        cell_creation_error_msg: Optional[str] = None
+
+        # Conditionally create a cell
+        if tool_name_str not in self.INTERNAL_NOTEBOOK_CONTEXT_TOOLS:
+            ai_logger.info(f"Tool {tool_name_str} is not internal. Attempting to create cell.")
+            created_cell_id, cell_params_model, cell_creation_error_msg = await self.cell_creator.create_tool_cell(
+                cell_tools=cell_tools, step=step, cell_type=cell_type,
+                agent_type=agent_type, tool_event=event, # Pass the original event for context
+                dependency_cell_ids=dependency_cell_ids, session_id=session_id
+            )
+
+            if cell_creation_error_msg:
+                ai_logger.warning(f"Error creating cell for {step_type.value} tool {event.tool_name}: {cell_creation_error_msg}")
+                step_result.add_error(cell_creation_error_msg)
+                # created_cell_id remains None if error, cell_params_model might be partially filled by create_tool_cell or None
+            elif created_cell_id: # Cell creation was successful
+                ai_logger.info(f"Successfully created cell {created_cell_id} for tool {tool_name_str}.")
+                step_result.add_cell_id(created_cell_id)
+                plan_step_id_to_cell_ids.setdefault(step.step_id, []).append(created_cell_id)
+            else:
+                # This case (no error, no cell_id) might indicate an issue in create_tool_cell logic
+                ai_logger.warning(f"Cell creation for tool {tool_name_str} did not return an ID nor an error.")
+        else:
+            ai_logger.info(f"Skipping cell creation for internal notebook tool: {tool_name_str}")
+            # No cell is created, created_cell_id and cell_params_model remain None.
+
+        # Create the tool event, ensuring cell_id and cell_params are handled correctly
+        final_cell_params_dict: Optional[Dict[str, Any]] = None
+        if cell_params_model:
+            try:
+                final_cell_params_dict = cell_params_model.model_dump()
+            except Exception as e:
+                ai_logger.error(f"Failed to dump cell_params model for tool {tool_name_str}: {e}")
+                # Keep final_cell_params_dict as None
+        
         tool_event = created_event_class(
             original_plan_step_id=step.step_id,
             cell_id=str(created_cell_id) if created_cell_id else None,
-            tool_name=event.tool_name, tool_args=event.tool_args or {},
-            result=event.tool_result, cell_params=cell_params.model_dump() if cell_params else None,
-            session_id=session_id, notebook_id=self.notebook_id
+            tool_name=event.tool_name, # Use original tool_name from event
+            tool_args=event.tool_args or {},
+            result=event.tool_result, # Pass the raw tool_result as per current logic
+            cell_params=final_cell_params_dict, # Use the dumped dict or None
+            session_id=session_id,
+            notebook_id=self.notebook_id
         )
+
         return serialized_result, tool_event
     
     def _build_step_context(
@@ -667,9 +531,6 @@ class StepProcessor:
         if dependency_context:
             context["prompt"] += f"\n\nContext from Dependencies:\n" + "\n".join(dependency_context)
             ai_logger.info(f"Step {step.step_id} full dependency context: {' '.join(dependency_context)}")
-        else:
-            context["prompt"] += "\n\nContext from Dependencies:\nNo preceding steps or no relevant output from them.\n"
-            ai_logger.info(f"Step {step.step_id} no dependency context to add.")
         return context
     
     def _format_findings_for_report(

@@ -113,6 +113,7 @@ class AIAgent:
         try:
             from .notebook_context_tools import create_notebook_context_tools
             self._notebook_tools = create_notebook_context_tools(self.notebook_id, self.notebook_manager)
+            ai_logger.info(f"AIAgent: Successfully created {len(self._notebook_tools)} notebook context tools for notebook {self.notebook_id}.")
         except Exception as tool_err:
             ai_logger.error("Failed to create notebook context tools for AIAgent: %s", tool_err, exc_info=True)
             self._notebook_tools = []
@@ -133,6 +134,7 @@ class AIAgent:
             system_prompt=formatted_planner_prompt,
             tools=self._notebook_tools,  # type: ignore[arg-type]
         )
+        ai_logger.info(f"AIAgent: Investigation planner initialized for notebook {self.notebook_id} with {len(self._notebook_tools)} notebook context tools.")
 
         # Other agents will be initialized on demand
         self.plan_reviser = None
@@ -143,6 +145,7 @@ class AIAgent:
             system_prompt=MARKDOWN_GENERATOR_SYSTEM_PROMPT,
             tools=self._notebook_tools,  # type: ignore[arg-type]
         )
+        ai_logger.info(f"AIAgent: Markdown generator initialized for notebook {self.notebook_id} with {len(self._notebook_tools)} notebook context tools.")
         
         ai_logger.info(f"AIAgent initialized for notebook {notebook_id}.")
 
@@ -446,6 +449,7 @@ class AIAgent:
                 system_prompt=PLAN_REVISER_SYSTEM_PROMPT,
                 tools=self._notebook_tools,  # type: ignore[arg-type]
             )
+            ai_logger.info(f"AIAgent: PlanReviser agent initialized with {len(self._notebook_tools)} notebook context tools.")
             
         # Create revision request
         revision_request = PlanRevisionRequest(

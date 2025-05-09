@@ -2,9 +2,11 @@ import pytest
 import os
 import uuid
 from unittest.mock import patch, mock_open, MagicMock
+import tempfile
 
 from backend.ai.python_agent import PythonAgent, IMPORTED_DATA_BASE_PATH
 from backend.ai.models import FileDataRef
+from backend.services.notebook_manager import NotebookManager
 
 # Make PythonAgent importable for tests by temporarily adding to path if needed,
 # or ensure your test runner handles it. For now, assume it's discoverable.
@@ -243,3 +245,100 @@ class TestPythonAgentPrepareLocalFile:
 # TODO: Add tests for the main run_query method, mocking _prepare_local_file,
 # _get_stdio_server, _initialize_agent, and the agent.iter() flow.
 # This will be more involved due to the async generator nature and event yielding.
+
+# --- Tests for _prepare_local_file with direct_host_path ---
+
+@pytest.mark.asyncio
+async def test_prepare_local_file_direct_host_path_valid(python_agent_instance):
+    """Test _prepare_local_file with a valid, existing direct_host_path."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmpfile:
+        valid_path = tmpfile.name
+    
+    data_ref = FileDataRef(
+        type="direct_host_path", 
+        value=valid_path, 
+        original_filename="test.csv", 
+        source_cell_id="cell1"
+    )
+    
+    try:
+        # No os mocks needed as we created a real temp file for os.path.exists and os.path.isabs
+        result_path = await python_agent_instance._prepare_local_file(
+            data_ref, notebook_id="test_nb", session_id="test_session"
+        )
+        assert result_path == valid_path
+    finally:
+        if os.path.exists(valid_path):
+            os.remove(valid_path)
+
+@pytest.mark.asyncio
+async def test_prepare_local_file_direct_host_path_non_existent(python_agent_instance):
+    """Test _prepare_local_file with a non-existent direct_host_path."""
+    non_existent_path = "/absolute/path/that/does/not/exist/file.csv"
+    data_ref = FileDataRef(
+        type="direct_host_path", 
+        value=non_existent_path, 
+        original_filename="test.csv", 
+        source_cell_id="cell1"
+    )
+    
+    with patch('os.path.isabs', return_value=True), \
+         patch('os.path.exists', return_value=False):
+        with pytest.raises(FileNotFoundError, match=f"Direct host path '{non_existent_path}' does not exist"):
+            await python_agent_instance._prepare_local_file(
+                data_ref, notebook_id="test_nb", session_id="test_session"
+            )
+
+@pytest.mark.asyncio
+async def test_prepare_local_file_direct_host_path_not_absolute(python_agent_instance):
+    """Test _prepare_local_file with a non-absolute direct_host_path."""
+    relative_path = "relative/path/file.csv"
+    data_ref = FileDataRef(
+        type="direct_host_path", 
+        value=relative_path, 
+        original_filename="test.csv", 
+        source_cell_id="cell1"
+    )
+    
+    with patch('os.path.isabs', return_value=False):
+        with pytest.raises(ValueError, match=f"Direct host path '{relative_path}' provided is not absolute"):
+            await python_agent_instance._prepare_local_file(
+                data_ref, notebook_id="test_nb", session_id="test_session"
+            )
+
+@pytest.mark.asyncio
+@patch('backend.ai.python_agent.os.makedirs') # Mock makedirs for content_string
+@patch('builtins.open', new_callable=MagicMock) # Mock open for content_string
+async def test_prepare_local_file_content_string(mock_open, mock_makedirs, python_agent_instance, tmp_path):
+    """Test _prepare_local_file with type content_string."""
+    # Override IMPORTED_DATA_BASE_PATH for this test to use pytest's tmp_path
+    with patch('backend.ai.python_agent.IMPORTED_DATA_BASE_PATH', str(tmp_path)):
+        csv_content = "col1,col2\nval1,val2"
+        data_ref = FileDataRef(
+            type="content_string", 
+            value=csv_content, 
+            original_filename="my_data.csv", 
+            source_cell_id="cell2"
+        )
+        
+        # Mock the behavior of open().write()
+        mock_file_handle = MagicMock()
+        mock_open.return_value.__enter__.return_value = mock_file_handle
+
+        result_path = await python_agent_instance._prepare_local_file(
+            data_ref, notebook_id="test_nb_content", session_id="test_session_content"
+        )
+        
+        mock_makedirs.assert_called_once()
+        # Path construction: IMPORTED_DATA_BASE_PATH / notebook_id / session_id / filename
+        # Check if the path structure is as expected (partially)
+        assert str(tmp_path / "test_nb_content" / "test_session_content") in result_path
+        assert result_path.endswith(".csv")
+        
+        # Verify that open was called with the result_path and 'w' mode
+        mock_open.assert_called_once_with(result_path, 'w', encoding='utf-8')
+        # Verify that content was written
+        mock_file_handle.write.assert_called_once_with(csv_content)
+
+# Consider adding a similar test for "local_staged_path" if not already present,
+# ensuring it checks for file existence and returns the path.

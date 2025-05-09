@@ -161,17 +161,16 @@ class FileSystemConnectionHandler(MCPConnectionHandler):
             return False, f"An unexpected error occurred: {str(e)}"
 
     def get_stdio_params(self, config: Dict[str, Any]) -> StdioServerParameters:
-        """Generate MCP server command and arguments based on config (assumes Docker mode)."""
-        logger.debug(f"Generating MCP stdio params for config (Docker mode assumed): {config}")
+        """Generate MCP server command and arguments based on config (NPX mode)."""
+        logger.debug(f"Generating MCP stdio params for config (NPX mode): {config}")
         
-        # Remove execution_mode if present from old configs before validation
         config_for_validation = config.copy()
         config_for_validation.pop('execution_mode', None)
         
         try:
-            # Validate the config against the base model to ensure required fields exist
             validated_config = FileSystemConnectionBase(**config_for_validation)
-            directories = validated_config.allowed_directories
+            if not validated_config.allowed_directories:
+                raise ValueError("No allowed directories configured for Filesystem MCP.")
         except ValidationError as e:
             logger.error(f"Invalid configuration provided to get_stdio_params: {e}")
             raise ValueError(f"Invalid configuration for starting MCP: {e}")
@@ -179,67 +178,47 @@ class FileSystemConnectionHandler(MCPConnectionHandler):
             logger.error(f"Missing key '{e}' in configuration for get_stdio_params")
             raise ValueError(f"Missing required configuration key: {e}")
 
-        # --- Always use Docker Mode --- 
-        command = "docker"
-        args: List[str]
+        command = "npx"
+        server_script = "@modelcontextprotocol/server-filesystem"
         env: Dict[str, str] = os.environ.copy() 
+
+        # For NPX mode, the server is often initialized with a single root path.
+        # We'll use the first allowed_directory.
+        # The server, when executing tools with absolute paths (e.g., read_file('/abs/path')),
+        # should ideally validate those paths against all configured allowed_directories.
+        server_root_path_config_value = validated_config.allowed_directories[0]
         
-        project_host_root = os.environ.get("SHERLOG_PROJECT_HOST_ROOT")
-        logger.info(f"SHERLOG_PROJECT_HOST_ROOT environment variable: {project_host_root}")
+        if len(validated_config.allowed_directories) > 1:
+            logger.warning(
+                f"Multiple allowed_directories configured: {validated_config.allowed_directories}. "
+                f"Using the first one ('{server_root_path_config_value}') as the primary path argument for the NPX server. "
+                f"The NPX server itself must handle/validate operations against all configured allowed_directories for security."
+            )
 
-        mount_args = []
-        for original_dir_path in directories: # 'directories' here are the allowed_directories from config
-            src_host_path = original_dir_path # Default to using the path as is
+        actual_server_root_path = server_root_path_config_value
+        logger.info(f"Using NPX server root path directly from configuration: '{actual_server_root_path}'")
 
-            # Handle special "/app" and "/app/..." placeholders by resolving them against SHERLOG_PROJECT_HOST_ROOT
-            if original_dir_path == "/app":
-                if not project_host_root:
-                    logger.error("An allowed_directory is '/app', but SHERLOG_PROJECT_HOST_ROOT environment variable is not set.")
-                    raise ValueError("Configuration error: '/app' in allowed_directories requires SHERLOG_PROJECT_HOST_ROOT to be set in the backend environment.")
-                src_host_path = project_host_root
-                logger.info(f"Mapping allowed_directory '/app' to host path: {src_host_path}")
-            elif original_dir_path.startswith("/app/"):
-                if not project_host_root:
-                    logger.error(f"An allowed_directory ('{original_dir_path}') starts with '/app/', but SHERLOG_PROJECT_HOST_ROOT environment variable is not set.")
-                    raise ValueError(f"Configuration error: '{original_dir_path}' in allowed_directories requires SHERLOG_PROJECT_HOST_ROOT to be set.")
-                
-                # Get the part of the path relative to "/app/"
-                # e.g., if original_dir_path is "/app/data", relative_path is "data"
-                # if original_dir_path is "/app/", relative_path is ""
-                relative_path = original_dir_path[len("/app/"):] if len(original_dir_path) > len("/app/") else ""
-                src_host_path = os.path.join(project_host_root, relative_path)
-                logger.info(f"Mapping allowed_directory '{original_dir_path}' to host path: {src_host_path}")
-
-            # Validate that the final source path for the mount is absolute
-            if not os.path.isabs(src_host_path):
-                 logger.error(f"Calculated source path '{src_host_path}' for Docker mount is not absolute. Original configured path: '{original_dir_path}'. SHERLOG_PROJECT_HOST_ROOT: '{project_host_root}'")
-                 raise ValueError(f"Source path for Docker mount must be absolute. Calculated '{src_host_path}' from configured path '{original_dir_path}'.")
-
-            # Determine the basename from the original_dir_path to maintain the desired /projects/... structure
-            # e.g. /app -> app, /app/data -> data
-            temp_path_for_basename = original_dir_path.rstrip('/')
-            basename = os.path.basename(temp_path_for_basename)
-            
-            if not basename: # Handles cases like original_dir_path being "/" or "///"
-                logger.error(f"Could not determine a valid basename for Docker mount destination from original path: '{original_dir_path}'. This path will be skipped for mounting.")
-                # Optionally, raise ValueError or continue to next directory
-                # For now, let's raise an error as an empty basename for /projects/{basename} is problematic
-                raise ValueError(f"Invalid directory path for Docker mount destination (empty basename): {original_dir_path}")
-            
-            destination = f"/projects/{basename}" # This creates /projects/app, /projects/data etc.
-            mount_args.extend(["--mount", f"type=bind,src={src_host_path},dst={destination}"])
+        if not os.path.isabs(actual_server_root_path):
+             logger.error(f"Configured root path '{actual_server_root_path}' for NPX server is not absolute. Original configured path: '{server_root_path_config_value}'.")
+             raise ValueError(f"Root path for NPX server must be absolute. Configured path was '{actual_server_root_path}'.")
         
+        # Ensure the resolved path actually exists for the server to start correctly.
+        if not os.path.isdir(actual_server_root_path):
+            logger.error(f"Resolved NPX server root path '{actual_server_root_path}' does not exist or is not a directory.")
+            raise ValueError(f"NPX server root path '{actual_server_root_path}' must exist and be a directory.")
+
         args = [
-            "run",
-            "-i", 
-            "--rm", 
-        ] + mount_args + [
-            "mcp/filesystem", 
-            "/projects" 
+            "-y",          # Assume 'yes' to any prompts from npx
+            server_script,
+            actual_server_root_path # The primary path argument for the server
+            # If the server needs to know all allowed_directories, this would need to be passed differently,
+            # e.g., via env vars or a temporary config file, if the server supports it.
+            # For now, we pass only one main path, relying on the server's ability to handle
+            # absolute paths in tool calls and validate them against its own full configuration.
         ]
-        # --- End Docker Mode Logic ---
+        
 
-        logger.info(f"Filesystem MCP stdio params: command='{command}', args={args}")
+        logger.info(f"Filesystem MCP NPX stdio params: command='{command}', args={args}")
         return StdioServerParameters(command=command, args=args, env=env) 
 
     # --- Abstract Method Implementations (or Placeholders) ---

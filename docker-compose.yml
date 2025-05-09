@@ -8,6 +8,7 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - /var/run/docker.sock:/var/run/docker.sock
+      - ${SHERLOG_HOST_FS_ROOT}:${SHERLOG_HOST_FS_ROOT}:ro
     env_file:
       - .env
     environment:
@@ -15,7 +16,7 @@ services:
       - SHERLOG_AI_MODEL=${SHERLOG_AI_MODEL:-anthropic/claude-3.7-sonnet}
       - SHERLOG_REDIS_HOST=redis
       - SHERLOG_REDIS_PORT=6379
-      - SHERLOG_PROJECT_HOST_ROOT=${PWD}
+      - SHERLOG_HOST_FS_ROOT=${SHERLOG_HOST_FS_ROOT}
     ports:
       - "9091:8000"
       - "9092:8100"
@@ -63,10 +64,13 @@ services:
     volumes:
       - ./integration_tests:/app/integration_tests
       - ./backend:/app/backend # Mount local backend code
+      # If tests also need to simulate this host FS access, they might need a similar mount
+      # - ${SHERLOG_HOST_FS_ROOT}:${SHERLOG_HOST_FS_ROOT}:ro 
     env_file:
       - .env # Or define specific environment variables if needed
     environment:
       - BACKEND_URL=http://backend:8000 # Service name 'backend' is resolvable within Docker network
+      - SHERLOG_HOST_FS_ROOT=${SHERLOG_HOST_FS_ROOT} # Make it available to tests too
     depends_on:
       backend:
         condition: service_healthy

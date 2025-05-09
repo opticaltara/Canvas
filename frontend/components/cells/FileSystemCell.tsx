@@ -191,32 +191,73 @@ const FileSystemCell: React.FC<FileSystemCellProps> = ({
     );
   };
 
-  const renderFileSystemResult = (content: any): React.ReactNode => {
-    console.log("[FileSystemCell] renderFileSystemResult received content type:", typeof content);
+  const renderFileSystemResult = (resultData: any): React.ReactNode => {
+    console.log("[FileSystemCell] renderFileSystemResult received resultData:", resultData, "Type:", typeof resultData);
 
-    if (typeof content === 'string') {
-      const parsedCsv = parseCsv(content);
-      if (parsedCsv) {
-        return renderCsvTable(parsedCsv, 10);
+    let potentialCsvString: string | null = null;
+
+    if (typeof resultData === 'string') { // Case 1: resultData is already the string content
+      potentialCsvString = resultData;
+      console.log("[FileSystemCell] resultData is a string, attempting CSV parse.");
+    } else if (resultData && typeof resultData === 'object') {
+      // Case 2: resultData is an object, potentially containing the content.
+
+      // Specifically for 'read_file', the string is in resultData.content.content_preview
+      if (cell.tool_name === 'read_file' &&
+          resultData.content && // Check if resultData.content exists
+          typeof resultData.content === 'object' && // and is an object
+          resultData.content !== null && // and is not null
+          typeof resultData.content.content_preview === 'string') { // then check its content_preview
+        potentialCsvString = resultData.content.content_preview;
+        console.log("[FileSystemCell] Extracted 'content_preview' from read_file result (result.content.content_preview).");
+      }
+      // Fallback: Check if resultData.content is directly a string (for other tools or structures)
+      else if (resultData.content && typeof resultData.content === 'string') {
+        potentialCsvString = resultData.content;
+        console.log("[FileSystemCell] Extracted 'content' from resultData (result.content was a string).");
+      }
+      // Add other specific checks if necessary, for example, if the top-level resultData itself might have content_preview
+      else if (typeof resultData.content_preview === 'string') {
+        potentialCsvString = resultData.content_preview;
+        console.log("[FileSystemCell] Extracted 'content_preview' directly from resultData (result.content_preview).");
       }
     }
 
-    if (Array.isArray(content) && content.every(item => typeof item === 'string')) {
-      if (content.length === 0) {
+    if (potentialCsvString !== null) {
+      const parsedCsv = parseCsv(potentialCsvString);
+      if (parsedCsv) {
+        console.log("[FileSystemCell] CSV parsing successful, rendering table.");
+        return renderCsvTable(parsedCsv, 10); // Max 10 rows initially
+      } else {
+        // If it was a string but not valid CSV, render it as preformatted text.
+        console.log("[FileSystemCell] CSV parsing failed for the extracted string, rendering as plain text.");
+        return (
+          <pre className="text-xs whitespace-pre-wrap break-words font-mono bg-white p-1.5 border border-gray-200 rounded max-h-[400px] overflow-auto">
+            {potentialCsvString}
+          </pre>
+        );
+      }
+    }
+
+    // Fallback for other types of results (e.g. list_dir returns string[]) or if no CSV string found
+    if (Array.isArray(resultData) && resultData.every(item => typeof item === 'string')) {
+      if (resultData.length === 0) {
          return <p className="text-xs text-gray-500 p-1.5">Empty list.</p>;
       }
       return (
         <ul className="list-none p-1.5 text-xs font-mono bg-white border border-gray-200 rounded max-h-[400px] overflow-auto">
-          {content.map((item, index) => (
+          {resultData.map((item, index) => (
             <li key={index} className="whitespace-pre-wrap break-words">{item}</li>
           ))}
         </ul>
       );
     }
 
+    // Final fallback: render as JSON if object, or string if other primitive.
+    console.log("[FileSystemCell] No specific rendering path taken, using default JSON/string representation for:", resultData);
     return (
       <pre className="text-xs whitespace-pre-wrap break-words font-mono bg-white p-1.5 border border-gray-200 rounded max-h-[400px] overflow-auto">
-        {content && typeof content === 'object' ? JSON.stringify(content, null, 2) : String(content ?? '')}
+        {resultData && typeof resultData === 'object' ? JSON.stringify(resultData, null, 2) : String(resultData ?? '')}
       </pre>
     );
   };
@@ -463,9 +504,9 @@ const FileSystemCell: React.FC<FileSystemCellProps> = ({
              {isResultExpanded && (
                 <CardContent className="p-2 border-t">
                    <div className="mt-1 rounded overflow-x-auto max-h-[450px]">
-                     {renderFileSystemResult(cell.result.content)}
-                     {cell.result.execution_time !== undefined && (
-                       <p className="text-xs text-gray-500 mt-2">Execution Time: {cell.result.execution_time.toFixed(2)}s</p>
+                     {renderFileSystemResult(cell.result)}
+                     {cell.result?.execution_time !== undefined && (
+                       <p className="text-xs text-gray-500 mt-2">Execution Time: {typeof cell.result.execution_time === 'number' ? cell.result.execution_time.toFixed(2) : cell.result.execution_time}s</p>
                      )}
                    </div>
                 </CardContent>
@@ -498,7 +539,11 @@ const areEqual = (prevProps: FileSystemCellProps, nextProps: FileSystemCellProps
   if (prevCell.id !== nextCell.id || 
       prevCell.status !== nextCell.status ||
       prevCell.tool_name !== nextCell.tool_name ||
-      prevCell.result !== nextCell.result || 
+      // Compare cell.result deeply for relevant changes, but avoid overly sensitive comparisons
+      // For simplicity, we'll rely on status changes or explicit content changes to re-render result.
+      // A more sophisticated diff might be needed if cell.result structure is very dynamic and
+      // changes subtly without status/content changes.
+      JSON.stringify(prevCell.result) !== JSON.stringify(nextCell.result) ||
       JSON.stringify(prevCell.tool_arguments) !== JSON.stringify(nextCell.tool_arguments)) 
   {
     return false;

@@ -57,7 +57,8 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 # Ensure PATH includes /root/.local/bin for this RUN command if uv was just installed to user's bin
 RUN PATH=/root/.local/bin:$PATH git clone https://github.com/reading-plus-ai/mcp-server-data-exploration.git /opt/mcp-server-data-exploration \
  && cd /opt/mcp-server-data-exploration \
- && PATH=/root/.local/bin:$PATH /root/.local/bin/uv sync
+ && PATH=/root/.local/bin:$PATH /root/.local/bin/uv sync \
+ && PATH=/root/.local/bin:$PATH /root/.local/bin/uv pip install --system tabulate matplotlib seaborn pandas scikit-learn
 
 # Copy requirements first for better caching
 COPY requirements.txt .

@@ -281,6 +281,7 @@ class ChatAgentService:
         try:
             from backend.ai.notebook_context_tools import create_notebook_context_tools
             notebook_tools = create_notebook_context_tools(self.notebook_id, self.notebook_manager)
+            chat_agent_logger.info(f"ChatAgentService: Successfully created {len(notebook_tools)} notebook context tools for notebook {self.notebook_id}.")
         except Exception as tool_err:
             chat_agent_logger.error("Failed to create notebook context tools for chat_agent: %s", tool_err, exc_info=True)
             notebook_tools = []
@@ -297,6 +298,7 @@ class ChatAgentService:
             result_type=ClarificationResult,
             tools=notebook_tools,  # type: ignore[arg-type]
         )
+        chat_agent_logger.info(f"ChatAgentService: Chat agent initialized for notebook {self.notebook_id} with {len(notebook_tools)} notebook context tools.")
 
         # Setup Investigation Agent (ai_agent)
         chat_agent_logger.info(f"Initializing AIAgent for notebook {self.notebook_id} with sources: {self._available_data_source_types}")
