@@ -10,6 +10,18 @@ Sherlog Canvas is a reactive notebook interface for software engineering investi
 - **Specialized Cell Types**: SQL, log queries, metrics, Python code, and more
 - **Collaborative Investigation Environment**: AI and users work together to solve problems
 
+## Supported Cell Types
+
+| Cell Type | Purpose |
+|-----------|---------|
+| `markdown` | Rich-text documentation |
+| `python` | Execute Python code inside an isolated sandbox |
+| `github` | Interact with the GitHub API |
+| `filesystem` | Read-only access to a host directory (needs `SHERLOG_HOST_FS_ROOT`) |
+| `summarization` | AI-generated summaries |
+| `investigation_report` | Render a structured investigation write-up |
+| `ai_query` | Generic AI agent cell |
+
 ## Architecture
 
 Sherlog Canvas consists of:
@@ -22,37 +34,55 @@ Sherlog Canvas consists of:
 
 ## Quick Start
 
-Sherlog Canvas now includes a convenient startup script that handles all components using Docker Compose:
+Getting from clone to a fully working instance only requires two steps: create a `.env` file and run the bundled launcher script.
 
-1. Clone the repository:
+1. **Clone the repository**
    ```bash
    git clone https://github.com/yourusername/sherlog-canvas.git
    cd sherlog-canvas
    ```
 
-2. Create an environment file from the example:
-   ```bash
-   cp .env.example .env
+2. **Create a `.env` file** (minimum required configuration)
+
+   ```env
+   # .env – minimal setup
+   SHERLOG_OPENROUTER_API_KEY=your_openrouter_api_key_here   # required for AI features
+
+   # Optional – expose a read-only slice of your local filesystem to *filesystem* cells
+   # SHERLOG_HOST_FS_ROOT=/Users/$(whoami)
+
+   # Optional – override the default AI model
+   # SHERLOG_AI_MODEL=anthropic/claude-3.7-sonnet
+
+   # The database defaults to SQLite at ./data/sherlog.db – nothing to change for basic use.
    ```
 
-3. Edit the `.env` file to add your OpenRouter API key:
-   ```bash
-   OPENROUTER_API_KEY=your_openrouter_api_key_here
-   ```
+   Don't worry about memorising every knob – the [Configuration](#configuration) section lists them all with sensible defaults.
 
-4. Start all services with a single command:
+3. **Launch everything**
+
    ```bash
    ./start.sh
    ```
 
-5. Access the application at http://localhost:5173
+   The script will build and start the **backend API**, **frontend UI**, **Redis cache**, and any first-party MCP servers defined in `docker-compose.yml`.
 
-The start script handles:
-- Starting PostgreSQL MCP server in Docker
-- Starting Grafana MCP server in Docker
-- Starting the backend API server in Docker
+4. **Open Sherlog Canvas**
 
-All services are managed through Docker Compose for consistency and ease of use.
+   * Frontend UI:  http://localhost:3000
+   * Backend API: http://localhost:9091/api
+
+5. **Stop or view logs**
+
+   ```bash
+   # Stop all containers
+   docker-compose down
+
+   # Tail logs for every service
+   docker-compose logs -f
+   ```
+
+That's it – you now have a fully-functional, AI-powered investigative notebook running locally.
 
 ## Detailed Setup Guide
 
@@ -79,13 +109,9 @@ This is the easiest way to get Sherlog Canvas up and running. The `start.sh` scr
     ```
 
 2.  **Create and configure your environment file**:
-    Copy the example environment file:
-    ```bash
-    cp .env.example .env
-    ```
-    Open the `.env` file and add your `OPENROUTER_API_KEY`. You may also configure other variables as needed (see the [Configuration](#configuration) section).
+    Create a `.env` file (there is no example committed yet) and add at least your `SHERLOG_OPENROUTER_API_KEY`. You may also override other settings as needed (see the [Configuration](#configuration) section).
     ```env
-    OPENROUTER_API_KEY=your_openrouter_api_key_here
+    SHERLOG_OPENROUTER_API_KEY=your_openrouter_api_key_here
     SHERLOG_DB_TYPE=sqlite # Default configuration uses SQLite
     # To use PostgreSQL instead, uncomment and configure the following:
     # SHERLOG_DB_TYPE=postgresql
@@ -143,7 +169,7 @@ If you prefer to run the backend server manually without Docker:
 
 4.  **Configure environment variables**:
     You can set environment variables directly in your shell or create a `.env` file and use a library like `python-dotenv` (though the application loads `.env` by default if present). Essential variables include:
-    *   `OPENROUTER_API_KEY`: Your OpenRouter API key.
+    *   `SHERLOG_OPENROUTER_API_KEY`: Your OpenRouter API key.
     *   `SHERLOG_DB_TYPE`: Set to `sqlite` (default) or `postgresql`.
     *   If `SHERLOG_DB_TYPE=sqlite`, `SHERLOG_DB_FILE` specifies the path (default: `./data/sherlog.db`).
     *   If `SHERLOG_DB_TYPE=postgresql`, ensure `DATABASE_URL` is set (e.g., `postgresql://user:pass@host:port/dbname`).
@@ -151,7 +177,7 @@ If you prefer to run the backend server manually without Docker:
 
     Example for `.env` file (defaulting to SQLite):
     ```env
-    OPENROUTER_API_KEY=your_openrouter_api_key_here
+    SHERLOG_OPENROUTER_API_KEY=your_openrouter_api_key_here
     SHERLOG_DB_TYPE=sqlite
     SHERLOG_DB_FILE=./data/sherlog.db
 
@@ -181,7 +207,7 @@ If you prefer to run the backend server manually without Docker:
 
 Once Sherlog Canvas is running, you can configure connections to your data sources:
 
-1.  **Access Sherlog Canvas**: Open the application in your browser (e.g., `http://localhost:5173`).
+1.  **Access Sherlog Canvas**: Open the application in your browser (e.g., `http://localhost:3000`).
 2.  **Navigate to Data Connections**: Find the "Data Connections" or "Settings" section in the UI.
 3.  **Add a New Connection**:
     *   Click "Add Connection" or a similar button.
@@ -348,8 +374,9 @@ Configuration is managed through environment variables with the `SHERLOG_` prefi
 | `SHERLOG_DEBUG` | Enable debug mode | `false` |
 | `SHERLOG_CORS_ORIGINS` | CORS origins (comma-separated) | `*` |
 | `SHERLOG_AUTH_ENABLED` | Enable authentication | `false` |
-| `SHERLOG_ANTHROPIC_API_KEY` | Anthropic API key for Claude | |
-| `SHERLOG_ANTHROPIC_MODEL` | Claude model to use | `claude-3-7-sonnet-20250219` |
+| `SHERLOG_OPENROUTER_API_KEY` | OpenRouter API key (enables AI features) | *(none)* |
+| `SHERLOG_AI_MODEL` | LLM model identifier passed to OpenRouter | `anthropic/claude-3.7-sonnet` |
+| `SHERLOG_HOST_FS_ROOT` | Host path to mount read-only for `filesystem` cells | *(unset)* |
 | `SHERLOG_LOGFIRE_TOKEN` | LogFire token for logging | |
 | `SHERLOG_ENVIRONMENT` | Environment (development, production) | `development` |
 | `SHERLOG_CONNECTION_STORAGE_TYPE` | Storage type for connections (file, env, db, none) | `file` |
@@ -385,7 +412,9 @@ sherlog-canvas/
 
 ## Extending Sherlog Canvas
 
-### Adding a New MCP Server Integration
+- Fork or create an MCP server that exposes a REST/JSON interface – see [`mcp-grafana`](https://github.com/grafana/mcp-grafana) for inspiration.
+- Drop a small **connection handler** into `backend/services/connection_handlers/` that translates notebook cell requests into HTTP calls against your server.
+- Register the handler with `register_handler()` so the backend can discover it.
+- Re-build and start the containers – the frontend will automatically list any new connection types exposed by the backend.
 
-1. Find or create an MCP server for your data source
-2. Add connection type to `
+Sherlog's plugin-friendly architecture lets you adapt the notebook to your organisation's unique data sources without touching the core codebase.

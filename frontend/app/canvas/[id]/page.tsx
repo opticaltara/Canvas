@@ -53,6 +53,25 @@ export default function CanvasPage() {
     }
   }, [notebookId, setStoreActiveNotebook])
 
+  // Effect to scroll to new cells
+  useEffect(() => {
+    // Find the *last* cell in the array that is marked as new.
+    const newCells = cells.filter(c => c.isNew);
+    if (newCells.length > 0) {
+      const cellToScrollTo = newCells[newCells.length - 1]; // Scroll to the latest new cell
+      console.log(`[CanvasPage] Attempting to scroll to new cell: ${cellToScrollTo.id}`);
+      setTimeout(() => { // Timeout to ensure DOM is updated
+        const element = document.getElementById(`cell-${cellToScrollTo.id}`);
+        if (element) {
+          console.log(`[CanvasPage] Scrolling to element:`, element);
+          element.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        } else {
+          console.warn(`[CanvasPage] Could not find element for new cell ${cellToScrollTo.id} to scroll to.`);
+        }
+      }, 100); // A small delay for rendering.
+    }
+  }, [cells]); // Trigger when cells array changes
+
   const handleCreateCell = useCallback(
     (params: CellCreationParams) => {
       console.log(`🔍 handleCreateCell called. Step ID: ${params.step_id}, Cell ID: ${params.id}. Full params:`, params);
@@ -642,6 +661,7 @@ export default function CanvasPage() {
             {cells.map((cell, index) => (
               <div
                 key={cell.id}
+                id={`cell-${cell.id}`}
                 className={`cell-container ${deletingCellId === cell.id ? "deleted" : ""} ${cell.isNew ? "cell-enter" : ""}`}
               >
                 <CellFactory
