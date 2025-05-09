@@ -21,6 +21,7 @@ var/
 *.egg
 venv/
 .venv/
+!frontend/lib/
 
 # Node
 node_modules/
