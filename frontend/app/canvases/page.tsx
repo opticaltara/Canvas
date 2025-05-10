@@ -161,7 +161,7 @@ const CreateCanvasDialogContent: React.FC<CreateCanvasDialogContentProps> = ({
   isLoading,
 }) => {
   return (
-    <DialogContent>
+    <DialogContent className="bg-white">
       <DialogHeader>
         <DialogTitle>Create New Canvas</DialogTitle>
         <DialogDescription>Create a new canvas to start your analysis.</DialogDescription>
