@@ -225,7 +225,7 @@ class GitHubQueryAgent:
                     notebook_id=notebook_id
                 )
                 attempt_failed = False
-                # current_attempt_success = False # Track success within this attempt - success_occurred is global
+                current_attempt_success = False # Track success within this attempt - success_occurred is global
                 last_error_for_attempt = None # Specific to this attempt
                 agent_produced_final_result = False # Flag if agent completed cleanly
 

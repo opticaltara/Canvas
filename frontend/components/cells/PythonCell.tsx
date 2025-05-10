@@ -53,7 +53,7 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
   const [copiedStdout, setCopiedStdout] = useState(false);
   const [copiedStderr, setCopiedStderr] = useState(false);
   const [copiedReturnValue, setCopiedReturnValue] = useState(false);
-  const [isResultExpanded, setIsResultExpanded] = useState(true); // State for result card expansion
+  const [isResultExpanded, setIsResultExpanded] = useState(false); // State for result card expansion
 
   const executionResult = cell.result?.content as PythonExecutionResult | null;
   const executionError = cell.result?.error; // General cell error, if any
@@ -62,7 +62,7 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
   const areAllCellsExpanded = useConnectionStore((state) => state.areAllCellsExpanded);
 
   // State for controlled accordion for Tool Arguments
-  const [argsAccordionValue, setArgsAccordionValue] = useState<string>(areAllCellsExpanded ? "item-1" : "");
+  const [argsAccordionValue, setArgsAccordionValue] = useState<string>("");
 
   // Effect to sync Tool Arguments accordion with global state
   useEffect(() => {

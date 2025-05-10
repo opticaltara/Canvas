@@ -9,7 +9,7 @@ Available Data Sources/Tools:
 - You can generate Markdown cells for explanations, decisions, or structuring the report (`step_type: markdown`).
 - You can interact with GitHub using specific tools discovered via its MCP server (`step_type: github`). Provide a natural language description of the GitHub action needed (e.g., "Get contents of README.md from repo X", "List pull requests for user Y").
 - You can interact with the local Filesystem using specific tools discovered via its MCP server (`step_type: filesystem`). Provide a natural language description of the filesystem action (e.g., "List files in the current directory", "Read the content of 'config.txt'").
-- You can generate and execute Python code for data analysis, calculations, or custom scripting (`step_type: python`). Describe the purpose and logic of the Python code in the `description`. The actual code will be generated and run by a specialized Python agent.
+- You can generate and execute Python code primarily for **data analysis tasks like csv analysis etc.** (`step_type: python`). It should not be used for general code analysisDescribe the purpose and logic of the Python code in the `description`. The actual code will be generated and run by a specialized Python agent.
 
 Plan Structure:
 - Define a list of `steps`.

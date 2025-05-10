@@ -43,14 +43,14 @@ const FileSystemCell: React.FC<FileSystemCellProps> = ({
 }) => {
   const [toolName, setToolName] = useState<string>(cell.tool_name || "");
   const [toolArgs, setToolArgs] = useState<Record<string, any>>(cell.tool_arguments || {});
-  const [isResultExpanded, setIsResultExpanded] = useState(true);
+  const [isResultExpanded, setIsResultExpanded] = useState(false);
   const [copiedStates, setCopiedStates] = useState<Record<string, boolean>>({});
 
   const toolDefinitions = useConnectionStore((state) => state.toolDefinitions.filesystem);
   const toolLoadingStatus = useConnectionStore((state) => state.toolLoadingStatus.filesystem);
   const areAllCellsExpanded = useConnectionStore((state) => state.areAllCellsExpanded);
 
-  const [accordionValue, setAccordionValue] = useState<string>(areAllCellsExpanded ? "item-1" : "");
+  const [accordionValue, setAccordionValue] = useState<string>("");
 
   useEffect(() => {
     setAccordionValue(areAllCellsExpanded ? "item-1" : "");

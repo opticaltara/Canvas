@@ -56,7 +56,7 @@ const GitHubCellComponent: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpd
 
   const [toolForms, setToolForms] = useState<ToolForm[]>([{ toolName: "", toolArgs: {} }])
   const [activeToolIndex, setActiveToolIndex] = useState(0) // Kept for consistency, though only one tool form
-  const [isResultExpanded, setIsResultExpanded] = useState(true)
+  const [isResultExpanded, setIsResultExpanded] = useState(false)
   const [copiedStates, setCopiedStates] = useState<Record<string, boolean>>({})
   const [showFullFileContent, setShowFullFileContent] = useState(false); // Moved from get_file_contents
 
@@ -66,7 +66,7 @@ const GitHubCellComponent: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpd
   const areAllCellsExpanded = useConnectionStore((state) => state.areAllCellsExpanded);
 
   // State for controlled accordion for Tool Arguments
-  const [argsAccordionValue, setArgsAccordionValue] = useState<string>(areAllCellsExpanded ? "tool-args" : "");
+  const [argsAccordionValue, setArgsAccordionValue] = useState<string>("");
 
   // Effect to sync Tool Arguments accordion with global state
   useEffect(() => {
