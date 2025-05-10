@@ -823,18 +823,18 @@ class NotebookManager:
             # logger.debug(f"No dependencies found or loaded for cell {db_cell.id}")
             pass
 
-        # Construct CellResult if result data exists
+        # Construct CellResult if there is existing result data, regardless of the current status.
+        # This ensures that cells marked STALE still expose their last known output so that
+        # planners / summarizers can read and display it.
         result_model = None
-        if db_cell.status in [CellStatus.SUCCESS.value, CellStatus.ERROR.value]:
-            # Only create result object if there's content or an error
-            if db_cell.result_content is not None or db_cell.result_error is not None:
-                 result_model = CellResult(
-                    content=db_cell.result_content,
-                    error=db_cell.result_error,
-                    execution_time=db_cell.result_execution_time or 0.0,
-                    # Use cell's updated_at as a proxy for result timestamp if needed
-                    timestamp=db_cell.updated_at or datetime.now(timezone.utc) 
-                 )
+        if db_cell.result_content is not None or db_cell.result_error is not None:
+            result_model = CellResult(
+                content=db_cell.result_content,
+                error=db_cell.result_error,
+                execution_time=db_cell.result_execution_time or 0.0,
+                # Use cell's updated_at as a proxy for result timestamp if needed
+                timestamp=db_cell.updated_at or datetime.now(timezone.utc)
+            )
 
         return Cell(
             id=UUID(db_cell.id),
