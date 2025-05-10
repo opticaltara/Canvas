@@ -133,7 +133,7 @@ def create_notebook_context_tools(
             
             results: List[Dict[str, Any]] = []
             for cell in ordered_cells:
-                if params.cell_type and cell.cell_type.value not in params.cell_type:
+                if params.cell_type and cell.type.value not in params.cell_type:
                     continue
                 if params.status and cell.status.value not in params.status:
                     continue
@@ -143,7 +143,7 @@ def create_notebook_context_tools(
                 results.append(
                     {
                         "id": str(cell.id),
-                        "type": cell.cell_type.value,
+                        "type": cell.type.value,
                         "status": cell.status.value,
                         "updated_at": (cell.updated_at or cell.created_at).isoformat()
                         if (cell.updated_at or cell.created_at)

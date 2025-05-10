@@ -305,12 +305,14 @@ export default function CanvasPage() {
                 newUniqueItems.map((c: Cell) => ({ id: c.id, type: c.type })),
               )
 
-              if (newUniqueItems.length > 0) {
-                console.log("🔔 Adding new cells to component state")
-                return [...prevCells, ...newUniqueItems]
+              if (newUniqueItems.length === 0) {
+                // No new cells; avoid triggering a state update to prevent redundant renders.
+                console.log("🔔 No new cells to add — skipping setCells call")
+                return prevCells
               }
-              console.log("🔔 No new cells to add")
-              return prevCells
+
+              console.log("🔔 Adding new cells to component state")
+              return [...prevCells, ...newUniqueItems]
             })
           } else {
             console.log("🔔 No relevant cells found for this notebook")
@@ -500,13 +502,9 @@ export default function CanvasPage() {
       }
       setCells(updatedCells)
 
-      await api.cells.update(notebookId, cellId, {
-        content: newContent,
-        metadata: {
-          ...updatedCells[cellIndex].metadata,
-          ...metadata,
-        },
-      })
+      // ⚠️ Removed immediate backend update on every keystroke.
+      // The latest content/metadata will be persisted when the cell is executed
+      // or blurred (future improvement).
     } catch (err) {
       console.error("Failed to update cell content:", err)
       toast({
@@ -532,7 +530,19 @@ export default function CanvasPage() {
       }
       setCells(updatedCells)
 
-      const toolArgsFromState = cells[cellIndex].metadata?.toolArgs
+      // --- Flush latest content & metadata before execution ---
+      try {
+        await api.cells.update(notebookId, cellId, {
+          content: updatedCells[cellIndex].content,
+          metadata: updatedCells[cellIndex].metadata,
+        })
+      } catch (updateErr) {
+        console.warn("[handleCellRun] Failed to autosave cell before execution:", updateErr)
+        // We continue to execute even if autosave failed – backend may still have older version.
+      }
+
+      const toolArgsFromState = updatedCells[cellIndex].metadata?.toolArgs
+
       const requestBody = { tool_arguments: toolArgsFromState || {} }
       const result = await api.cells.execute(notebookId, cellId, requestBody)
 
