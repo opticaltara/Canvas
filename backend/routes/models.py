@@ -16,34 +16,16 @@ AVAILABLE_MODELS = [
         "description": "Anthropic's Claude 3.7 Sonnet model"
     },
     {
-        "id": "anthropic/claude-3.5-sonnet",
-        "name": "Claude 3.5 Sonnet",
-        "provider": "Anthropic",
-        "description": "Anthropic's Claude 3.5 Sonnet model"
-    },
-    {
         "id": "google/gemini-2.5-pro-preview-03-25",
         "name": "Gemini 2.5 Pro",
         "provider": "Google",
         "description": "Google's Gemini 2.5 Pro model"
     },
     {
-        "id": "google/gemini-2.5-flash-preview",
-        "name": "Gemini 2.5 Flash",
-        "provider": "Google",
-        "description": "Google's Gemini 2.5 Flash model (Preview)"
-    },
-    {
-        "id": "openai/gpt-4o-2024-11-20",
-        "name": "GPT-4o",
+        "id": "openai/gpt-4.1",
+        "name": "GPT-4.1",
         "provider": "OpenAI",
-        "description": "OpenAI's GPT-4o model"
-    },
-    {
-        "id": "openai/o1",
-        "name": "O1",
-        "provider": "OpenAI",
-        "description": "OpenAI's O1 model"
+        "description": "OpenAI's GPT-4.1 model"
     }
 ]
 

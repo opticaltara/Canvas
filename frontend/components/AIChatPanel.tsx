@@ -945,7 +945,6 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
                             <CollapsibleTrigger asChild>
                               <Button
                                 variant="ghost"
-                                size="sm"
                                 className="flex justify-between items-center p-3 rounded-lg bg-white border border-gray-200 text-gray-800 w-full text-left h-auto"
                               >
                                 <div className="flex items-center space-x-2">

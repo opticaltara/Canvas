@@ -246,7 +246,14 @@ export const useCanvasStore = create<NotebookState>()(
           console.log("🔧 Found cell at index:", index)
 
           if (index >= 0) {
-            const mergedCell = { ...updatedCells[index], ...cellData };
+            // Merge while ignoring undefined values from partial updates so that
+            // we never overwrite an existing field with `undefined`.
+            const mergedCell = {
+              ...updatedCells[index],
+              ...Object.fromEntries(
+                Object.entries(cellData).filter(([_, v]) => v !== undefined),
+              ),
+            };
 
             // Skip state update if nothing actually changed to prevent unnecessary re-renders
             if (shallowEqual(updatedCells[index], mergedCell)) {
