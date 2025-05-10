@@ -562,30 +562,6 @@ export default function CanvasPage() {
     }
   }
 
-  const handleRunAll = async () => {
-    if (!notebookId || !cells.length) return
-
-    try {
-      for (const cell of cells) {
-        if (cell.type !== "markdown") {
-          await handleCellRun(cell.id)
-        }
-      }
-
-      toast({
-        title: "Success",
-        description: "All cells executed successfully.",
-      })
-    } catch (err) {
-      console.error("Failed to run all cells:", err)
-      toast({
-        variant: "destructive",
-        title: "Error",
-        description: "Failed to run all cells. Some cells may have errors.",
-      })
-    }
-  }
-
   const toggleChatPanel = () => {
     setIsChatPanelOpen(!isChatPanelOpen)
   }
@@ -644,15 +620,7 @@ export default function CanvasPage() {
                 </div>
               </div>
               <div className="flex items-center space-x-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleRunAll}
-                  className="bg-blue-50 hover:bg-blue-100 border-blue-200"
-                >
-                  <Play className="h-4 w-4 mr-1 text-blue-600" />
-                  Run All
-                </Button>
+                {/* Run All button removed */}
               </div>
             </div>
           </div>
