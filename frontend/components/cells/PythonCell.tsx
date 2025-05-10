@@ -45,16 +45,16 @@ interface PythonCellProps {
   // onUpdate needed if we allow editing code later
   onUpdate: (cellId: string, content: string, metadata?: Record<string, any>) => void 
   onDelete: (cellId: string) => void
+  isExecuting: boolean
 }
 
-const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpdate, onDelete }): React.ReactNode => {
+const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpdate, onDelete, isExecuting }): React.ReactNode => {
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedStdout, setCopiedStdout] = useState(false);
   const [copiedStderr, setCopiedStderr] = useState(false);
   const [copiedReturnValue, setCopiedReturnValue] = useState(false);
   const [isResultExpanded, setIsResultExpanded] = useState(true); // State for result card expansion
 
-  const isExecuting = cell.status === "running" || cell.status === "queued";
   const executionResult = cell.result?.content as PythonExecutionResult | null;
   const executionError = cell.result?.error; // General cell error, if any
 

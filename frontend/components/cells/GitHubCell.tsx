@@ -58,6 +58,7 @@ const GitHubCellComponent: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpd
   const [activeToolIndex, setActiveToolIndex] = useState(0) // Kept for consistency, though only one tool form
   const [isResultExpanded, setIsResultExpanded] = useState(true)
   const [copiedStates, setCopiedStates] = useState<Record<string, boolean>>({})
+  const [showFullFileContent, setShowFullFileContent] = useState(false); // Moved from get_file_contents
 
   // Access connection store for tool definitions and global expansion state
   const toolDefinitions = useConnectionStore((state) => state.toolDefinitions.github);
@@ -192,41 +193,41 @@ const GitHubCellComponent: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpd
     const { toolName, toolArgs } = toolForm
 
     // Use the store hook to get the latest status and definitions
-    const githubToolLoadingStatus = useConnectionStore(state => state.toolLoadingStatus.github);
-    const githubToolDefinitions = useConnectionStore(state => state.toolDefinitions.github);
+    // REMOVED: const githubToolLoadingStatus = useConnectionStore(state => state.toolLoadingStatus.github);
+    // REMOVED: const githubToolDefinitions = useConnectionStore(state => state.toolDefinitions.github);
 
     // Debug Logs (keep for now)
     console.log(`[GitHubCell ${cell.id}] Rendering inputs for: ${toolName}`);
-    console.log(`[GitHubCell ${cell.id}] GitHub Tool loading status from store:`, githubToolLoadingStatus);
-    console.log(`[GitHubCell ${cell.id}] Available GitHub tool definitions from store:`, githubToolDefinitions);
+    console.log(`[GitHubCell ${cell.id}] GitHub Tool loading status from store:`, toolLoadingStatus); // UPDATED to use top-level
+    console.log(`[GitHubCell ${cell.id}] Available GitHub tool definitions from store:`, toolDefinitions); // UPDATED to use top-level
 
     // Find the tool definition from the store
-    const toolInfo = githubToolDefinitions?.find(def => def.name === toolName);
+    const toolInfo = toolDefinitions?.find(def => def.name === toolName); // UPDATED to use top-level
     console.log(`[GitHubCell ${cell.id}] Found toolInfo:`, toolInfo);
 
     // Handle loading state MORE ROBUSTLY
     // Case 1: Status is undefined or 'idle' (fetching hasn't started or finished yet)
-    if (githubToolLoadingStatus === undefined || githubToolLoadingStatus === 'idle') {
+    if (toolLoadingStatus === undefined || toolLoadingStatus === 'idle') { // UPDATED to use top-level
         // Optionally trigger fetch if idle/undefined? Might be handled elsewhere.
         // For now, just show a generic loading message or potentially nothing if definitions
         // are expected to load shortly. Let's show loading.
         return <div className="text-xs text-gray-500">Initializing tool definitions...</div>;
     }
     // Case 2: Explicitly loading
-    if (githubToolLoadingStatus === 'loading') {
+    if (toolLoadingStatus === 'loading') { // UPDATED to use top-level
         return <div className="text-xs text-gray-500">Loading tool parameters...</div>;
     }
     // Case 3: Explicit error state from the store
-    if (githubToolLoadingStatus === 'error') {
+    if (toolLoadingStatus === 'error') { // UPDATED to use top-level
         return <div className="text-xs text-red-500">Error loading tool definitions from store.</div>; // Corrected quote
     }
     // Case 4: Status is 'success', but the specific tool isn't found
-    if (githubToolLoadingStatus === 'success' && !toolInfo) {
+    if (toolLoadingStatus === 'success' && !toolInfo) { // UPDATED to use top-level
         return <div className="text-xs text-red-500">Tool definition not found for: {toolName}</div>;
     }
     // Case 5: Tool definition not available for other reasons (shouldn't happen if logic above is correct)
      if (!toolInfo) {
-        return <div className="text-xs text-red-500">Tool definition unavailable for: {toolName}. Status: {githubToolLoadingStatus}</div>; // Fallback error
+        return <div className="text-xs text-red-500">Tool definition unavailable for: {toolName}. Status: {toolLoadingStatus}</div>; // Fallback error // UPDATED to use top-level
     }
 
 
@@ -942,7 +943,6 @@ const GitHubCellComponent: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpd
                 const decodedContent = fileData.encoding === 'base64' && fileData.content ? atob(fileData.content) : fileData.content || "(No content)";
                 const contentPreview = decodedContent.substring(0, 300); // Show a preview
                 const contentId = `file-content-${cell.id}`;
-                const [showFullContent, setShowFullContent] = useState(false); // State for show/hide
                 const language = getLanguageFromFilename(fileData.name || fileData.path || '');
 
                 displayContent = (
@@ -997,14 +997,22 @@ const GitHubCellComponent: React.FC<GitHubCellProps> = ({ cell, onExecute, onUpd
                         <div className="mt-3">
                             <div className="flex justify-between items-center mb-1">
                                 <h5 className="text-xs font-medium">File Content {fileData.encoding === 'base64' ? '(Base64 Decoded)' : ''}</h5>
+                                <Button
+                                    variant="link"
+                                    size="sm"
+                                    className="text-xs h-auto p-0"
+                                    onClick={() => setShowFullFileContent(!showFullFileContent)}
+                                >
+                                    {showFullFileContent ? "Show Less" : "Show More"}
+                                </Button>
                             </div>
                             <SyntaxHighlighter
                                 language={language}
                                 style={oneLight} // Use the imported style
-                                customStyle={{ maxHeight: showFullContent ? 'none' : '240px', overflowY: 'auto', margin: 0, fontSize: '0.75rem', border: '1px solid #e5e7eb', borderRadius: '0.25rem', padding: '0.375rem' }}
+                                customStyle={{ maxHeight: showFullFileContent ? 'none' : '240px', overflowY: 'auto', margin: 0, fontSize: '0.75rem', border: '1px solid #e5e7eb', borderRadius: '0.25rem', padding: '0.375rem' }}
                                 wrapLines={true}
                                 lineProps={{style: {whiteSpace: 'pre-wrap', wordBreak: 'break-all'}}} >
-                                {`${contentPreview}${decodedContent.length > 300 ? '\\n...' : ''}`}
+                                {showFullFileContent ? decodedContent : `${contentPreview}${decodedContent.length > 300 ? '\n...' : ''}`}
                             </SyntaxHighlighter>
                         </div>
                     </div>
