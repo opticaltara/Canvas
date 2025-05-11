@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 from backend.ai.models import StepType, InvestigationStepModel, PythonAgentInput # Added PythonAgentInput
 from backend.ai.step_result import StepResult
 from backend.ai.step_agents import StepAgent, MarkdownStepAgent, GitHubStepAgent, FileSystemStepAgent, PythonStepAgent, ReportStepAgent
+from backend.ai.media_agent import MediaTimelineAgent # Import MediaTimelineAgent
 from backend.ai.cell_creator import CellCreator
 from pydantic_ai.models.openai import OpenAIModel
 from backend.core.cell import CellType, CellStatus # Added CellStatus
@@ -73,6 +74,8 @@ class StepProcessor:
                 self._step_agents[step_type] = PythonStepAgent(self.notebook_id, notebook_manager=self.notebook_manager)
             elif step_type == StepType.INVESTIGATION_REPORT:
                 self._step_agents[step_type] = ReportStepAgent(self.notebook_id)
+            elif step_type == StepType.MEDIA_TIMELINE: # Add case for MediaTimelineAgent
+                self._step_agents[step_type] = MediaTimelineAgent(notebook_id=self.notebook_id)
             else:
                 raise ValueError(f"Unsupported step type: {step_type}")
                 
@@ -246,6 +249,21 @@ class StepProcessor:
                 yield StepExecutionCompleteEvent(step_id=step.step_id, final_result_data=None, step_outputs=step_result.outputs, step_error=step_result.get_combined_error(), github_step_has_tool_errors=False, filesystem_step_has_tool_errors=False, python_step_has_tool_errors=True, session_id=session_id, notebook_id=self.notebook_id)
                 return
         
+        # This was the part with agent_input_data for PythonAgent, MediaTimelineAgent also takes similar care
+        # The execute method of MediaTimelineAgent expects agent_input_data to be the query string.
+        if step.step_type == StepType.MEDIA_TIMELINE:
+            # For MediaTimelineAgent, agent_input_data is typically the media query (URL or reference).
+            # This usually comes from step.description or a specific parameter.
+            # The context["prompt"] is step.description by default in _build_step_context.
+            # We also need to ensure cell_tools is passed to the execute method.
+            # The StepAgent.execute signature is: step, agent_input_data, session_id, context, db
+            # MediaTimelineAgent.execute expects: step, agent_input_data, session_id, context, db
+            # And it extracts cell_tools from context.
+            # So, we need to ensure cell_tools is IN the context.
+            context['cell_tools'] = cell_tools # Ensure cell_tools is in the context
+            agent_input_data = context.get("prompt", step.description) # Default to step.description
+            ai_logger.info(f"Preparing to call MediaTimelineAgent.execute with input: {str(agent_input_data)[:200]}")
+
         generator = step_agent.execute(step, agent_input_data, session_id, context, db=db)
         async for event in generator:
             if isinstance(event, StatusUpdateEvent):

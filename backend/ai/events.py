@@ -44,6 +44,7 @@ class EventType(str, Enum):
     PYTHON_TOOL_CELL_CREATED = "python_tool_cell_created"
     PYTHON_TOOL_ERROR = "python_tool_error"
     PYTHON_STEP_PROCESSING_COMPLETE = "python_step_processing_complete" # Signal agent finished
+    MEDIA_TIMELINE_CELL_CREATED = "media_timeline_cell_created"
 
 class AgentType(str, Enum):
     GITHUB = "github_agent"
@@ -61,6 +62,7 @@ class AgentType(str, Enum):
     SQL = "sql"
     S3 = "s3"
     METRIC = "metric"
+    MEDIA_TIMELINE = "media_timeline"
 class StatusType(str, Enum):
     # General Statuses
     STARTING = "starting"
@@ -409,3 +411,9 @@ class PythonStepProcessingCompleteEvent(BaseEvent):
     status: StatusType = Field(default=StatusType.STEP_PROCESSING_COMPLETE, description="Fixed status for step completion")
     agent_type: AgentType = Field(default=AgentType.PYTHON, description="Fixed agent type")
     original_plan_step_id: str = Field(..., description="Original plan step ID being marked as complete")
+
+class MediaTimelineCellCreatedEvent(BaseEvent):
+    type: EventType = Field(default=EventType.MEDIA_TIMELINE_CELL_CREATED, description="Event type identifier")
+    cell_id: str = Field(..., description="ID of the created media timeline cell")
+    cell_params: Dict[str, Any] = Field(..., description="Parameters used to create the cell, including its content")
+    status: StatusType = Field(default=StatusType.SUCCESS, description="Fixed status for this event type")

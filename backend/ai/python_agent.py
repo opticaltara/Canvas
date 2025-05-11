@@ -13,8 +13,6 @@ import re # Added for parsing
 import uuid # For unique filenames
 from uuid import UUID # Import UUID
 
-from pydantic import UUID4 # To convert notebook_id string to UUID
-
 from pydantic_ai import Agent, UnexpectedModelBehavior, CallToolsNode
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
@@ -67,32 +65,6 @@ class PythonAgent:
         self.agent = None # Will be initialized in run_query
         self.notebook_manager: Optional[NotebookManager] = notebook_manager # Assign passed manager
         python_agent_logger.info(f"PythonAgent class initialized (model configured, agent instance created per run).")
-
-    async def _fetch_all_cells_data(self, notebook_id: str, db: AsyncSession) -> Optional[List[Dict[str, Any]]]: # db type AsyncSession
-        """Fetches all cell data for a given notebook_id."""
-        # This method assumes self.notebook_manager is available.
-        # It also assumes 'db' (AsyncSession) is passed appropriately or available.
-        if not self.notebook_manager: # Direct check now that it's an attribute
-            python_agent_logger.error("NotebookManager not available in PythonAgent. Cannot fetch cell data.")
-            return None
-        try:
-            notebook_uuid = UUID(notebook_id)
-            python_agent_logger.info(f"Fetching notebook {notebook_uuid} to get all cells data.")
-            # The 'db' session needs to be an AsyncSession instance here
-            notebook = await self.notebook_manager.get_notebook(db, notebook_uuid)
-            if notebook and notebook.cells:
-                cells_data = [cell.model_dump(mode='json') for cell in notebook.cells.values()]
-                python_agent_logger.info(f"Successfully fetched {len(cells_data)} cells for notebook {notebook_id}.")
-                return cells_data
-            else:
-                python_agent_logger.warning(f"Notebook {notebook_id} not found or has no cells.")
-                return None
-        except ValueError: # For invalid UUID string
-            python_agent_logger.error(f"Invalid notebook_id format: {notebook_id}. Cannot fetch cells.", exc_info=True)
-            return None
-        except Exception as e:
-            python_agent_logger.error(f"Error fetching all cells data for notebook {notebook_id}: {e}", exc_info=True)
-            return None
 
     async def _prepare_local_file(
         self, 
