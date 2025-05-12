@@ -64,7 +64,7 @@ export default function CanvasPage() {
         const element = document.getElementById(`cell-${cellToScrollTo.id}`);
         if (element) {
           console.log(`[CanvasPage] Scrolling to element:`, element);
-          element.scrollIntoView({ behavior: "smooth", block: "nearest" });
+          element.scrollIntoView({ behavior: "smooth", block: "end" });
         } else {
           console.warn(`[CanvasPage] Could not find element for new cell ${cellToScrollTo.id} to scroll to.`);
         }
@@ -131,6 +131,9 @@ export default function CanvasPage() {
           );
         }, 500);
       }
+
+      // Add a slight extra offset so the new cell isn't flush with the bottom edge
+      setTimeout(() => window.scrollBy({ top: 80, behavior: "smooth" }), 50);
     },
     [cells, notebookId] 
   );
@@ -577,7 +580,7 @@ export default function CanvasPage() {
   }
 
   return (
-    <div className={`p-6 pb-32 ${isChatPanelOpen ? "pr-96" : ""} transition-all duration-300`}>
+    <div className={`p-6 pb-32 ${isChatPanelOpen ? "pr-[440px]" : ""} transition-all duration-300`}>
       {loading ? (
         <div className="flex justify-center items-center h-64">
           <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>

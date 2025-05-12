@@ -22,6 +22,7 @@ class StepType(str, Enum):
     FILESYSTEM = "filesystem"
     PYTHON = "python"
     INVESTIGATION_REPORT = "investigation_report"
+    MEDIA_TIMELINE = "media_timeline"
 
 
 class StepCategory(str, Enum):

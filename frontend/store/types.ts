@@ -19,6 +19,7 @@ export const CellTypeSchema = z.enum([
   "investigation_report",
   "filesystem",
   "python",
+  "media_timeline",
 ])
 export type CellType = z.infer<typeof CellTypeSchema>
 

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pydantic_ai import Agent
 # OpenAIModel is no longer directly used, SafeOpenAIModel is used instead
 from pydantic_ai.providers.openai import OpenAIProvider
-from pydantic_ai.mcp import MCPServerHTTP
+from pydantic_ai.mcp import MCPServerHTTP, MCPServerStdio
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
 
 from backend.ai.models import (
@@ -24,17 +24,18 @@ from backend.ai.step_processor import StepProcessor
 
 from backend.core.cell import CellType, CellStatus
 from backend.ai.events import (
-    AgentType, BaseEvent, StatusType, 
-    PlanCreatedEvent, PlanCellCreatedEvent, 
-    StepStartedEvent, StepExecutionCompleteEvent, 
+    AgentType, BaseEvent, StatusType,
+    PlanCreatedEvent, PlanCellCreatedEvent,
+    StepStartedEvent, StepExecutionCompleteEvent,
     StepErrorEvent, InvestigationCompleteEvent,
-    ToolSuccessEvent, ToolErrorEvent
+    ToolSuccessEvent, ToolErrorEvent, PlanRevisedEvent,
 )
 from backend.ai.chat_tools import NotebookCellTools, CreateCellParams
 from backend.core.notebook import Notebook
 from backend.services.notebook_manager import NotebookManager
 from backend.db.database import get_db_session
 from backend.services.connection_manager import ConnectionManager, get_connection_manager
+from backend.services.connection_handlers.registry import get_handler
 from backend.ai.prompts.investigation_prompts import (
     INVESTIGATION_PLANNER_SYSTEM_PROMPT,
     PLAN_REVISER_SYSTEM_PROMPT,
@@ -84,32 +85,37 @@ class AIAgent:
         notebook_id: str,
         available_data_sources: List[str],
         notebook_manager: NotebookManager,
-        mcp_server_map: Optional[Dict[str, MCPServerHTTP]] = None,
-        connection_manager: Optional[ConnectionManager] = None
+        connection_manager_override: Optional[ConnectionManager] = None,
+        mcp_servers_list: Optional[List[MCPServerStdio]] = None
     ):
         self.settings = get_settings()
-        self.model = SafeOpenAIModel( # Use the SafeOpenAIModel
-            self.settings.ai_model,
+        self.model = SafeOpenAIModel(
+            "anthropic/claude-3.7-sonnet:thinking",
             provider=OpenAIProvider(
                 base_url='https://openrouter.ai/api/v1',
                 api_key=self.settings.openrouter_api_key,
             ),
         )
-        self.mcp_server_map = mcp_server_map or {}
         self.notebook_id = notebook_id
         self.available_data_sources = available_data_sources
-        self.connection_manager = connection_manager or get_connection_manager()
         self.notebook_manager = notebook_manager
+        # Use the override if provided, otherwise get default
+        self.connection_manager = connection_manager_override or get_connection_manager() 
         
-        ai_logger.info(f"AIAgent for notebook {self.notebook_id} initialized with available data sources: {self.available_data_sources}")
+        self._mcp_servers_for_agents = mcp_servers_list or []
+        if self._mcp_servers_for_agents:
+            active_mcps = [type(s).__name__ for s in self._mcp_servers_for_agents] # Example: Get class names
+            ai_logger.info(f"AIAgent initialized with {len(self._mcp_servers_for_agents)} MCP servers: {active_mcps}")
+        else:
+            ai_logger.warning("AIAgent initialized with no MCP servers.")
         
-        # Format the planner prompt with available data sources
+        ai_logger.info(f"AIAgent for notebook {self.notebook_id} setup with available data sources: {self.available_data_sources}")
+        
         available_data_sources_str = ', '.join(self.available_data_sources) if self.available_data_sources else 'None'
         formatted_planner_prompt = INVESTIGATION_PLANNER_SYSTEM_PROMPT.format(
             available_data_sources_str=available_data_sources_str
         )
 
-        # Build notebook context tools (list_cells & get_cell)
         try:
             from .notebook_context_tools import create_notebook_context_tools
             self._notebook_tools = create_notebook_context_tools(self.notebook_id, self.notebook_manager)
@@ -118,7 +124,6 @@ class AIAgent:
             ai_logger.error("Failed to create notebook context tools for AIAgent: %s", tool_err, exc_info=True)
             self._notebook_tools = []
 
-        # Initialize the step processor
         self.step_processor = StepProcessor(
             notebook_id=self.notebook_id,
             model=self.model,
@@ -126,28 +131,91 @@ class AIAgent:
             notebook_manager=self.notebook_manager
         )
 
-        # Initialize the investigation planner
         self.investigation_planner = Agent(
             self.model,
             deps_type=InvestigationDependencies,
             output_type=InvestigationPlanModel,
             system_prompt=formatted_planner_prompt,
-            tools=self._notebook_tools,  # type: ignore[arg-type]
+            tools=self._notebook_tools,
+            mcp_servers=self._mcp_servers_for_agents
         )
-        ai_logger.info(f"AIAgent: Investigation planner initialized for notebook {self.notebook_id} with {len(self._notebook_tools)} notebook context tools.")
+        ai_logger.info(f"AIAgent: Investigation planner initialized for notebook {self.notebook_id} with {len(self._notebook_tools)} notebook tools and {len(self._mcp_servers_for_agents)} MCPs.")
 
-        # Other agents will be initialized on demand
         self.plan_reviser = None
         self.markdown_generator = Agent(
-            self.model,
-            output_type=str,  # Just using str as output for simplicity
-            mcp_servers=list(self.mcp_server_map.values()),
+            SafeOpenAIModel(
+                "openai/gpt-4.1",
+                provider=OpenAIProvider(
+                    base_url='https://openrouter.ai/api/v1',
+                    api_key=self.settings.openrouter_api_key,
+                ),
+            ),
+            output_type=str,
             system_prompt=MARKDOWN_GENERATOR_SYSTEM_PROMPT,
-            tools=self._notebook_tools,  # type: ignore[arg-type]
+            tools=self._notebook_tools,
         )
-        ai_logger.info(f"AIAgent: Markdown generator initialized for notebook {self.notebook_id} with {len(self._notebook_tools)} notebook context tools.")
+        ai_logger.info(f"AIAgent: Markdown generator initialized for notebook {self.notebook_id} with {len(self._notebook_tools)} notebook tools and {len(self._mcp_servers_for_agents)} MCPs.")
         
-        ai_logger.info(f"AIAgent initialized for notebook {notebook_id}.")
+        ai_logger.info(f"AIAgent __init__ completed for notebook {notebook_id}.")
+
+    @staticmethod
+    async def _create_mcp_server(connection_type: str, connection_manager: ConnectionManager) -> Optional[MCPServerStdio]:
+        """Helper to get an MCP server instance for a given connection type."""
+        try:
+            default_conn = await connection_manager.get_default_connection(connection_type)
+            if not default_conn:
+                ai_logger.warning(f"No default {connection_type} connection found for AIAgent's MCP setup.")
+                return None
+            if not default_conn.config:
+                ai_logger.warning(f"Default {connection_type} connection {default_conn.id} has no config for AIAgent's MCP setup.")
+                return None
+
+            handler = get_handler(connection_type)
+            stdio_params = handler.get_stdio_params(default_conn.config)
+            ai_logger.info(f"AIAgent MCP setup: Retrieved StdioServerParameters for {connection_type}. Command: {stdio_params.command}, Args: {stdio_params.args}")
+            return MCPServerStdio(command=stdio_params.command, args=stdio_params.args, env=stdio_params.env)
+        except ValueError as ve:
+            ai_logger.error(f"AIAgent MCP setup: Configuration error getting {connection_type} stdio params: {ve}", exc_info=True)
+        except Exception as e:
+            ai_logger.error(f"AIAgent MCP setup: Error creating MCPServerStdio instance for {connection_type}: {e}", exc_info=True)
+        return None
+
+    @classmethod
+    async def create(
+        cls,
+        notebook_id: str,
+        available_data_sources: List[str],
+        notebook_manager: NotebookManager,
+        connection_manager_instance: Optional[ConnectionManager] = None
+    ) -> "AIAgent":
+        ai_logger.info(f"AIAgent.create called for notebook {notebook_id}")
+        conn_manager = connection_manager_instance or get_connection_manager()
+
+        github_mcp = await cls._create_mcp_server("github", conn_manager)
+        filesystem_mcp = await cls._create_mcp_server("filesystem", conn_manager)
+        
+        mcp_servers = []
+        if github_mcp:
+            mcp_servers.append(github_mcp)
+            ai_logger.info("GitHub MCP Server successfully created for AIAgent.")
+        else:
+            ai_logger.warning("GitHub MCP Server could not be created for AIAgent.")
+            
+        if filesystem_mcp:
+            mcp_servers.append(filesystem_mcp)
+            ai_logger.info("Filesystem MCP Server successfully created for AIAgent.")
+        else:
+            ai_logger.warning("Filesystem MCP Server could not be created for AIAgent.")
+
+        agent_instance = cls(
+            notebook_id=notebook_id,
+            available_data_sources=available_data_sources,
+            notebook_manager=notebook_manager,
+            connection_manager_override=conn_manager,
+            mcp_servers_list=mcp_servers
+        )
+        ai_logger.info(f"AIAgent instance created and returned by AIAgent.create for notebook {notebook_id}.")
+        return agent_instance
 
     async def investigate(
         self, 
@@ -182,7 +250,12 @@ class AIAgent:
                 raise ValueError(f"Failed to fetch notebook {notebook_id_str}")
 
             # Create the investigation plan
-            plan = await self.create_investigation_plan(query, notebook_id_str, message_history, notebook_context_summary)
+            plan = await self.create_investigation_plan(
+                query,
+                notebook_id_str,
+                message_history,
+                notebook_context_summary,
+            )
             
             # Yield plan created event
             yield PlanCreatedEvent(thinking=plan.thinking, session_id=session_id, notebook_id=notebook_id_str)
@@ -240,7 +313,8 @@ class AIAgent:
                     plan_step_id_to_cell_ids=plan_step_id_to_cell_ids,
                     cell_tools=cell_tools,
                     session_id=session_id,
-                    db=db
+                    db=db,
+                    original_query=query
                 ):
                     # Process specific events for AIAgent's internal state first
                     processed_internally = False
@@ -267,9 +341,11 @@ class AIAgent:
                     # Forward all BaseEvents (including StepExecutionCompleteEvent after its specific processing) to the client
                     if isinstance(event, BaseEvent):
                         yield event
-                    elif not processed_internally: # Log if an event was not a BaseEvent and not processed internally
-                        ai_logger.warning(f"Received unexpected event type from StepProcessor: {type(event)}. This event was not yielded.")
-                
+                    elif not processed_internally:
+                        ai_logger.warning(
+                            f"Received unexpected event type from StepProcessor: {type(event)}. This event was not yielded."
+                        )
+
             # All steps completed
             ai_logger.info(f"Investigation plan execution finished for notebook {notebook_id_str}")
             
@@ -372,7 +448,8 @@ class AIAgent:
             StepType.GITHUB: AgentType.GITHUB,
             StepType.FILESYSTEM: AgentType.FILESYSTEM,
             StepType.PYTHON: AgentType.PYTHON,
-            StepType.INVESTIGATION_REPORT: AgentType.INVESTIGATION_REPORT_GENERATOR
+            StepType.INVESTIGATION_REPORT: AgentType.INVESTIGATION_REPORT_GENERATOR,
+            StepType.MEDIA_TIMELINE: AgentType.MEDIA_TIMELINE,
         }
         
         return agent_type_map.get(step_type, AgentType.UNKNOWN)
@@ -403,10 +480,11 @@ class AIAgent:
         )
 
         # Generate the plan
-        result = await self.investigation_planner.run(
-            user_prompt=combined_prompt,
-            deps=deps
-        )
+        async with self.investigation_planner.run_mcp_servers():
+            result = await self.investigation_planner.run(
+                user_prompt=combined_prompt,
+                deps=deps
+            )
         plan_data = result.output
 
         # Convert to InvestigationPlan
@@ -442,14 +520,16 @@ class AIAgent:
         # Lazy initialization of plan reviser
         if self.plan_reviser is None:
             ai_logger.info("Lazily initializing PlanReviser Agent.")
+            
             self.plan_reviser = Agent(
                 self.model,
                 deps_type=PlanRevisionRequest,
                 output_type=PlanRevisionResult,
                 system_prompt=PLAN_REVISER_SYSTEM_PROMPT,
                 tools=self._notebook_tools,  # type: ignore[arg-type]
+                mcp_servers=self._mcp_servers_for_agents
             )
-            ai_logger.info(f"AIAgent: PlanReviser agent initialized with {len(self._notebook_tools)} notebook context tools.")
+            ai_logger.info(f"AIAgent: PlanReviser agent initialized with {len(self._notebook_tools)} notebook context tools and {len(self._mcp_servers_for_agents)} MCPs.")
             
         # Create revision request
         revision_request = PlanRevisionRequest(
@@ -459,6 +539,7 @@ class AIAgent:
             unexpected_results=unexpected_results,
             current_hypothesis=current_hypothesis
         )
+        ai_logger.info(f"Plan revision request: {revision_request}")
         
         # Generate revision
         result = await self.plan_reviser.run(
@@ -466,6 +547,7 @@ class AIAgent:
             deps=revision_request
         )
         
+        ai_logger.info(f"Plan revision output: {result.output}")
         return result.output
 
     async def execute_content(

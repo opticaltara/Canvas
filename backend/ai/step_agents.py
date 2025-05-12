@@ -5,6 +5,7 @@ Agent implementations for different step types.
 import logging
 from typing import Any, Dict, AsyncGenerator, Union, Optional
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,8 +28,38 @@ from backend.ai.models import PythonAgentInput, FileDataRef # Added for PythonSt
 from backend.ai.prompts.investigation_prompts import MARKDOWN_GENERATOR_SYSTEM_PROMPT
 from backend.config import get_settings
 from backend.services.notebook_manager import NotebookManager # Added import
+from backend.ai.media_agent import MediaTimelineAgent  # Add import at top with others
 
 ai_logger = logging.getLogger("ai")
+
+def _create_contextual_xml_prompt(description: str, context: Dict[str, Any]) -> str:
+    """Helper function to create an XML-formatted prompt with context and timestamp."""
+    current_time_utc_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S %Z')
+    
+    # Escape CDATA closing sequence in description
+    safe_description = description.replace("]]>'", "]] ]]> <![CDATA[")
+
+    context_items_xml_parts = []
+    if context:
+        for key, value in context.items():
+            # Escape CDATA closing sequence in context values
+            safe_value = str(value).replace("]]>'", "]] ]]> <![CDATA[")
+            context_items_xml_parts.append(f'        <item key="{key}"><![CDATA[{safe_value}]]></item>')
+    context_items_xml = "\n".join(context_items_xml_parts)
+    
+    prompt_with_context = f"""<task_with_context>
+    <user_query><![CDATA[{safe_description}]]></user_query>
+    <current_time_utc>{current_time_utc_str}</current_time_utc>"""
+    
+    if context_items_xml:
+        prompt_with_context += f"""
+    <shared_context>
+{context_items_xml}
+    </shared_context>"""
+    prompt_with_context += """
+</task_with_context>"""
+    return prompt_with_context
+
 
 class StepAgent(ABC):
     """Base class for step-specific agent implementations"""
@@ -79,7 +110,10 @@ class MarkdownStepAgent(StepAgent):
             # This case should ideally not happen for MarkdownStepAgent
             # Or handle it by converting/logging if necessary
             raise TypeError(f"MarkdownStepAgent expects a string prompt, got {type(agent_input_data)}")
-        prompt = agent_input_data
+        original_description = agent_input_data
+
+        # Construct XML prompt with context using the helper function
+        prompt_with_context = _create_contextual_xml_prompt(original_description, context)
 
         yield StatusUpdateEvent(
             status=StatusType.AGENT_ITERATING, 
@@ -94,7 +128,7 @@ class MarkdownStepAgent(StepAgent):
             notebook_id=self.notebook_id
         )
         
-        result = await self.markdown_generator.run(prompt)
+        result = await self.markdown_generator.run(prompt_with_context)
         if isinstance(result.output, MarkdownQueryResult):
             final_result = result.output
         else:
@@ -124,18 +158,21 @@ class GitHubStepAgent(StepAgent):
         """Execute a GitHub query step"""
         if not isinstance(agent_input_data, str):
             raise TypeError(f"GitHubStepAgent expects a string prompt, got {type(agent_input_data)}")
-        prompt = agent_input_data
+        original_description = agent_input_data
+
+        # Construct XML prompt with context using the helper function
+        prompt_with_context = _create_contextual_xml_prompt(original_description, context)
 
         # Lazy initialization
         if self.github_generator is None:
             ai_logger.info("Lazily initializing GitHubQueryAgent.")
             self.github_generator = GitHubQueryAgent(notebook_id=self.notebook_id)
         
-        ai_logger.info(f"Processing GitHub step {step.step_id} using run_query generator...")
+        ai_logger.info(f"Processing GitHub step {step.step_id} using run_query generator with XML prompt...")
         
         # Forward events from the GitHub agent
         async for event in self.github_generator.run_query(
-            prompt,
+            prompt_with_context, # Use the new XML prompt
             session_id=session_id,
             notebook_id=self.notebook_id
         ):
@@ -176,18 +213,21 @@ class FileSystemStepAgent(StepAgent):
         """Execute a filesystem query step"""
         if not isinstance(agent_input_data, str):
             raise TypeError(f"FileSystemStepAgent expects a string prompt, got {type(agent_input_data)}")
-        prompt = agent_input_data
+        original_description = agent_input_data
+
+        # Construct XML prompt with context using the helper function
+        prompt_with_context = _create_contextual_xml_prompt(original_description, context)
         
         # Lazy initialization
         if self.filesystem_generator is None:
             ai_logger.info("Lazily initializing FileSystemAgent.")
             self.filesystem_generator = FileSystemAgent(notebook_id=self.notebook_id)
         
-        ai_logger.info(f"Processing Filesystem step {step.step_id} using run_query generator...")
+        ai_logger.info(f"Processing Filesystem step {step.step_id} using run_query generator with XML prompt...")
         
         # Forward events from the filesystem agent
         async for event in self.filesystem_generator.run_query(
-            prompt,
+            prompt_with_context, # Use the new XML prompt
             session_id=session_id,
             notebook_id=self.notebook_id
         ):
@@ -258,6 +298,59 @@ class PythonStepAgent(StepAgent):
             session_id=session_id,
             notebook_id=self.notebook_id
         )
+
+
+class MediaTimelineStepAgent(StepAgent):
+    """Agent for executing media timeline steps"""
+    def __init__(self, notebook_id: str, connection_manager, notebook_manager: Optional[NotebookManager] = None):
+        super().__init__(notebook_id)
+        self.connection_manager = connection_manager
+        self.notebook_manager = notebook_manager
+        # Will be instantiated per execute call since it requires session_id
+        self.timeline_agent: Optional[MediaTimelineAgent] = None
+
+    def get_agent_type(self) -> AgentType:
+        return AgentType.MEDIA_TIMELINE
+
+    async def execute(
+        self,
+        step: InvestigationStepModel,
+        agent_input_data: Union[str, PythonAgentInput],  # Should be description string
+        session_id: str,
+        context: Dict[str, Any],
+        db: Optional[AsyncSession] = None  # Unused but kept for compatibility
+    ) -> AsyncGenerator[Union[BaseEvent, Dict[str, Any]], None]:
+        """Run the MediaTimelineAgent and forward its events"""
+        if not isinstance(agent_input_data, str):
+            raise TypeError(f"MediaTimelineStepAgent expects a string description, got {type(agent_input_data)}")
+
+        description = agent_input_data
+
+        # (Re)instantiate the MediaTimelineAgent for this execution so it has correct session_id
+        self.timeline_agent = MediaTimelineAgent(
+            notebook_id=self.notebook_id,
+            session_id=session_id,
+            connection_manager=self.connection_manager,
+            notebook_manager=self.notebook_manager,
+        )
+
+        ai_logger.info(f"Processing MediaTimeline step {step.step_id} using timeline agent...")
+
+        # Forward events from timeline agent
+        async for event in self.timeline_agent.run_query(description):
+            if isinstance(event, BaseEvent):
+                # Ensure session and notebook IDs are set if missing
+                if not event.session_id:
+                    event.session_id = session_id
+                if not event.notebook_id:
+                    event.notebook_id = self.notebook_id
+                yield event
+            elif isinstance(event, dict):
+                # Not expected for timeline agent currently. Log and ignore
+                ai_logger.warning(f"Unexpected dict event from MediaTimelineAgent: {event}")
+            else:
+                # Assume it's the final MediaTimelinePayload object
+                yield {"type": "final_step_result", "result": event}
 
 
 class ReportStepAgent(StepAgent):

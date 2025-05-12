@@ -51,7 +51,7 @@ export const useConnectionStore = create<ConnectionState>()(
         toolLoadingStatus: {},
         mcpStatuses: {}, // Initialize mcpStatuses
         availableTypes: [],
-        areAllCellsExpanded: true,
+        areAllCellsExpanded: false,
 
         // Toggle all cells expanded state
         toggleAllCellsExpanded: () => {

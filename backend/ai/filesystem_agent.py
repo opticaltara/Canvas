@@ -66,7 +66,7 @@ class FileSystemAgent:
         self.settings = get_settings()
         # Using the same AI model settings as GitHub agent for now
         self.model = SafeOpenAIModel( # Changed from OpenAIModel to SafeOpenAIModel
-                self.settings.ai_model,
+                "openai/gpt-4.1",
                 provider=OpenAIProvider(
                     base_url='https://openrouter.ai/api/v1',
                     api_key=self.settings.openrouter_api_key,

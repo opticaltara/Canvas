@@ -41,6 +41,7 @@ from backend.ai.events import (
     ClarificationNeededEvent,
     PlanCreatedEvent,
     PlanCellCreatedEvent,
+    PlanRevisedEvent,
     StepStartedEvent,
     StepCompletedEvent,
     StepErrorEvent,
@@ -57,8 +58,6 @@ from backend.ai.events import (
     PythonToolCellCreatedEvent
 )
 from backend.ai.models import SafeOpenAIModel # Import the custom model
-from backend.ai.utils.context_utils import _truncate_output, TOOL_RESULT_MAX_CHARS as DEFAULT_TRUNCATE_LIMIT # Import from utils
-from backend.core.cell import CellStatus # Added import for CellStatus enum
 
 # Initialize logger
 chat_agent_logger = logging.getLogger("ai.chat_agent")
@@ -156,22 +155,9 @@ class ClarificationResult(BaseModel):
     needs_clarification: bool = Field(description="Whether the query needs clarification")
     clarification_message: Optional[str] = Field(description="Message to ask for clarification if needed", default=None)
 
-# Simple stop words list for keyword extraction (MODULE LEVEL)
-STOP_WORDS = set([
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being", 
-    "have", "has", "had", "do", "does", "did", "will", "would", "should", "can", 
-    "could", "may", "might", "must", "about", "above", "after", "again", "against", 
-    "all", "am", "and", "any", "as", "at", "because", "before", "below", 
-    "between", "both", "but", "by", "com", "for", "from", "further", "here", 
-    "how", "i", "if", "in", "into", "it", "its", "itself", "just", "k", "me", 
-    "more", "most", "my", "myself", "no", "nor", "not", "now", "o", "of", "on", 
-    "once", "only", "or", "other", "our", "ours", "ourselves", "out", "over", 
-    "own", "r", "s", "same", "she", "so", "some", "such", "t", "than", "that", 
-    "their", "theirs", "them", "themselves", "then", "there", "these", "they", 
-    "this", "those", "through", "to", "too", "under", "until", "up", "very", 
-    "we", "what", "when", "where", "which", "while", "who", "whom", "why", 
-    "with", "you", "your", "yours", "yourself", "yourselves", "please", "ok", "good"
-])
+class ClarificationNotNeeded(BaseModel):
+    """Indicates that clarification is not needed"""
+    pass
 
 def to_chat_message(message: ModelMessage, agent: Optional[str] = None) -> ChatMessage:
     """Convert a ModelMessage to a ChatMessage"""
@@ -288,24 +274,25 @@ class ChatAgentService:
 
         self.chat_agent = Agent(
             model=SafeOpenAIModel(  # Use the SafeOpenAIModel
-                self.settings.ai_model,
+                "anthropic/claude-3.7-sonnet",
                 provider=OpenAIProvider(
                     base_url='https://openrouter.ai/api/v1',
                     api_key=self.settings.openrouter_api_key,
                 ),
             ),
             system_prompt=system_prompt,
-            result_type=ClarificationResult,
+            output_type=ClarificationResult,
             tools=notebook_tools,  # type: ignore[arg-type]
         )
         chat_agent_logger.info(f"ChatAgentService: Chat agent initialized for notebook {self.notebook_id} with {len(notebook_tools)} notebook context tools.")
 
         # Setup Investigation Agent (ai_agent)
         chat_agent_logger.info(f"Initializing AIAgent for notebook {self.notebook_id} with sources: {self._available_data_source_types}")
-        self.ai_agent = AIAgent(
+        self.ai_agent = await AIAgent.create( # Use the async factory method
             notebook_manager=self.notebook_manager,
             notebook_id=self.notebook_id,
-            available_data_sources=self._available_data_source_types or []
+            available_data_sources=self._available_data_source_types or [],
+            connection_manager_instance=self._connection_manager # Pass the existing connection manager
         )
 
         chat_agent_logger.info(f"ChatAgentService for notebook {self.notebook_id} initialized successfully.")
@@ -448,9 +435,11 @@ class ChatAgentService:
                     f"Review the *entire conversation history* ending with the latest user message. "
                     f"Previously, I may have asked for clarification. The user's latest message might provide some or all of that information. "
                     f"Available data sources: {self.available_tools_info or '(loading...)'}. "
+                    f"You have access to Github and the filesystem so do not ask for clarification merely to request repository access or specific code files when a GitHub link is provided. "
                     f"Assess if, *after considering the user's latest response*, there is *still* critical information missing to proceed with their *original* request. "
                     f"If the latest user message sufficiently answers the previous clarification or provides enough information to take the *next step*, then DO NOT ask for clarification again (needs_clarification: false). "
                     f"Only ask for clarification (needs_clarification: true) if the request *remains* genuinely ambiguous or is *still* missing essential details *despite* the user's last message."
+                    f"\n\nUser's latest message:\n{prompt}"
                 )
 
                 # Log the history being passed to the clarification check
@@ -465,7 +454,7 @@ class ChatAgentService:
                         message_history=message_history, # History includes user's LATEST reply here
                     )
                     # Access the actual output model from the result
-                    clarification_output: ClarificationResult = clarification_run_result.output
+                    clarification_output = clarification_run_result.output
                 except Exception as clar_err:
                     chat_agent_logger.error(f"Error during clarification check API call: {clar_err}", exc_info=True)
                     # Handle error appropriately, maybe yield an error status
@@ -630,9 +619,12 @@ class ChatAgentService:
                         chat_agent_logger.info(f"Creating StatusResponsePart for {event_type_str}")
                         message = f"Plan created. Thinking: {t}" if t else "Investigation plan created."
                         response_part = StatusResponsePart(content=message, agent_type=agent_type_str)
+                    case PlanRevisedEvent(message=msg, revised_steps=_, session_id=_, notebook_id=_): # Match revised_steps, session_id, notebook_id
+                        chat_agent_logger.info(f"Creating StatusResponsePart for {event_type_str}")
+                        response_part = StatusResponsePart(content=msg or "Investigation plan revised.", agent_type=agent_type_str)
                     case StepStartedEvent(step_id=sid, status=st, session_id=sess_id, notebook_id=nid):
                         chat_agent_logger.info(f"Creating StatusResponsePart for {event_type_str}")
-                        message = f"Status: {st.value} (Step: {sid})" 
+                        message = f"Status: {st.value} (Step: {sid})"
                         response_part = StatusResponsePart(content=message, agent_type=agent_type_str)
                     case GitHubToolErrorEvent(original_plan_step_id=sid, tool_name=tn, error=err, status=st, session_id=sess_id, notebook_id=nid):
                         chat_agent_logger.info(f"Creating StatusResponsePart for {event_type_str}")
@@ -706,18 +698,3 @@ class ChatAgentService:
                 exc_info=True
             )
             raise
-
-    # Helper to truncate long strings clearly (copied from filesystem_agent.py for now)
-    # TODO: Move to a shared utility module
-    TOOL_RESULT_MAX_CHARS = 500  # Adjusted for context summary
-
-    def _truncate_output(self, content: Any, limit: int = TOOL_RESULT_MAX_CHARS) -> Any:
-        """Truncate the given string if it exceeds *limit* characters, appending an indicator.
-        Non-string content is returned unchanged so the caller can forward it as-is.
-        """
-        if not isinstance(content, str):
-            return content
-        if len(content) <= limit:
-            return content
-        truncated = content[:limit]
-        return truncated + f"... (truncated, original length {len(content)})"
