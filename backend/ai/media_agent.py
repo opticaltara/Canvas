@@ -6,6 +6,7 @@ correlate them with code, and provide a bug hypothesis.
 It aims to produce a single, comprehensive cell output.
 """
 
+import asyncio
 from datetime import datetime, timezone
 import logging
 from typing import Any, Dict, AsyncGenerator, Union, Optional, List
@@ -132,6 +133,8 @@ class MediaUrlsExtractorAgent:
 
         The urls you extract are primarily bug reports, so they will be video or image files.
         We only want urls that are media files, not text files.
+
+        **Important:** Your primary task is to *extract* URLs that appear to be media files (videos, images). You should identify these based on the URL structure or file extension (e.g., .mp4, .mov, .jpg, .png, .gif, etc., including URLs from services like `github.com/user-attachments/`). **DO NOT** attempt to use any tools (like GitHub file readers, filesystem readers, or web fetchers) to validate, access, or fetch the content of these media URLs. Your only job regarding these URLs is to extract the URL string itself. Focus on identifying and returning the strings.
         
         The following are examples of how you should behave and not what the actual scenario might be:
         Example:
@@ -195,37 +198,49 @@ class MediaUrlsExtractorAgent:
             system_prompt=system_prompt,
             mcp_servers=mcp_servers_for_agent,
             tools=notebook_tools,
-            output_type=Union[MediaAgentInput, MediaUrlExtractionError] # type: ignore
+            output_type=MediaAgentInput | MediaUrlExtractionError # type: ignore
         )
         media_agent_logger.info(f"MediaUrlsExtractorAgent initialized with {len(extra_tools) if extra_tools else 0} tools.")
         return agent
 
     async def run_query(self, query: str) -> Union[MediaAgentInput, MediaUrlExtractionError]:
         
-        media_agent_logger.info(f"Running query: {query}")
+        media_agent_logger.info(f"Running query for URL extraction: {query}")
 
         self.agent = await self._initialize_agent()
+        if not self.agent: # Check if agent initialization failed
+             media_agent_logger.error("Failed to initialize the MediaUrlsExtractorAgent.")
+             return MediaUrlExtractionError(message="Agent initialization failed.")
 
-        media_agent_logger.info(f"Agent: {self.agent}")
+        media_agent_logger.info(f"URL Extractor Agent: {self.agent}")
 
-        try:
-            async with self.agent.run_mcp_servers():
-                result = await self.agent.run(query)
-            media_agent_logger.info(
-                "URL extractor agent finished successfully. Query: %s | Output: %s",
-                query,
-                result.output,
-            )
-            return result.output
-        except Exception as e:
-            # Capture the full exception stack and return a structured error for the caller
-            media_agent_logger.exception(
-                "URL extractor agent raised an exception. Query: %s | Error: %s",
-                query,
-                e,
-                exc_info=True,
-            )
-            return MediaUrlExtractionError(message=str(e))
+        max_attempts = 3
+        last_exception = None
+
+        for attempt in range(1, max_attempts + 1):
+            media_agent_logger.info(f"URL extractor agent attempt {attempt}/{max_attempts} for query: {query}")
+            try:
+                async with self.agent.run_mcp_servers():
+                    result = await self.agent.run(query)
+                media_agent_logger.info(
+                    f"URL extractor agent finished successfully on attempt {attempt}. Query: {query} | Output: {result.output}",
+                )
+                return result.output
+            except Exception as e:
+                last_exception = e
+                media_agent_logger.warning(
+                    f"URL extractor agent attempt {attempt} failed. Query: {query} | Error: {e}",
+                    exc_info=True, # Log traceback for warnings too
+                )
+                if attempt < max_attempts:
+                    await asyncio.sleep(1) # Wait 1 second before retrying
+
+        # If all attempts failed
+        media_agent_logger.exception(
+            f"URL extractor agent failed after {max_attempts} attempts. Query: {query} | Last Error: {last_exception}",
+            exc_info=last_exception, # Log the last exception with traceback
+        )
+        return MediaUrlExtractionError(message=str(last_exception))
 
 
 class MediaCorrelatorAgent:
@@ -296,7 +311,7 @@ class MediaCorrelatorAgent:
         # Return the fully configured correlator agent so callers can use it
         return self.correlator_agent
 
-    async def run_correlator(self, timeline_payload: MediaTimelinePayload) -> Optional[CorrelatorResult]:
+    async def run_correlator(self, timeline_payload: MediaTimelinePayload, context: Dict[str, Any]) -> Optional[CorrelatorResult]:
         """Run the correlator with a text-only timeline payload."""
         self.correlator_agent = await self._initialize_correlator_agent()
         if not self.correlator_agent:
@@ -305,11 +320,35 @@ class MediaCorrelatorAgent:
 
         # Convert the payload to a string that can fit in a single LLM message.
         timeline_json = timeline_payload.model_dump_json(indent=2)
+        
+        # --- Incorporate context --- 
+        context_items_xml_parts = []
+        if context: # Check if context exists and is not empty
+            for key, value in context.items():
+                # Escape CDATA closing sequence in context values
+                safe_value = str(value).replace("]]>'", "]] ]]> <![CDATA[") # Basic escaping
+                context_items_xml_parts.append(f'        <item key="{key}"><![CDATA[{safe_value}]]></item>')
+        context_items_xml = "\n".join(context_items_xml_parts)
+        # --- End Incorporate context ---
+
         context_payload = (
-            f"### Original user query\n{timeline_payload.original_query}\n\n"
-            f"### Vision model timeline analysis (JSON)\n{timeline_json}"
+            f"<task_with_context>\n"
+            f"    <original_user_query><![CDATA[{timeline_payload.original_query}]]></original_user_query>\n"
+        )
+        if context_items_xml: # Add context block only if there's context
+            context_payload += (
+                f"    <shared_context>\n"
+                f"{context_items_xml}\n"
+                f"    </shared_context>\n"
+            )
+        context_payload += (
+            f"    <vision_model_timeline_analysis>\n"
+            f"        <![CDATA[{timeline_json}]]>\n"
+            f"    </vision_model_timeline_analysis>\n"
+            f"</task_with_context>"            
         )
 
+        media_agent_logger.info(f"Context payload for correlator: {context_payload}")
         try:
             async with self.correlator_agent.run_mcp_servers():
                 result = await self.correlator_agent.run(context_payload)
@@ -384,7 +423,8 @@ class MediaTimelineAgent:
 
     async def run_query(
         self,
-        description: str
+        description: str,
+        context: Dict[str, Any]  # Added context parameter
     ) -> AsyncGenerator[Union[StatusUpdateEvent, FinalStatusEvent, CorrelatorResult], None]:
         media_agent_logger.info(f"Running MediaTimelineAgent for notebook: {self.notebook_id}")
         media_agent_logger.info(f"Description: {description}")
@@ -450,7 +490,8 @@ class MediaTimelineAgent:
             )
             return
 
-        correlator_result = await self.correlator_agent.run_correlator(timeline_payload)
+        # Pass context to the correlator
+        correlator_result = await self.correlator_agent.run_correlator(timeline_payload, context=context)
         if correlator_result is None:
             media_agent_logger.error("Error running correlator.")
             yield StatusUpdateEvent(

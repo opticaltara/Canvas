@@ -20,14 +20,15 @@ safe to pass to the Agent constructor.
 """
 
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, TYPE_CHECKING
 from uuid import UUID
 from enum import Enum
 
 from pydantic import BaseModel, Field, UUID4
 
 from backend.db.database import get_db_session
-from backend.services.notebook_manager import NotebookManager
+if TYPE_CHECKING:
+    from backend.services.notebook_manager import NotebookManager
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,7 @@ class ListCellsParams(BaseModel):
 
 def create_notebook_context_tools(
     notebook_id: str,
-    notebook_manager: Optional[NotebookManager],
+    notebook_manager: Optional['NotebookManager'],
 ):
     """Return `[list_cells, get_cell]` tool callables for *notebook_id*.
 

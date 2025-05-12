@@ -159,7 +159,27 @@ class SafeOpenAIModel(OpenAIModel):
     def _process_response(self, response: ChatCompletions) -> ModelResponse: # Use ModelResponse as the return type
         """
         Processes the API response, providing a default for 'created' if missing.
+        Also handles cases where the provider returns an error object within a 200 OK response.
         """
+        # Check if the provider returned an error in the response payload
+        # Accessing via model_extra for non-standard fields like OpenRouter's error in a 200 OK
+        provider_error_info = None
+        if response.model_extra and isinstance(response.model_extra, dict):
+            provider_error_info = response.model_extra.get('error')
+
+        if provider_error_info:
+            error_message = "Provider returned an error in the response payload."
+            if isinstance(provider_error_info, dict) and 'message' in provider_error_info:
+                provider_error_message = provider_error_info['message']
+                error_code = provider_error_info.get('code')
+                error_message = f"Provider error: {provider_error_message} (Code: {error_code})."
+            elif isinstance(provider_error_info, str): # Fallback if error is just a string
+                error_message = f"Provider error: {provider_error_info}."
+            
+            raw_resp_str = str(response.model_dump(mode='json') if hasattr(response, 'model_dump') else response)
+            # print(f"Error: {error_message} Response: {raw_resp_str[:500]}") # Optional: for debugging
+            raise UnexpectedModelBehavior(f"{error_message} Raw response: {raw_resp_str[:200]}")
+
         # Ensure response.created is an int. If None, use current time.
         # If it's already a valid int/float, fromtimestamp will handle it.
         created_timestamp = response.created
