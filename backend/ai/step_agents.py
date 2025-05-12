@@ -28,6 +28,7 @@ from backend.ai.models import PythonAgentInput, FileDataRef # Added for PythonSt
 from backend.ai.prompts.investigation_prompts import MARKDOWN_GENERATOR_SYSTEM_PROMPT
 from backend.config import get_settings
 from backend.services.notebook_manager import NotebookManager # Added import
+from backend.ai.notebook_context_tools import create_notebook_context_tools # Added import
 from backend.ai.media_agent import MediaTimelineAgent  # Add import at top with others
 
 ai_logger = logging.getLogger("ai")
@@ -86,13 +87,17 @@ class StepAgent(ABC):
 
 class MarkdownStepAgent(StepAgent):
     """Agent for executing markdown steps"""
-    def __init__(self, notebook_id: str, model: OpenAIModel):
+    def __init__(self, notebook_id: str, model: OpenAIModel, notebook_manager: Optional[NotebookManager]):
         super().__init__(notebook_id)
         self.model = model
+        self.notebook_manager = notebook_manager # Store notebook_manager
+        # Create notebook context tools
+        notebook_tools = create_notebook_context_tools(self.notebook_id, self.notebook_manager)
         self.markdown_generator = Agent(
             self.model,
             output_type=MarkdownQueryResult,
-            system_prompt=MARKDOWN_GENERATOR_SYSTEM_PROMPT
+            system_prompt=MARKDOWN_GENERATOR_SYSTEM_PROMPT,
+            tools=notebook_tools # Pass tools to the agent
         )
     
     def get_agent_type(self) -> AgentType:

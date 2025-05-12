@@ -41,8 +41,8 @@ from backend.ai.events import (
 
 ai_logger = logging.getLogger("ai")
 
-STEP_CONTEXT_SNIPPET_LIMIT = 2000
-REPORT_CONTEXT_SNIPPET_LIMIT = 4000
+STEP_CONTEXT_SNIPPET_LIMIT = 10000
+REPORT_CONTEXT_SNIPPET_LIMIT = 10000
 
 class StepProcessor:
     """Handles the execution and processing of individual investigation steps"""
@@ -68,7 +68,7 @@ class StepProcessor:
         """Get or create the appropriate agent for a step type"""
         if step_type not in self._step_agents:
             if step_type == StepType.MARKDOWN:
-                self._step_agents[step_type] = MarkdownStepAgent(self.notebook_id, self.model)
+                self._step_agents[step_type] = MarkdownStepAgent(self.notebook_id, self.model, notebook_manager=self.notebook_manager)
             elif step_type == StepType.GITHUB:
                 self._step_agents[step_type] = GitHubStepAgent(self.notebook_id)
             elif step_type == StepType.FILESYSTEM:
@@ -577,7 +577,7 @@ class StepProcessor:
                 if isinstance(dep_result_obj, StepResult) and dep_result_obj.outputs:
                     context_line += " (Outputs Available)"
                     outputs_summary_lines = []
-                    for i, out_data in enumerate(dep_result_obj.outputs[:5]): # Limit number of outputs summarized
+                    for i, out_data in enumerate(dep_result_obj.outputs): # Limit number of outputs summarized
                         summary_prefix = f"  - Output {i+1}:"
                         if isinstance(out_data, dict):
                             if out_data.get("status") == "success" and "stdout" in out_data and out_data.get("stdout") is not None:
@@ -597,8 +597,6 @@ class StepProcessor:
                              outputs_summary_lines.append(f"{summary_prefix} {str(out_data.data)[:context_limit].strip()}...")
                         else:
                             outputs_summary_lines.append(f"{summary_prefix} {str(out_data)[:context_limit].strip()}...")
-                    if len(dep_result_obj.outputs) > 5:
-                        outputs_summary_lines.append(f"  ... and {len(dep_result_obj.outputs) - 5} more outputs.")
                     
                     if outputs_summary_lines: context_line += "\n" + "\n".join(outputs_summary_lines)
                     else: context_line += " (Step had outputs, but they could not be summarized for context.)"

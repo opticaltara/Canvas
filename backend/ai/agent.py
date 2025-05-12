@@ -90,7 +90,7 @@ class AIAgent:
     ):
         self.settings = get_settings()
         self.model = SafeOpenAIModel(
-            "anthropic/claude-3.7-sonnet:thinking",
+            "openai/gpt-4.1",
             provider=OpenAIProvider(
                 base_url='https://openrouter.ai/api/v1',
                 api_key=self.settings.openrouter_api_key,
