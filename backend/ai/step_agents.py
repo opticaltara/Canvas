@@ -337,7 +337,7 @@ class MediaTimelineStepAgent(StepAgent):
         ai_logger.info(f"Processing MediaTimeline step {step.step_id} using timeline agent...")
 
         # Forward events from timeline agent
-        async for event in self.timeline_agent.run_query(description):
+        async for event in self.timeline_agent.run_query(description, context=context):
             if isinstance(event, BaseEvent):
                 # Ensure session and notebook IDs are set if missing
                 if not event.session_id:

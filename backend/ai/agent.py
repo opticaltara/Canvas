@@ -96,6 +96,13 @@ class AIAgent:
                 api_key=self.settings.openrouter_api_key,
             ),
         )
+        self.planner_model = SafeOpenAIModel(
+            "anthropic/claude-3.7-sonnet:thinking",
+            provider=OpenAIProvider(
+                base_url='https://openrouter.ai/api/v1',
+                api_key=self.settings.openrouter_api_key,
+            ),
+        )
         self.notebook_id = notebook_id
         self.available_data_sources = available_data_sources
         self.notebook_manager = notebook_manager
@@ -132,7 +139,7 @@ class AIAgent:
         )
 
         self.investigation_planner = Agent(
-            self.model,
+            self.planner_model,
             deps_type=InvestigationDependencies,
             output_type=InvestigationPlanModel,
             system_prompt=formatted_planner_prompt,

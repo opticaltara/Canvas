@@ -40,6 +40,7 @@ export default function CanvasPage() {
   const [editedDescription, setEditedDescription] = useState("")
   const [deletingCellId, setDeletingCellId] = useState<string | null>(null)
   const [isChatPanelOpen, setIsChatPanelOpen] = useState(false)
+  const [isFilteredView, setIsFilteredView] = useState(false)
 
   const storeCells = useCanvasStore((state) => state.cells)
   const setStoreActiveNotebook = useCanvasStore((state) => state.setActiveNotebook)
@@ -131,9 +132,6 @@ export default function CanvasPage() {
           );
         }, 500);
       }
-
-      // Add a slight extra offset so the new cell isn't flush with the bottom edge
-      setTimeout(() => window.scrollBy({ top: 80, behavior: "smooth" }), 50);
     },
     [cells, notebookId] 
   );
@@ -633,13 +631,30 @@ export default function CanvasPage() {
                 </div>
               </div>
               <div className="flex items-center space-x-2">
-                {/* Run All button removed */}
+                {cells.length > 0 && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setIsFilteredView(!isFilteredView)}
+                    className="ml-auto"
+                  >
+                    {isFilteredView ? "Show All Cells" : "Show Key Cells"}
+                  </Button>
+                )}
               </div>
             </div>
           </div>
 
           <div className="space-y-6">
-            {cells.map((cell, index) => (
+            {(isFilteredView
+              ? cells.filter(
+                  (cell) =>
+                    cell.type === "markdown" ||
+                    cell.type === "media_timeline" ||
+                    cell.type === "investigation_report",
+                )
+              : cells
+            ).map((cell, index, displayedCellsArray) => (
               <div
                 key={cell.id}
                 id={`cell-${cell.id}`}
@@ -652,24 +667,45 @@ export default function CanvasPage() {
                   onDelete={() => handleDeleteCell(cell.id)}
                   isExecuting={useCanvasStore.getState().isExecuting(cell.id)}
                 />
-                {index === cells.length - 1 && (
+                {index === displayedCellsArray.length - 1 && !isFilteredView && (
                   <CellCreationPills
                     onAddCell={(type: string) => {
-                      handleAddCell(type as CellType, index + 1)
+                      // Calculate the actual index in the original 'cells' array
+                      const originalIndex =
+                        cells.length > 0
+                          ? cells.findIndex((c) => c.id === cell.id) + 1
+                          : 0
+                      handleAddCell(type as CellType, originalIndex)
                     }}
                   />
                 )}
               </div>
             ))}
-            {cells.length === 0 && (
+            {(isFilteredView
+              ? cells.filter(
+                  (cell) =>
+                    cell.type === "markdown" ||
+                    cell.type === "media_timeline" ||
+                    cell.type === "investigation_report",
+                )
+              : cells
+            ).length === 0 && (
               <div className="text-center py-12 bg-gray-50 rounded-lg">
-                <h3 className="text-lg font-medium text-gray-900 mb-2">This canvas is empty</h3>
-                <p className="text-gray-500 mb-4">Add your first cell to get started</p>
-                <CellCreationPills
-                  onAddCell={(type: string) => {
-                    handleAddCell(type as CellType, 0)
-                  }}
-                />
+                <h3 className="text-lg font-medium text-gray-900 mb-2">
+                  {isFilteredView ? "No key cells to display" : "This canvas is empty"}
+                </h3>
+                <p className="text-gray-500 mb-4">
+                  {isFilteredView
+                    ? "Switch to 'Show All Cells' view or add a Markdown, Mediatimeline, or Investigation Report cell."
+                    : "Add your first cell to get started"}
+                </p>
+                {!isFilteredView && (
+                  <CellCreationPills
+                    onAddCell={(type: string) => {
+                      handleAddCell(type as CellType, 0)
+                    }}
+                  />
+                )}
               </div>
             )}
           </div>

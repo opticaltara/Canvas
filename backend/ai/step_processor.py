@@ -41,6 +41,9 @@ from backend.ai.events import (
 
 ai_logger = logging.getLogger("ai")
 
+STEP_CONTEXT_SNIPPET_LIMIT = 2000
+REPORT_CONTEXT_SNIPPET_LIMIT = 4000
+
 class StepProcessor:
     """Handles the execution and processing of individual investigation steps"""
     INTERNAL_NOTEBOOK_CONTEXT_TOOLS = ["list_cells", "get_cell"]
@@ -568,13 +571,13 @@ class StepProcessor:
                     dependency_context.append(f"- Dependency '{dep_id}': Error parsing step model data.")
                     continue
                     
-                context_limit = 500
+                context_limit = STEP_CONTEXT_SNIPPET_LIMIT # Use updated limit
                 context_line = f"- Dependency '{dep_id}' ({dep_step_model.step_type.value}): {dep_step_model.description[:context_limit]}..."
                 
                 if isinstance(dep_result_obj, StepResult) and dep_result_obj.outputs:
                     context_line += " (Outputs Available)"
                     outputs_summary_lines = []
-                    for i, out_data in enumerate(dep_result_obj.outputs):
+                    for i, out_data in enumerate(dep_result_obj.outputs[:5]): # Limit number of outputs summarized
                         summary_prefix = f"  - Output {i+1}:"
                         if isinstance(out_data, dict):
                             if out_data.get("status") == "success" and "stdout" in out_data and out_data.get("stdout") is not None:
@@ -584,8 +587,8 @@ class StepProcessor:
                             elif "search_results" in out_data:
                                 search_results_data = out_data.get("search_results")
                                 count = len(search_results_data) if isinstance(search_results_data, list) else 0
-                                first_item = str(search_results_data[0])[:context_limit] if search_results_data and count > 0 else ""
-                                outputs_summary_lines.append(f"{summary_prefix} ({count} search results found).{' First: ' + first_item + '...' if count > 0 else ''}")
+                                first_item_str = str(search_results_data[0])[:context_limit] if search_results_data and count > 0 else ""
+                                outputs_summary_lines.append(f"{summary_prefix} ({count} search results found).{' First: ' + first_item_str + '...' if count > 0 else ''}")
                             else:
                                 outputs_summary_lines.append(f"{summary_prefix} {str(out_data)[:context_limit].strip()}...")
                         elif isinstance(out_data, list):
@@ -594,6 +597,8 @@ class StepProcessor:
                              outputs_summary_lines.append(f"{summary_prefix} {str(out_data.data)[:context_limit].strip()}...")
                         else:
                             outputs_summary_lines.append(f"{summary_prefix} {str(out_data)[:context_limit].strip()}...")
+                    if len(dep_result_obj.outputs) > 5:
+                        outputs_summary_lines.append(f"  ... and {len(dep_result_obj.outputs) - 5} more outputs.")
                     
                     if outputs_summary_lines: context_line += "\n" + "\n".join(outputs_summary_lines)
                     else: context_line += " (Step had outputs, but they could not be summarized for context.)"
@@ -614,48 +619,55 @@ class StepProcessor:
     
     def _format_findings_for_report(
         self,
-        step: InvestigationStepModel,
+        step: InvestigationStepModel, # This is the report step itself
         executed_steps: Dict[str, Any],
-        step_results: Dict[str, StepResult] # Ensure this is StepResult
+        step_results: Dict[str, StepResult] 
     ) -> str:
         """Format findings from previous steps for the report"""
         findings_text_lines = []
-        ai_logger.info(f"Formatting findings for report step {step.step_id}. Executed steps count: {len(executed_steps)}")
-        for step_id, step_info in executed_steps.items():
-            if step_id == step.step_id: continue
+        ai_logger.info(f"Formatting findings for report step {step.step_id}. Dependencies: {step.dependencies}")
+
+        if not step.dependencies:
+            return "No dependencies specified for this report step. Unable to gather findings."
+
+        for dep_id in step.dependencies:
+            if dep_id not in executed_steps:
+                ai_logger.warning(f"Dependency step_id '{dep_id}' for report step '{step.step_id}' not found in executed_steps. Skipping.")
+                findings_text_lines.append(f"Step {dep_id}: Data unavailable (step not found in execution history).")
+                continue
             
-            step_obj_data_any = step_info.get("step") # Use a different var name to avoid confusion before type checking
-            step_res_obj = step_results.get(step_id) # This is StepResult
-            step_error_msg = step_info.get("error") # Overall error for the step from execution loop
+            step_info = executed_steps[dep_id]
+            step_obj_data_any = step_info.get("step")
+            step_res_obj = step_results.get(dep_id)
+            step_error_msg = step_info.get("error")
 
             desc = "N/A (description unavailable)"
             type_val = "unknown (type unavailable)"
-
             dep_step_model: Optional[InvestigationStepModel] = None
 
             if isinstance(step_obj_data_any, dict):
                 try:
                     dep_step_model = InvestigationStepModel(**step_obj_data_any)
                 except Exception as e:
-                    ai_logger.error(f"Failed to parse InvestigationStepModel for step_id '{step_id}' in _format_findings_for_report from dict: {e}")
+                    ai_logger.error(f"Failed to parse InvestigationStepModel for dep_id '{dep_id}' in _format_findings_for_report from dict: {e}")
             elif isinstance(step_obj_data_any, InvestigationStepModel):
                 dep_step_model = step_obj_data_any
             elif step_obj_data_any is None:
-                ai_logger.warning(f"Step data for step_id '{step_id}' is None in _format_findings_for_report.")
+                ai_logger.warning(f"Step data for dep_id '{dep_id}' is None in _format_findings_for_report.")
             else:
-                ai_logger.warning(f"Unexpected type for step_obj_data for step_id '{step_id}': {type(step_obj_data_any)} in _format_findings_for_report.")
+                ai_logger.warning(f"Unexpected type for step_obj_data for dep_id '{dep_id}': {type(step_obj_data_any)} in _format_findings_for_report.")
 
             if dep_step_model:
                 desc = dep_step_model.description
                 if isinstance(dep_step_model.step_type, StepType):
                     type_val = dep_step_model.step_type.value
-                elif dep_step_model.step_type: # Should be StepType, but handle if it's a raw string
+                elif dep_step_model.step_type:
                     type_val = str(dep_step_model.step_type)
                 else:
                     type_val = "unknown (step_type missing)"
             
             result_str = ""
-            if step_error_msg: # Overall error from main loop takes precedence
+            if step_error_msg:
                 result_str = f"Error: {step_error_msg}"
             elif isinstance(step_res_obj, StepResult):
                 if step_res_obj.has_error():
@@ -664,16 +676,22 @@ class StepProcessor:
                     if step_res_obj.step_type == StepType.MARKDOWN and step_res_obj.outputs:
                         output = step_res_obj.outputs[0]
                         data_to_show = output.data if isinstance(output, QueryResult) else output
-                        result_str = f"Data: {str(data_to_show)[:500]}..."
+                        result_str = f"Data: {str(data_to_show)[:REPORT_CONTEXT_SNIPPET_LIMIT]}..."
                     else:
-                        formatted_outputs = [f"  - Output {i+1}: {str(output)[:200]}..." for i, output in enumerate(step_res_obj.outputs)]
-                        result_str = "Data (multiple outputs):\n" + "\n".join(formatted_outputs) if formatted_outputs else "Step completed, but no specific outputs captured."
+                        # Summarize multiple outputs, with a cap on the number of outputs and length of each
+                        formatted_outputs = []
+                        for i, output_data in enumerate(step_res_obj.outputs[:5]): # Show max 5 outputs
+                            # Truncate each output summary, dividing the limit among them or using a smaller fixed limit per output
+                            output_summary = str(output_data)[:REPORT_CONTEXT_SNIPPET_LIMIT // 2] # e.g. 2000 chars per output
+                            formatted_outputs.append(f"  - Output {i+1}: {output_summary}...")
+                        if len(step_res_obj.outputs) > 5:
+                            formatted_outputs.append(f"  ... and {len(step_res_obj.outputs) - 5} more outputs.")
+                        result_str = "Data (multiple outputs):\\n" + "\\n".join(formatted_outputs) if formatted_outputs else "Step completed, but no specific outputs captured."
                 else:
                     result_str = "Step completed, but no outputs available in StepResult."
-            # Removed legacy QueryResult/list handling as step_results now consistently holds StepResult
             else:
                 result_str = "Step completed without explicit data/error capture in StepResult."
             
-            findings_text_lines.append(f"Step {step_id} ({type_val}): {desc}\nResult:\n{result_str}")
+            findings_text_lines.append(f"Step {dep_id} ({type_val}): {desc}\\nResult:\\n{result_str}")
         
-        return "\n---\n".join(findings_text_lines) if findings_text_lines else "No preceding investigation steps were successfully executed or produced results."
+        return "\\n---\\n".join(findings_text_lines) if findings_text_lines else "No findings could be gathered from the dependent steps."

@@ -6,7 +6,7 @@ Agent for synthesizing investigation findings into a structured InvestigationRep
 
 import logging
 import os
-from typing import Optional, AsyncGenerator, Union, Dict, Any
+from typing import Optional, AsyncGenerator, Union, Dict, Any, TYPE_CHECKING
 
 from pydantic_ai import Agent, UnexpectedModelBehavior
 from pydantic_ai.models.openai import OpenAIModel
@@ -23,16 +23,21 @@ from backend.ai.events import (
     # Add new event types if needed for reporting status, e.g.:
     # ReportGenerationUpdateEvent 
 )
+# Import for notebook tools
+if TYPE_CHECKING:
+    from backend.services.notebook_manager import NotebookManager
+from backend.ai.notebook_context_tools import create_notebook_context_tools
 
 investigation_report_agent_logger = logging.getLogger("ai.investigation_report_agent")
 
 class InvestigationReportAgent:
     """Agent for generating structured investigation reports."""
-    def __init__(self, notebook_id: str):
+    def __init__(self, notebook_id: str, notebook_manager: Optional['NotebookManager'] = None):
         investigation_report_agent_logger.info(f"Initializing InvestigationReportAgent for notebook_id: {notebook_id}")
         self.settings = get_settings()
         # Consider using a different model or settings if report generation is more complex
         self.notebook_id = notebook_id
+        self.notebook_manager = notebook_manager
         self.agent: Optional[Agent] = None # Agent instance created lazily
         investigation_report_agent_logger.info(f"InvestigationReportAgent initialized successfully.")
 
@@ -54,6 +59,14 @@ class InvestigationReportAgent:
         """Initializes the Pydantic AI Agent for report generation."""
         system_prompt = self._read_system_prompt()
 
+        tools = []
+        if self.notebook_manager:
+            tools = create_notebook_context_tools(self.notebook_id, self.notebook_manager)
+            investigation_report_agent_logger.info(f"Notebook context tools ({[tool.__name__ for tool in tools]}) created for InvestigationReportAgent.")
+        else:
+            investigation_report_agent_logger.warning("NotebookManager not available to InvestigationReportAgent. Notebook context tools will not be registered.")
+
+
         agent = Agent(
             model=SafeOpenAIModel(  # Use the SafeOpenAIModel
                 "openai/gpt-4.1",
@@ -64,9 +77,10 @@ class InvestigationReportAgent:
             ),
             output_type=InvestigationReport, # Use the target Pydantic model
             system_prompt=system_prompt,
-            # No tools/MCP needed for this specific agent, it just synthesizes
+            tools=tools, # Pass the tools to the agent
+            # No MCP needed for this specific agent if tools are handled directly by Pydantic-AI
         )
-        investigation_report_agent_logger.info(f"InvestigationReportAgent Pydantic AI instance created.")
+        investigation_report_agent_logger.info(f"InvestigationReportAgent Pydantic AI instance created with {len(tools)} tools.")
         return agent # type: ignore
 
     async def run_report_generation(
@@ -117,7 +131,7 @@ class InvestigationReportAgent:
             )
             return
 
-        max_attempts = 3
+        max_attempts = 2
         last_error = None
         final_report_data: Optional[InvestigationReport] = None
         

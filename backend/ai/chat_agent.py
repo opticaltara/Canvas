@@ -15,7 +15,6 @@ from pathlib import Path
 import redis.asyncio as redis
 from redis.asyncio.client import Redis as AsyncRedis
 from uuid import UUID
-import re
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
@@ -29,15 +28,16 @@ from pydantic_ai.messages import (
     UserPromptPart
 )
 
+from backend.services.connection_handlers.registry import get_handler
+from pydantic_ai.mcp import MCPServerStdio
+
 from backend.config import get_settings
-from backend.ai.chat_tools import NotebookCellTools, ListCellsParams
+from backend.ai.chat_tools import NotebookCellTools
 from backend.services.notebook_manager import NotebookManager
 from backend.ai.agent import AIAgent
 from backend.services.connection_manager import ConnectionManager, get_connection_manager
-from backend.ai.events import (
-    EventType, 
+from backend.ai.events import ( 
     AgentType, 
-    StatusType, 
     ClarificationNeededEvent,
     PlanCreatedEvent,
     PlanCellCreatedEvent,
@@ -55,7 +55,8 @@ from backend.ai.events import (
     StatusUpdateEvent,
     BaseEvent,
     FileSystemToolCellCreatedEvent,
-    PythonToolCellCreatedEvent
+    PythonToolCellCreatedEvent,
+    StatusType
 )
 from backend.ai.models import SafeOpenAIModel # Import the custom model
 
@@ -151,16 +152,19 @@ class ChatMessage(BaseModel):
     timestamp: str = Field(description="Timestamp of the message")
     agent: Optional[str] = Field(description="Agent that generated the message: 'chat_agent' or 'ai_agent'", default=None)
 
-class ClarificationResult(BaseModel):
-    needs_clarification: bool = Field(description="Whether the query needs clarification")
-    clarification_message: Optional[str] = Field(description="Message to ask for clarification if needed", default=None)
-
-class ClarificationNotNeeded(BaseModel):
-    """Indicates that clarification is not needed"""
-    pass
 
 def to_chat_message(message: ModelMessage, agent: Optional[str] = None) -> ChatMessage:
     """Convert a ModelMessage to a ChatMessage"""
+    # Check if message.parts is not empty before accessing the first element
+    if not message.parts:
+        chat_agent_logger.warning("Received ModelMessage with empty parts list.")
+        return ChatMessage(
+            role="unknown",
+            content=f"Empty message parts: {str(message)}",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            agent=agent
+        )
+        
     first_part = message.parts[0]
     
     if isinstance(message, ModelRequest) and isinstance(first_part, UserPromptPart):
@@ -205,7 +209,6 @@ def to_chat_message(message: ModelMessage, agent: Optional[str] = None) -> ChatM
         agent=agent
     )
 
-
 class ChatRequest(BaseModel):
     """Request to send a message to the chat agent"""
     prompt: str = Field(description="User's message")
@@ -237,9 +240,11 @@ class ChatAgentService:
         self.notebook_id: Optional[str] = None
         self.available_tools_info: Optional[str] = None
         self._available_data_source_types: Optional[List[str]] = None
-        self.chat_agent: Optional[Agent[None, ClarificationResult]] = None
+        # self.chat_agent: Optional[Agent[None, ClarificationResult]] = None # Keep chat_agent commented out or remove if clarification stays removed
         self.ai_agent: Optional[AIAgent] = None
         self.cell_tools: Optional[NotebookCellTools] = None
+        self.github_mcp_server = None
+        self.filesystem_mcp_server = None
 
     async def initialize(self, notebook_id: str):
         """Asynchronously initializes the agent instance after creation."""
@@ -257,9 +262,9 @@ class ChatAgentService:
         if not self.cell_tools: # Initialize only if not already set (e.g. by constructor)
             self.cell_tools = NotebookCellTools(notebook_manager=self.notebook_manager)
 
-        # Setup Clarification Agent (chat_agent)
-        system_prompt = self._generate_system_prompt() # Uses fetched tool info
-        chat_agent_logger.info(f"System prompt generated for chat agent (notebook: {self.notebook_id}).")
+        # Setup Clarification Agent (chat_agent) - Keep commented/removed
+        # system_prompt = self._generate_system_prompt() 
+        # chat_agent_logger.info(f"System prompt generated for chat agent (notebook: {self.notebook_id}).")
 
         # -----------------------------------------------------------
         # Attach notebook retrieval tools (list_cells / get_cell)
@@ -272,19 +277,7 @@ class ChatAgentService:
             chat_agent_logger.error("Failed to create notebook context tools for chat_agent: %s", tool_err, exc_info=True)
             notebook_tools = []
 
-        self.chat_agent = Agent(
-            model=SafeOpenAIModel(  # Use the SafeOpenAIModel
-                "anthropic/claude-3.7-sonnet",
-                provider=OpenAIProvider(
-                    base_url='https://openrouter.ai/api/v1',
-                    api_key=self.settings.openrouter_api_key,
-                ),
-            ),
-            system_prompt=system_prompt,
-            output_type=ClarificationResult,
-            tools=notebook_tools,  # type: ignore[arg-type]
-        )
-        chat_agent_logger.info(f"ChatAgentService: Chat agent initialized for notebook {self.notebook_id} with {len(notebook_tools)} notebook context tools.")
+        # chat_agent_logger.info(f"ChatAgentService: Clarification agent removed.")
 
         # Setup Investigation Agent (ai_agent)
         chat_agent_logger.info(f"Initializing AIAgent for notebook {self.notebook_id} with sources: {self._available_data_source_types}")
@@ -394,7 +387,7 @@ class ChatAgentService:
             The first element of the tuple corresponds to the EventType enum value.
         """
         # Ensure agent is initialized before handling messages
-        if not self.notebook_id or not self.chat_agent or not self.ai_agent or not self.cell_tools:
+        if not self.notebook_id or not self.ai_agent or not self.cell_tools:
              chat_agent_logger.error(f"Agent for session {session_id} accessed handle_message before initialization.")
              raise RuntimeError("ChatAgentService not initialized. Call initialize() first.")
 
@@ -406,100 +399,44 @@ class ChatAgentService:
         start_time = time.time()
         
         try:
-            # Define Redis key for the skip flag
-            redis_skip_key = f"skip_clarification:{session_id}"
-            CLARIFICATION_SKIP_TTL = 300 # 5 minutes
-            
-            # --- Check Redis FIRST --- 
-            should_skip_clarification = False
-            if self.redis_client:
-                try:
-                    skip_flag = await self.redis_client.get(redis_skip_key)
-                    if skip_flag == "True":
-                        chat_agent_logger.info(f"Redis flag found, skipping clarification check for session {session_id}.")
-                        should_skip_clarification = True
-                        # Consume the flag
-                        await self.redis_client.delete(redis_skip_key)
-                except redis.RedisError as redis_err:
-                    chat_agent_logger.warning(f"Redis error checking skip flag for session {session_id}: {redis_err}. Proceeding without skip.")
-            else:
-                 chat_agent_logger.warning(f"Redis client not available in ChatAgentService for session {session_id}. Cannot check skip flag.")
+            # --- Removed Clarification Check and Redis Logic ---
 
-            # --- End Optional History Check --- 
+            # ---> Immediately yield a status update message <---
+            initial_status_message = "Starting investigation..."
+            chat_agent_logger.info(f"Sending initial status update for session {session_id}: '{initial_status_message}'")
+            # Use StatusUpdateEvent or similar appropriate event type if available, otherwise use a generic status update
+            # Using StatusUpdateEvent seems reasonable here
+            initial_status_event = StatusUpdateEvent(
+                message=initial_status_message,
+                status=StatusType.STARTING, # Use StatusType.STARTING
+                session_id=session_id,
+                notebook_id=self.notebook_id,
+                # Provide default values for other optional fields
+                step_id=None,
+                attempt=None,
+                max_attempts=None,
+                # Provide the missing required fields
+                agent_type=AgentType.CHAT, # Use AgentType.CHAT
+                reason=None,
+                original_plan_step_id=None 
+            )
+            # Ensure message is a string
+            content_str = initial_status_event.message if initial_status_event.message is not None else ""
+            # Agent type is now guaranteed to be set in the event
+            agent_type_val = initial_status_event.agent_type.value if initial_status_event.agent_type else AgentType.UNKNOWN.value # Fallback just in case
+            response_part = StatusResponsePart(
+                content=content_str, # Use guaranteed string
+                agent_type=agent_type_val
+            )
+            response = ModelResponse(parts=[response_part], timestamp=datetime.now(timezone.utc))
+            yield initial_status_event.type.value, response
 
-            # ---> Run Clarification Agent only if NOT skipping <--- 
-            if not should_skip_clarification:
-                chat_agent_logger.info(f"Checking if clarification is needed for session {session_id}...")
-                # Construct the prompt for clarification assessment based on the full context
-                clarification_assessment_prompt = (
-                    f"Review the *entire conversation history* ending with the latest user message. "
-                    f"Previously, I may have asked for clarification. The user's latest message might provide some or all of that information. "
-                    f"Available data sources: {self.available_tools_info or '(loading...)'}. "
-                    f"You have access to Github and the filesystem so do not ask for clarification merely to request repository access or specific code files when a GitHub link is provided. "
-                    f"Assess if, *after considering the user's latest response*, there is *still* critical information missing to proceed with their *original* request. "
-                    f"If the latest user message sufficiently answers the previous clarification or provides enough information to take the *next step*, then DO NOT ask for clarification again (needs_clarification: false). "
-                    f"Only ask for clarification (needs_clarification: true) if the request *remains* genuinely ambiguous or is *still* missing essential details *despite* the user's last message."
-                    f"\n\nUser's latest message:\n{prompt}"
-                )
-
-                # Log the history being passed to the clarification check
-                chat_agent_logger.info(f"Message history for clarification check (session {session_id}): {len(message_history)} messages.")
-                if message_history: # Log the last message if history is not empty
-                    chat_agent_logger.info(f"Last message in history for clarification: {str(message_history[-1])}")
-
-                try:
-                    # Call the correctly typed agent
-                    clarification_run_result = await self.chat_agent.run(
-                        clarification_assessment_prompt,
-                        message_history=message_history, # History includes user's LATEST reply here
-                    )
-                    # Access the actual output model from the result
-                    clarification_output = clarification_run_result.output
-                except Exception as clar_err:
-                    chat_agent_logger.error(f"Error during clarification check API call: {clar_err}", exc_info=True)
-                    # Handle error appropriately, maybe yield an error status
-                    yield "error", ModelResponse(parts=[StatusResponsePart(content=f"Error checking clarification: {clar_err}", agent_type="chat_agent")], timestamp=datetime.now(timezone.utc))
-                    return
-
-                chat_agent_logger.info(f"Clarification check completed. Result: {clarification_output.needs_clarification}")
-
-                if clarification_output.needs_clarification and clarification_output.clarification_message:
-                    chat_agent_logger.info(f"Asking for clarification: {clarification_output.clarification_message}")
-                    
-                    # --- SET Redis Flag BEFORE yielding --- 
-                    if self.redis_client:
-                        try:
-                             await self.redis_client.set(redis_skip_key, "True", ex=CLARIFICATION_SKIP_TTL)
-                             chat_agent_logger.info(f"Set Redis skip flag for session {session_id} with TTL {CLARIFICATION_SKIP_TTL}s.")
-                        except redis.RedisError as redis_err:
-                             chat_agent_logger.warning(f"Redis error setting skip flag for session {session_id}: {redis_err}")
-                    # --- End SET Redis Flag ---
-                    
-                    # Create ClarificationNeededEvent object
-                    clarification_event = ClarificationNeededEvent(
-                        message=clarification_output.clarification_message,
-                        session_id=session_id,
-                        notebook_id=self.notebook_id
-                    )
-                    # Wrap in ModelResponse using StatusResponsePart for transport
-                    response_part = StatusResponsePart(
-                        content=clarification_event.message,
-                        agent_type=clarification_event.agent_type.value
-                    )
-                    response = ModelResponse(parts=[response_part], timestamp=datetime.now(timezone.utc))
-                    # Yield EventType string and the response object
-                    yield clarification_event.type.value, response
-                    return # Exit after asking for clarification
-
-            # If clarification wasn't needed OR was skipped (by Redis or History check), proceed to investigation
-            if should_skip_clarification:
-                 log_msg = f"Proceeding to investigation for session {session_id} (Clarification skipped)."
-            else:
-                 log_msg = f"Proceeding to investigation for session {session_id} (Clarification not needed)."
+            # ---> Proceed directly to investigation <---
+            log_msg = f"Proceeding directly to investigation for session {session_id}."
             chat_agent_logger.info(log_msg)
-        
+
             # Notebook context summary no longer pre-computed; agents can call
-            # list_cells/get_cell tools on demand.  Pass None to investigate.
+            # list_cells/get_cell tools on demand. Pass None to investigate.
             notebook_context_summary = None
 
             async for event in self.ai_agent.investigate(
