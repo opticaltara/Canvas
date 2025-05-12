@@ -12,6 +12,7 @@ from pydantic_ai import Agent, UnexpectedModelBehavior
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
+from backend.ai.models import SafeOpenAIModel
 from backend.config import get_settings
 from backend.core.query_result import InvestigationReport, Finding # Import the target model AND Finding
 from backend.ai.events import (
@@ -31,13 +32,6 @@ class InvestigationReportAgent:
         investigation_report_agent_logger.info(f"Initializing InvestigationReportAgent for notebook_id: {notebook_id}")
         self.settings = get_settings()
         # Consider using a different model or settings if report generation is more complex
-        self.model = OpenAIModel(
-                self.settings.ai_model, # Or maybe a stronger model?
-                provider=OpenAIProvider(
-                    base_url='https://openrouter.ai/api/v1',
-                    api_key=self.settings.openrouter_api_key,
-                ),
-        )
         self.notebook_id = notebook_id
         self.agent: Optional[Agent] = None # Agent instance created lazily
         investigation_report_agent_logger.info(f"InvestigationReportAgent initialized successfully.")
@@ -61,7 +55,13 @@ class InvestigationReportAgent:
         system_prompt = self._read_system_prompt()
 
         agent = Agent(
-            self.model,
+            model=SafeOpenAIModel(  # Use the SafeOpenAIModel
+                "openai/gpt-4.1",
+                provider=OpenAIProvider(
+                    base_url='https://openrouter.ai/api/v1',
+                    api_key=self.settings.openrouter_api_key,
+                ),
+            ),
             output_type=InvestigationReport, # Use the target Pydantic model
             system_prompt=system_prompt,
             # No tools/MCP needed for this specific agent, it just synthesizes

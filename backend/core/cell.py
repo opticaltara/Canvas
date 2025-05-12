@@ -60,6 +60,11 @@ class CellType(str, Enum):
         INVESTIGATION_REPORT: Cell containing a structured investigation report
         FILESYSTEM: Cell representing a filesystem operation
         PYTHON: Cell containing Python code
+        SQL: Cell containing SQL code
+        S3: Cell representing an S3 operation
+        METRIC: Cell representing a metric query
+        AI_QUERY: Generic for other agent-driven cells
+        MEDIA_TIMELINE: New cell type for media timeline outputs
     """
     MARKDOWN = "markdown"
     GITHUB = "github"
@@ -71,6 +76,7 @@ class CellType(str, Enum):
     S3 = "s3"
     METRIC = "metric"
     AI_QUERY = "ai_query" # Generic for other agent-driven cells
+    MEDIA_TIMELINE = "media_timeline"  # New cell type for media timeline outputs
 
 
 class CellResult(BaseModel):

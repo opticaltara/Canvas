@@ -9,6 +9,7 @@ from typing import  Optional, AsyncGenerator, Dict, Any, Union
 from datetime import datetime, timezone
 import json
 import os
+import asyncio  # For implementing retry backoff
 
 from pydantic_ai import Agent, UnexpectedModelBehavior, CallToolsNode
 from pydantic_ai.messages import (
@@ -46,7 +47,7 @@ class GitHubQueryAgent:
         github_query_agent_logger.info(f"Initializing GitHubQueryAgent for notebook_id: {notebook_id}")
         self.settings = get_settings()
         self.model = SafeOpenAIModel( # Changed from OpenAIModel to SafeOpenAIModel
-                self.settings.ai_model,
+                "openai/gpt-4.1",
                 provider=OpenAIProvider(
                     base_url='https://openrouter.ai/api/v1',
                     api_key=self.settings.openrouter_api_key,
@@ -394,23 +395,64 @@ class GitHubQueryAgent:
                             github_query_agent_logger.info(f"Attempt {attempt_completed}: Exiting core agent interaction block.")
                         # --- End core agent interaction wrap ---
 
-                        if attempt_failed: # Check if the attempt itself failed
-                             if attempt < max_attempts - 1:
-                                 error_context = f"\\n\\nINFO: Attempt {attempt_completed} failed with error: {last_error}. Retrying..."
-                                 current_description += error_context
-                                 yield StatusUpdateEvent(
-                                     type=EventType.STATUS_UPDATE, status=StatusType.RETRYING, 
-                                     agent_type=AgentType.GITHUB, 
-                                     attempt=attempt_completed, 
-                                     reason=f"error: {str(last_error)[:100]}...", # Provide brief reason
-                                     message=None, max_attempts=max_attempts, step_id=None, original_plan_step_id=None,
-                                     session_id=session_id,
-                                     notebook_id=notebook_id
-                                 )
-                                 continue # Move to next attempt
-                             else:
-                                 github_query_agent_logger.error(f"Error on final attempt {max_attempts}: {last_error}")
-                                 break # Exit attempt loop
+                        if attempt_failed:  # Check if the attempt itself failed
+                            # Update last_error so that outer scope has latest info
+                            last_error = last_error_for_attempt or last_error
+
+                            # Detect provider-level errors (OpenRouter often returns "Provider returned error" with code 4)
+                            provider_error_detected = False
+                            if last_error_for_attempt:
+                                lowered = last_error_for_attempt.lower()
+                                provider_error_detected = (
+                                    "provider returned error" in lowered
+                                    or "'code': 4" in lowered
+                                    or '"code": 4' in lowered
+                                )
+
+                            # Determine back-off delay – exponential capped at 60 s if provider error, otherwise 0
+                            backoff_seconds = 0
+                            if provider_error_detected:
+                                backoff_seconds = min(2 ** (attempt_completed), 60)
+
+                            if attempt < max_attempts - 1:
+                                # Build retry context for the next prompt
+                                error_context = (
+                                    f"\\n\\nINFO: Attempt {attempt_completed} failed with error: {last_error}. "
+                                    "Retrying..."
+                                )
+                                current_description += error_context
+
+                                # Inform frontend about retry/backoff
+                                retry_message = (
+                                    f"Backing off {backoff_seconds}s before retry due to provider error." if backoff_seconds else None
+                                )
+                                yield StatusUpdateEvent(
+                                    type=EventType.STATUS_UPDATE,
+                                    status=StatusType.RETRYING,
+                                    agent_type=AgentType.GITHUB,
+                                    attempt=attempt_completed,
+                                    reason=f"error: {str(last_error)[:100]}...",
+                                    message=retry_message,
+                                    max_attempts=max_attempts,
+                                    step_id=None,
+                                    original_plan_step_id=None,
+                                    session_id=session_id,
+                                    notebook_id=notebook_id,
+                                )
+
+                                # Apply backoff delay if needed
+                                if backoff_seconds:
+                                    github_query_agent_logger.info(
+                                        f"Attempt {attempt_completed}: Backing off for {backoff_seconds}s before next retry due to provider error."
+                                    )
+                                    await asyncio.sleep(backoff_seconds)
+
+                                continue  # Move to next attempt
+                            else:
+                                github_query_agent_logger.error(
+                                    f"Error on final attempt {max_attempts}: {last_error}"
+                                )
+                                break  # Exit attempt loop
 
                 except Exception as mcp_mgmt_err:
                     # This catches errors in managing the MCP server itself (e.g., startup/shutdown)

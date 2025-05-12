@@ -90,7 +90,7 @@ export interface StepCompletedEvent extends BaseEvent {
   type: string // "step_${stepId}_completed"
   status: "step_completed"
   step_id: string
-  step_type: "log" | "metric" | "markdown" | "github" // Removed summarization, sql, python, ai_query (update if others are used)
+  step_type: "log" | "metric" | "markdown" | "github" | "media_timeline" // Removed summarization, sql, python, ai_query (update if others are used)
   cell_id: string
   result: QueryResult // Use the imported QueryResult type from store/types
   cell_params: Partial<CellCreationParams>; // Add cell_params used by backend
@@ -196,6 +196,8 @@ export type InvestigationEvent =
   // ADDED: Python Tool Events
   | PythonToolCellCreatedEvent
   | PythonToolErrorEvent
+  // ADDED: Media Timeline Event
+  | MediaTimelineCellCreatedEvent
 
 // Define cell creation parameters
 export interface CellCreationParams {
@@ -264,6 +266,14 @@ export interface PythonToolErrorEvent extends BaseEvent {
   agent_type: "python"; // Specific agent type
 }
 // --- END: Added Python Interfaces ---
+
+export interface MediaTimelineCellCreatedEvent extends BaseEvent {
+  type: "media_timeline_cell_created";
+  status: "success";
+  agent_type: "media_timeline";
+  cell_id: string;
+  cell_params: CellCreationParams;
+}
 
 interface UseInvestigationEventsProps {
   notebookId: string
@@ -339,8 +349,9 @@ export function useInvestigationEvents({
       if (event.step_type === "github") {
         cellType = "github";
       } else if (event.step_type === "log" || event.step_type === "metric") {
-        // Assign a type for logs/metrics if needed, maybe a generic 'output' or 'markdown'
         cellType = "markdown"; // Or a new specific type
+      } else if (event.step_type === "media_timeline") {
+        cellType = "media_timeline";
       } // Add other mappings if needed
 
       // Create the cell - THIS IS THE ONLY PLACE WE CREATE STEP CELLS
@@ -663,6 +674,34 @@ export function useInvestigationEvents({
   );
   // --- END: Added Python Handler ---
 
+  // --- ADDED: Handler for Media Timeline Cell Created ---
+  const handleMediaTimelineCellCreated = useCallback(
+    (event: MediaTimelineCellCreatedEvent) => {
+      setCurrentStatus("Media timeline generated.");
+      const backendCellParams = event.cell_params || {} as any;
+
+      const cellParams: CellCreationParams = {
+        id: event.cell_id,
+        step_id: backendCellParams.step_id || event.cell_id,
+        type: "media_timeline",
+        content: backendCellParams.content || "Media timeline produced.",
+        status: "success",
+        result: backendCellParams.result?.content || undefined,
+        error: backendCellParams.result?.error || undefined,
+        metadata: { ...(backendCellParams.metadata || {}), source_agent: event.agent_type },
+      };
+
+      onCreateCell(cellParams);
+
+      toast({
+        title: "Media Timeline Ready",
+        description: "A media timeline has been added to the notebook.",
+      });
+    },
+    [onCreateCell, toast]
+  );
+  // --- END: Media Timeline Handler ---
+
   // handleStepUpdate
   const handleStepUpdate = useCallback((event: any) => {
     // Example: Update cell status visually if needed
@@ -797,6 +836,9 @@ export function useInvestigationEvents({
         case "python_tool_error":
           handlePythonToolError(event as PythonToolErrorEvent);
           break;
+        case "media_timeline_cell_created":
+          handleMediaTimelineCellCreated(event as MediaTimelineCellCreatedEvent);
+          break;
         default:
           // Check if it's a step completion event
           if (event.type.startsWith("step_") && event.type.endsWith("_completed")) {
@@ -816,7 +858,7 @@ export function useInvestigationEvents({
       }
     },
     // Add new handlers to dependency array
-    [handlePlanCreated, handlePlanCellCreated, handlePlanRevised, handleSummaryStarted, handleSummaryUpdate, handleSummaryCellCreated, handleSummaryCellError, handleGithubToolCellCreated, handleGithubToolError, handleError, handleStepCompleted, handleStepUpdate, handleInvestigationReport, handleCellUpdate, handleFileSystemToolCellCreated, handleFileSystemToolError, handlePythonToolCellCreated, handlePythonToolError]
+    [handlePlanCreated, handlePlanCellCreated, handlePlanRevised, handleSummaryStarted, handleSummaryUpdate, handleSummaryCellCreated, handleSummaryCellError, handleGithubToolCellCreated, handleGithubToolError, handleError, handleStepCompleted, handleStepUpdate, handleInvestigationReport, handleCellUpdate, handleFileSystemToolCellCreated, handleFileSystemToolError, handlePythonToolCellCreated, handlePythonToolError, handleMediaTimelineCellCreated]
   );
 
   // Process incoming WebSocket messages from the internal hook

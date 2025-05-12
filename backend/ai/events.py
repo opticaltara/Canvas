@@ -5,6 +5,7 @@ Pydantic Models for Agent Communication Events
 from enum import Enum
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional, List
+from backend.ai.models import InvestigationStepModel
 
 class BaseEvent(BaseModel):
     """Base class for all events to potentially hold common fields if needed later."""
@@ -45,6 +46,8 @@ class EventType(str, Enum):
     PYTHON_TOOL_ERROR = "python_tool_error"
     PYTHON_STEP_PROCESSING_COMPLETE = "python_step_processing_complete" # Signal agent finished
     MEDIA_TIMELINE_CELL_CREATED = "media_timeline_cell_created"
+    # Plan revision
+    PLAN_REVISED = "plan_revised"
 
 class AgentType(str, Enum):
     GITHUB = "github_agent"
@@ -115,6 +118,8 @@ class StatusType(str, Enum):
     # Chat Statuses
     CLARIFICATION_NEEDED = "clarification_needed"
     
+    # Plan
+    PLAN_REVISED = "plan_revised"
 
 # --- Event Models (using Enums) ---
 
@@ -417,3 +422,22 @@ class MediaTimelineCellCreatedEvent(BaseEvent):
     cell_id: str = Field(..., description="ID of the created media timeline cell")
     cell_params: Dict[str, Any] = Field(..., description="Parameters used to create the cell, including its content")
     status: StatusType = Field(default=StatusType.SUCCESS, description="Fixed status for this event type")
+
+# ------------------------------------------------------------------
+# Plan Revision Event
+# ------------------------------------------------------------------
+
+
+class PlanRevisedEvent(BaseEvent):
+    """Event emitted after the plan reviser updates the investigation plan."""
+
+    type: EventType = Field(default=EventType.PLAN_REVISED, description="Event type identifier")
+    status: StatusType = Field(default=StatusType.PLAN_REVISED, description="Fixed status for plan revision")
+    agent_type: AgentType = Field(default=AgentType.PLAN_REVISER, description="Fixed agent type for the reviser")
+
+    revised_steps: List[InvestigationStepModel] = Field(
+        ..., description="Full list of steps after the revision has been applied"
+    )
+    message: Optional[str] = Field(
+        None, description="Explanation or reasoning behind the plan revision"
+    )

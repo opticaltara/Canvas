@@ -9,6 +9,7 @@ const SummarizationCell = dynamic(() => import('./SummarizationCell'), { loading
 const InvestigationReportCell = dynamic(() => import('./InvestigationReportCell'), { loading: () => <p>Loading Report Cell...</p> });
 const FileSystemCell = dynamic(() => import('./FileSystemCell'), { loading: () => <p>Loading FileSystem Cell...</p> });
 const PythonCell = dynamic(() => import('./PythonCell'), { loading: () => <p>Loading Python Cell...</p> });
+const MediaTimelineCell = dynamic(() => import('./MediaTimelineCell'), { loading: () => <p>Loading Media Timeline...</p> });
 
 interface CellFactoryProps {
   cell: Cell
@@ -64,6 +65,13 @@ const CellFactory: React.FC<CellFactoryProps> = ({ cell, onExecute, onUpdate, on
           onUpdate={onUpdate}
           onDelete={onDelete}
           isExecuting={isExecuting}
+        />
+      )
+    case "media_timeline":
+      return (
+        <MediaTimelineCell
+          cell={cell}
+          onDelete={onDelete}
         />
       )
     default:

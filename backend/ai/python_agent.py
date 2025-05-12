@@ -56,7 +56,7 @@ class PythonAgent:
         python_agent_logger.info(f"Initializing PythonAgent (notebook_id will be from input)")
         self.settings = get_settings()
         self.model = SafeOpenAIModel(
-                self.settings.ai_model,
+                "openai/gpt-4.1",
                 provider=OpenAIProvider(
                     base_url='https://openrouter.ai/api/v1',
                     api_key=self.settings.openrouter_api_key,

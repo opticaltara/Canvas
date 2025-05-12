@@ -262,8 +262,12 @@ export default function CanvasSidebar() {
               {filteredCanvases.map((canvas) => (
                 <div
                   key={canvas.id}
-                  className={`group flex items-center justify-between p-2 rounded-md hover:bg-accent transition-colors ${
-                    canvas.id === currentCanvasId ? "bg-accent" : ""
+                  className={`group flex items-center justify-between p-2 rounded-md transition-colors ${
+                    canvas.id === currentCanvasId
+                      ? "bg-accent text-accent-foreground"
+                      : "hover:bg-accent/70"
+                  } ${
+                    canvas.id === currentCanvasId ? "border-l-4 border-primary" : ""
                   }`}
                 >
                   <Link href={`/canvas/${canvas.id}`} className="flex items-center flex-1 min-w-0">

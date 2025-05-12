@@ -103,6 +103,124 @@ class CellCreator:
             ai_logger.error(f"Failed to create report cell for step {step.step_id}: {e}", exc_info=True)
             return None, report_cell_params, str(e)
     
+    async def create_media_timeline_cell(
+        self,
+        cell_tools: NotebookCellTools,
+        step: InvestigationStepModel,
+        payload,  # MediaTimelinePayload object
+        dependency_cell_ids: List[UUID],
+        session_id: str
+    ) -> Tuple[Optional[UUID], Optional[CreateCellParams], Optional[str]]:
+        """Create a media timeline cell and return ID, params and error"""
+        try:
+            from backend.ai.media_agent import MediaTimelinePayload  # Local import to avoid circular reference
+        except Exception:
+            MediaTimelinePayload = None  # type: ignore
+
+        error = None
+        if hasattr(payload, 'error'):
+            error = getattr(payload, 'error')
+
+        # Build Markdown content
+        content_lines = ["# Media Timeline", ""]
+
+        # ------------------------
+        # Hypothesis section
+        # ------------------------
+        from pydantic import BaseModel  # Local import to avoid top-level dependency
+        if MediaTimelinePayload is not None and isinstance(payload, MediaTimelinePayload):
+            hypothesis = payload.hypothesis if hasattr(payload, 'hypothesis') else "Media analysis results"
+            if isinstance(hypothesis, str):
+                content_lines.extend(["## Hypothesis", "", hypothesis, ""])
+            elif isinstance(hypothesis, BaseModel):
+                content_lines.append("## Hypothesis")
+                files = getattr(hypothesis, 'files_likely_containing_bug', [])
+                reasoning = getattr(hypothesis, 'reasoning', [])
+                snippets = getattr(hypothesis, 'specific_code_snippets_to_check', [])
+
+                if files:
+                    content_lines.append("**Files likely containing the bug:**")
+                    for f in files:
+                        content_lines.append(f"- `{f}`")
+                    content_lines.append("")
+
+                if reasoning:
+                    content_lines.append("**Reasoning:**")
+                    for r in reasoning:
+                        content_lines.append(f"- {r}")
+                    content_lines.append("")
+
+                if snippets:
+                    content_lines.append("**Specific code snippets to check:**")
+                    for s in snippets:
+                        content_lines.append(f"- `{s}`")
+                    content_lines.append("")
+            else:
+                # Fallback – just string-ify
+                content_lines.extend(["## Hypothesis", "", str(hypothesis), ""])
+        else:
+            # Fallback – just string-ify
+            content_lines.extend(["## Hypothesis", "", str(payload), ""])
+
+        # ------------------------
+        # Timeline events section
+        # ------------------------
+        if hasattr(payload, 'timeline_events') and payload.timeline_events:
+            content_lines.append("## Timeline Events")
+            for idx, evt in enumerate(payload.timeline_events, 1):
+                desc = getattr(evt, 'description', '')
+                image_id = getattr(evt, 'image_identifier', '')
+                content_lines.append(f"{idx}. **{desc}**  ")
+                content_lines.append(f"   Image: `{image_id}`")
+                code_refs = getattr(evt, 'code_references', [])
+                if code_refs:
+                    refs_str = ', '.join(code_refs)
+                    content_lines.append(f"   Code references: {refs_str}")
+                content_lines.append("")
+        else:
+            content_lines.append("(No timeline events provided)")
+
+        cell_content = "\n".join(content_lines)
+
+        # Ensure payload is JSON-serialisable for notebook storage
+        # Convert Pydantic models to dict; otherwise stringify as fallback
+        from pydantic import BaseModel  # Local import
+        if isinstance(payload, BaseModel):
+            serialisable_payload = payload.model_dump(mode='json')
+        elif isinstance(payload, (dict, list, str, int, float, bool)) or payload is None:
+            serialisable_payload = payload
+        else:
+            serialisable_payload = str(payload)
+
+        cell_metadata = {
+            "session_id": session_id,
+            "step_id": step.step_id,
+            "is_media_timeline": True
+        }
+
+        from backend.core.cell import CellType, CellResult, CellStatus
+        cell_params = CreateCellParams(
+            notebook_id=self.notebook_id,
+            cell_type=CellType.MEDIA_TIMELINE,
+            content=cell_content,
+            metadata=cell_metadata,
+            dependencies=dependency_cell_ids,
+            tool_call_id=uuid4(),
+            result=CellResult(content=serialisable_payload, error=error, execution_time=0.0),
+            status=CellStatus.ERROR if error else CellStatus.SUCCESS
+        )
+
+        try:
+            cell_result = await cell_tools.create_cell(params=cell_params)
+            cell_id_str = cell_result.get("cell_id")
+            if cell_id_str:
+                return UUID(cell_id_str), cell_params, None
+            else:
+                return None, cell_params, "Cell creation returned no cell_id"
+        except Exception as e:
+            ai_logger.error(f"Failed to create media timeline cell for step {step.step_id}: {e}", exc_info=True)
+            return None, cell_params, str(e)
+    
     async def create_tool_cell(
         self,
         cell_tools: NotebookCellTools,

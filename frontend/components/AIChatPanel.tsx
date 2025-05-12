@@ -4,12 +4,11 @@ import type React from "react"
 import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { Send, Bot, User, Loader2, ChevronRight, AlertCircle, RefreshCw, XCircle, ChevronDown } from "lucide-react"
 import { api } from "@/api/client"
 import type { ChatMessage, CellCreationEvent } from "@/api/chat"
-import type { Model } from "@/api/models"
 import { useToast } from "@/hooks/use-toast"
-import { ModelSelector } from "@/components/ModelSelector"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 
@@ -72,7 +71,6 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
   const [investigationEventStream, setInvestigationEventStream] = useState<InvestigationEvent[]>([])
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
-  const [currentModel, setCurrentModel] = useState<Model | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [lastFailedMessage, setLastFailedMessage] = useState<string | null>(null)
   const [isRetrying, setIsRetrying] = useState(false)
@@ -358,13 +356,6 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
       setIsLoading(false)
       setIsRetrying(false)
     }
-  }
-
-  // Handle model change
-  const handleModelChange = (model: Model) => {
-    setCurrentModel(model)
-    // We don't need to add a message about model change
-    // The current model is already visible in the dropdown
   }
 
   // Helper function to safely parse message content
@@ -749,7 +740,7 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
       // Handle specific known types first
       if (parsedContent && parsedContent.type === "status_response") {
         // Prefer 'content' field within the status_response structure
-        return parsedContent.content || "[Status Update]" 
+        return <p className="whitespace-pre-wrap break-words text-sm">{parsedContent.content || "[Status Update]"}</p>
       } 
       // Add explicit handling for other known types if needed
       // else if (parsedContent && parsedContent.type === 'cell_response') { ... }
@@ -773,19 +764,19 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
       // If it parsed but wasn't an object (e.g., just a string/number inside JSON), render raw content
       else {
           console.warn("Parsed non-object JSON, showing raw content:", content);
-          return content; // Render original string if parsed content isn't helpful object
+          return <p className="whitespace-pre-wrap break-words text-sm">{content}</p>; // Ensure wrapping
       }
 
     } catch (e) {
       // Parsing failed, assume it's plain text
-      return content
+      return <p className="whitespace-pre-wrap break-words text-sm">{content}</p>
     }
   }
 
   return (
     <div
       className={`fixed right-0 top-0 bottom-0 bg-white border-l border-gray-200 shadow-lg transition-all duration-300 ease-in-out z-20 flex flex-col ${
-        isOpen ? "w-96" : "w-0 opacity-0"
+        isOpen ? "w-[440px]" : "w-0 opacity-0"
       }`}
       onKeyDown={handleKeyDown}
     >
@@ -798,7 +789,6 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
               <h3 className="font-medium">Sherlog AI Assistant</h3>
             </div>
             <div className="flex items-center gap-2">
-              <ModelSelector onModelChange={handleModelChange} />
               <Button
                 variant="ghost"
                 size="sm"
@@ -812,7 +802,7 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
           </div>
 
           {/* Messages */}
-          <div className="flex-1 overflow-y-auto p-4 bg-gray-50">
+          <div className="flex-1 overflow-y-auto p-6 bg-gray-50">
             {error && (
               <Alert variant="destructive" className="mb-4 animate-in fade-in-0 slide-in-from-top-5">
                 <div className="flex justify-between items-start">
@@ -901,14 +891,14 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
                                   const parsedContent = JSON.parse(message.content)
                                   if (parsedContent && parsedContent.type === "status_response" && parsedContent.content) {
                                     // Render the actual clarification message
-                                    return <p className="whitespace-pre-wrap text-sm">{parsedContent.content}</p>
+                                    return <p className="whitespace-pre-wrap break-words text-sm">{parsedContent.content}</p>
                                   }
                                 } catch (e) {
                                   // Fallback if parsing fails or structure is wrong
                                   console.error("Failed to parse chat_agent message content:", e, message.content)
                                 }
                                 // Fallback: Render raw content if parsing failed or it's not the expected format
-                                return <p className="whitespace-pre-wrap text-sm italic text-gray-500">{message.content}</p>
+                                return <p className="whitespace-pre-wrap break-words text-sm italic text-gray-500">{message.content}</p>
                               })()
                             ) : (
                               // For other agents, use the existing renderModelContent
@@ -916,7 +906,7 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
                             )
                           ) : (
                             // User message
-                            <p className="whitespace-pre-wrap text-sm">{message.content}</p>
+                            <p className="whitespace-pre-wrap break-words text-sm">{message.content}</p>
                           )}
                         </div>
                         {message.timestamp && (
@@ -1012,13 +1002,14 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
           {/* Input */}
           <div className="p-4 border-t bg-white">
             <form onSubmit={handleSendMessage} className="flex space-x-2">
-              <Input
-                ref={inputRef}
+              <Textarea
+                ref={inputRef as any}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 placeholder="Ask Sherlog AI a question..."
-                className="flex-1"
+                className="flex-1 resize-none min-h-[38px] max-h-40 overflow-y-auto"
                 disabled={isLoading || !sessionId}
+                rows={1}
               />
               <Button
                 type="submit"

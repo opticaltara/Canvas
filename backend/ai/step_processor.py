@@ -35,7 +35,8 @@ from backend.ai.events import (
     FileSystemToolCellCreatedEvent, FileSystemToolErrorEvent, 
     PythonToolCellCreatedEvent, PythonToolErrorEvent,
     StepCompletedEvent, StepErrorEvent, StepExecutionCompleteEvent,
-    SummaryCellCreatedEvent, SummaryCellErrorEvent, FatalErrorEvent # Added FatalErrorEvent
+    SummaryCellCreatedEvent, SummaryCellErrorEvent, FatalErrorEvent, # Added FatalErrorEvent
+    MediaTimelineCellCreatedEvent  # Local import to avoid circular
 )
 
 ai_logger = logging.getLogger("ai")
@@ -75,7 +76,8 @@ class StepProcessor:
             elif step_type == StepType.INVESTIGATION_REPORT:
                 self._step_agents[step_type] = ReportStepAgent(self.notebook_id)
             elif step_type == StepType.MEDIA_TIMELINE: # Add case for MediaTimelineAgent
-                self._step_agents[step_type] = MediaTimelineAgent(notebook_id=self.notebook_id)
+                from backend.ai.step_agents import MediaTimelineStepAgent
+                self._step_agents[step_type] = MediaTimelineStepAgent(notebook_id=self.notebook_id, connection_manager=self.connection_manager, notebook_manager=self.notebook_manager)
             else:
                 raise ValueError(f"Unsupported step type: {step_type}")
                 
@@ -89,7 +91,8 @@ class StepProcessor:
         plan_step_id_to_cell_ids: Dict[str, List[UUID]], # Changed from Any to List[UUID]
         cell_tools: NotebookCellTools,
         session_id: str,
-        db: AsyncSession 
+        db: AsyncSession,
+        original_query: str = ""  # New optional param to pass along original user query
     ) -> AsyncGenerator[Union[BaseEvent, StepExecutionCompleteEvent], None]:
         """Process a single investigation step and yield event updates"""
         step_type_value = step.step_type.value if step.step_type else "Unknown"
@@ -118,6 +121,12 @@ class StepProcessor:
         # Build context for the step from dependencies
         context = self._build_step_context(step, executed_steps, step_results)
         ai_logger.info(f"Step {step.step_id} context: {context}")
+        
+        # Always include the original user query for downstream agents
+        if original_query:
+            context["original_query"] = original_query
+            # Also prepend a reference to original query at top of prompt for clarity
+            context["prompt"] = f"Original user query: {original_query}\n\n" + context["prompt"]
         
         # Get the appropriate agent for this step type
         try:
@@ -280,14 +289,18 @@ class StepProcessor:
             elif isinstance(event, dict) and event.get("type") == "final_step_result" and step.step_type not in [StepType.GITHUB, StepType.FILESYSTEM, StepType.PYTHON]:
                 final_result_data = event.get("result")
                 ai_logger.info(f"Step {step.step_id} received final_step_result (non-tool based): {type(final_result_data)}")
-                if not isinstance(final_result_data, QueryResult):
-                    ai_logger.error(f"final_step_result did not contain QueryResult for step {step.step_id}")
-                    final_result_data = None
-                    step_result.add_error("Internal error: Invalid final result format")
-                else:
+                if step.step_type == StepType.MEDIA_TIMELINE:
+                    # Media timeline returns a specialized payload, not QueryResult
                     step_result.add_output(final_result_data)
-                    if final_result_data.error:
-                        step_result.add_error(final_result_data.error)
+                else:
+                    if not isinstance(final_result_data, QueryResult):
+                        ai_logger.error(f"final_step_result did not contain QueryResult for step {step.step_id}")
+                        final_result_data = None
+                        step_result.add_error("Internal error: Invalid final result format")
+                    else:
+                        step_result.add_output(final_result_data)
+                        if final_result_data.error:
+                            step_result.add_error(final_result_data.error)
                 break
             elif isinstance(event, ToolSuccessEvent):
                 ai_logger.info(f"Step {step.step_id} received ToolSuccessEvent: {event.tool_name}")
@@ -362,6 +375,54 @@ class StepProcessor:
                     agent_type=agent_type,
                     session_id=session_id,
                     notebook_id=self.notebook_id
+                )
+        
+        elif step.step_type == StepType.MEDIA_TIMELINE and final_result_data:
+            dependency_cell_ids = [cid for dep_id in step.dependencies for cid in plan_step_id_to_cell_ids.get(dep_id, [])]
+            created_cell_id, cell_params, cell_error = await self.cell_creator.create_media_timeline_cell(
+                cell_tools=cell_tools,
+                step=step,
+                payload=final_result_data,
+                dependency_cell_ids=dependency_cell_ids,
+                session_id=session_id
+            )
+
+            if cell_error:
+                step_result.add_error(cell_error)
+
+            if created_cell_id:
+                plan_step_id_to_cell_ids.setdefault(step.step_id, []).append(created_cell_id)
+                step_result.add_cell_id(created_cell_id)
+
+            yield MediaTimelineCellCreatedEvent(
+                cell_id=str(created_cell_id) if created_cell_id else "",
+                cell_params=cell_params.model_dump() if cell_params else {},
+                session_id=session_id,
+                notebook_id=self.notebook_id
+            )
+            # For frontend compatibility also yield StepCompletedEvent
+            if step_result.has_error():
+                yield StepErrorEvent(
+                    step_id=step.step_id,
+                    step_type=step.step_type.value,
+                    cell_id=str(created_cell_id) if created_cell_id else None,
+                    cell_params=cell_params.model_dump() if cell_params else None,
+                    result=None,
+                    error=step_result.get_combined_error(),
+                    agent_type=agent_type,
+                    session_id=session_id,
+                    notebook_id=self.notebook_id
+                )
+            else:
+                yield StepCompletedEvent(
+                    step_id=step.step_id,
+                    step_type=step.step_type.value,
+                    cell_id=str(created_cell_id) if created_cell_id else None,
+                    cell_params=cell_params.model_dump() if cell_params else None,
+                    result=final_result_data.model_dump() if hasattr(final_result_data, 'model_dump') else None,
+                    agent_type=agent_type,
+                    session_id=session_id,
+                    notebook_id=self.notebook_id,
                 )
         
         step_results[step.step_id] = step_result
