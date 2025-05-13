@@ -66,6 +66,7 @@ async def lifespan(app: FastAPI):
         # These imports execute the handler files, which call register_handler
         from backend.services.connection_handlers import github_handler
         from backend.services.connection_handlers import jira_handler
+        from backend.services.connection_handlers import git_repo_handler # Added import
         app_logger.info(f"Successfully imported and registered connection handlers: {get_all_handler_types()}")
     except ImportError as e:
         app_logger.error(f"Failed to import connection handlers: {e}", exc_info=True)

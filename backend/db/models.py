@@ -182,4 +182,4 @@ class CellDependency(Base):
     __tablename__ = "cell_dependencies"
     
     dependent_id = Column(String(36), ForeignKey("cells.id", ondelete="CASCADE"), primary_key=True)
-    dependency_id = Column(String(36), ForeignKey("cells.id", ondelete="CASCADE"), primary_key=True) 
+    dependency_id = Column(String(36), ForeignKey("cells.id", ondelete="CASCADE"), primary_key=True)

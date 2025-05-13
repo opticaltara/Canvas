@@ -204,9 +204,26 @@ export const connectionApi = {
          }
          return { valid: false, message: "An unexpected error occurred during testing." };
      }
-  }
+  },
    // --- End Refactored testConnection method --- 
 
+  // --- Re-index Connection --- 
+  async reindexConnection(connectionId: string): Promise<{ message: string }> {
+    try {
+      const response = await axios.post(`${API_BASE_URL}/connections/${connectionId}/reindex`);
+      // Assuming the response is { message: "..." } on success (202 Accepted)
+      return response.data; 
+    } catch (error) {
+      console.error(`Failed to trigger re-index for connection ${connectionId}:`, error);
+      if (axios.isAxiosError(error) && error.response) {
+        // Throw the specific error message from the backend
+        throw new Error(error.response.data.detail || `Re-indexing failed: ${error.message}`);
+      } else if (error instanceof Error) {
+          throw error; // Re-throw other known errors
+      }
+      throw new Error(`An unexpected error occurred while triggering re-index.`);
+    }
+  }
 }
 
 // Export the connections API in the format expected by the client code
@@ -220,6 +237,7 @@ export const connections = {
   setDefault: connectionApi.setDefaultConnection,
   test: connectionApi.testConnection,
   getTools: connectionApi.getToolsForConnection,
+  reindex: connectionApi.reindexConnection,
 }
 
 // Also export the API client for direct use

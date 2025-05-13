@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     python_cell_max_memory: int = 1024  # MB
     # Query execution settings
     default_query_timeout: int = 30  # seconds
+    # Qdrant MCP Server (uvx/stdio) settings
+    qdrant_mcp_enabled: bool = True # Control whether to launch the stdio server
+    qdrant_local_path: str | None = None # Path for local Qdrant storage (required if enabled)
+    qdrant_collection_name: str = "git_repo" # Optional default collection name
+    qdrant_embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2" # Default embedding model
 
     model_config = SettingsConfigDict(
         env_prefix="SHERLOG_",

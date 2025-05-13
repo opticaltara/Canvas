@@ -23,6 +23,7 @@ class StepType(str, Enum):
     PYTHON = "python"
     INVESTIGATION_REPORT = "investigation_report"
     MEDIA_TIMELINE = "media_timeline"
+    CODE_INDEX_QUERY = "code_index_query" # New step type for querying indexed code
 
 
 class StepCategory(str, Enum):

@@ -20,12 +20,14 @@ import {
   ArrowLeft,
   Github,
   Folder,
+  RefreshCw,
 } from "lucide-react"
 import type { ConnectionType } from "../store/types"
 import { useToast } from "@/hooks/use-toast"
 import GitHubConnectionForm from "./connection-forms/GitHubConnectionForm"
 import JiraConnectionForm from "./connection-forms/JiraConnectionForm"
 import FileSystemConnectionForm from "./connection-forms/FileSystemConnectionForm"
+import { GitRepoConnectionForm } from "./connection-forms/GitRepoConnectionForm"
 
 interface DataConnectionsDialogProps {
   isOpen: boolean
@@ -48,6 +50,7 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
   const [isTestingConnection, setIsTestingConnection] = useState(false)
   const [isCreatingConnection, setIsCreatingConnection] = useState(false)
   const [dialogError, setDialogError] = useState<string | null>(null)
+  const [reindexingStates, setReindexingStates] = useState<Record<string, boolean>>({})
   const { toast } = useToast()
 
   // Get state and actions from the store
@@ -60,6 +63,7 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
     createConnection,
     deleteConnection,
     testConnection,
+    reindexConnection,
   } = useConnectionStore()
 
   // Effect to load connections (which now also loads types via the store action)
@@ -226,6 +230,29 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
     }
   }
 
+  // Function to handle re-indexing
+  const handleReindexConnection = async (id: string, name: string) => {
+    setReindexingStates(prev => ({ ...prev, [id]: true }));
+    toast({ title: `Re-indexing ${name}...`, description: "Fetching latest data and updating index." });
+    try {
+      const result = await reindexConnection(id); // Call the actual store action
+      // Use message from backend response in success toast
+      toast({ title: "Re-index initiated", description: result.message || `${name} is being re-indexed.` });
+    } catch (err) {
+      console.error(`Failed to re-index connection ${name}:`, err);
+      let displayError = "An unknown error occurred during re-indexing.";
+      if (err instanceof Error) {
+          // Assuming the placeholder or actual store action throws an error with a message
+          displayError = err.message;
+      }
+      toast({ variant: "destructive", title: "Re-index failed", description: displayError });
+    } finally {
+      // Keep spinner potentially longer or remove immediately depending on UX preference
+      // For now, remove immediately after the request is initiated/fails
+      setReindexingStates(prev => ({ ...prev, [id]: false }));
+    }
+  };
+
   const getConnectionTypeIcon = (type: string) => {
     switch (type) {
       case "github":
@@ -234,6 +261,8 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
         return <Database className="h-5 w-5 text-primary" />
       case "filesystem":
         return <Folder className="h-5 w-5 text-primary" />
+      case "git_repo":
+        return <Github className="h-5 w-5 text-primary" />
       default:
         return <Database className="h-5 w-5 text-muted-foreground" />
     }
@@ -314,6 +343,21 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
                           >
                             <Trash className="h-4 w-4" />
                           </Button>
+                          {connection.type === "git_repo" && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="ml-2 transition-all duration-200 hover:bg-blue-50"
+                              onClick={() => handleReindexConnection(connection.id, connection.name)}
+                              disabled={reindexingStates[connection.id] || loading}
+                            >
+                              {reindexingStates[connection.id] ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <RefreshCw className="h-4 w-4" /> 
+                              )}
+                            </Button>
+                          )}
                         </div>
                       </TableCell>
                     </TableRow>
@@ -398,6 +442,14 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
             />
           )}
 
+          {newConnection.type === "git_repo" && (
+            <GitRepoConnectionForm
+              config={newConnection.config}
+              updateConfig={(newConf: Record<string, any>) => setNewConnection(prev => ({ ...prev, config: newConf }))}
+              isTesting={isTestingConnection}
+            />
+          )}
+
           {testResult && (
             <div
               className={`p-3 rounded-md ${
@@ -425,20 +477,6 @@ const DataConnectionsDialog: React.FC<DataConnectionsDialogProps> = ({ isOpen, o
           )}
 
           <div className="flex justify-end space-x-2 mt-4">
-            {/* <Button
-              variant="outline"
-              onClick={handleTestConnection}
-              disabled={isTestingConnection || isCreatingConnection}
-            >
-              {isTestingConnection ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Testing...
-                </>
-              ) : (
-                "Test Connection"
-              )}
-            </Button> */}
             <Button
               onClick={handleCreateConnection}
               disabled={!newConnection.name || !newConnection.type || isTestingConnection || isCreatingConnection}

@@ -20,7 +20,90 @@ class CellCreator:
     def __init__(self, notebook_id: str, connection_manager: ConnectionManager):
         self.notebook_id = notebook_id
         self.connection_manager = connection_manager
-    
+
+    async def create_code_index_query_cell(
+        self,
+        cell_tools: NotebookCellTools,
+        step: InvestigationStepModel,
+        tool_event: ToolSuccessEvent, # Contains the qdrant-find results
+        dependency_cell_ids: List[UUID],
+        session_id: str
+    ) -> Tuple[Optional[UUID], Optional[CreateCellParams], Optional[str]]:
+        """Create a cell for code index query results and return its ID, params and any error"""
+        if not tool_event.tool_call_id or tool_event.tool_name != "qdrant-find":
+            return None, None, f"Tool event is not for qdrant-find or missing tool_call_id for step {step.step_id}"
+
+        # The result from qdrant-find is expected to be a list of search hits (dictionaries)
+        search_results = tool_event.tool_result if isinstance(tool_event.tool_result, list) else []
+
+        # For content, we can create a summary or just store the raw results.
+        # Let's create a simple markdown summary for the cell content.
+        # The full results will be in cell.result.content.
+        cell_content_lines = [f"## Code Search Results for: `{step.description}`\n"]
+        if search_results:
+            cell_content_lines.append(f"Found {len(search_results)} results:\n")
+            for i, hit in enumerate(search_results[:5]): # Display first 5 hits in markdown
+                file_path = hit.get("metadata", {}).get("file_path", "N/A")
+                score = hit.get("score", "N/A")
+                # Robust score formatting – handle non-numeric gracefully
+                if isinstance(score, (int, float)):
+                    score_str = f"{score:.4f}"
+                else:
+                    score_str = str(score)
+
+                # snippet = hit.get("document", {}).get("page_content", "Snippet unavailable")[:200]  # Optionally include snippet
+                # For now, let's assume the payload is directly the document content or a summary
+                payload_content = str(hit.get("payload", "Content unavailable"))[:200]
+
+
+                cell_content_lines.append(f"**{i+1}. File:** `{file_path}` (Score: {score_str})")
+                cell_content_lines.append(f"   ```\n   {payload_content}...\n   ```")
+            if len(search_results) > 5:
+                cell_content_lines.append(f"\n... and {len(search_results) - 5} more results (see cell data for full list).")
+        else:
+            cell_content_lines.append("No results found.")
+        
+        cell_content = "\n".join(cell_content_lines)
+
+        cell_metadata = {
+            "session_id": session_id,
+            "original_plan_step_id": step.step_id,
+            "external_tool_call_id": tool_event.tool_call_id,
+            "search_query": step.parameters.get("search_query", step.description),
+            "collection_name": step.parameters.get("collection_name"),
+        }
+
+        # The full search_results list will be stored in cell.result.content
+        serializable_result_content = self._serialize_tool_result(search_results, "qdrant-find_results")
+
+        cell_params = CreateCellParams(
+            notebook_id=self.notebook_id,
+            cell_type=CellType.CODE_INDEX_QUERY,
+            content=cell_content, # Markdown summary
+            metadata=cell_metadata,
+            dependencies=dependency_cell_ids,
+            tool_call_id=uuid4(), # New tool_call_id for this cell creation action
+            tool_name="qdrant-find_results_display", # Internal name for this display cell
+            tool_arguments=step.parameters, # Store original query parameters
+            result=CellResult(
+                content=serializable_result_content, # Store full results here
+                error=None, 
+                execution_time=0.0 # Not an execution in itself
+            ),
+            status=CellStatus.SUCCESS # Cell is created successfully with data
+        )
+
+        try:
+            cell_creation_result = await cell_tools.create_cell(params=cell_params)
+            cell_id_str = cell_creation_result.get("cell_id")
+            if cell_id_str:
+                return UUID(cell_id_str), cell_params, None
+            else:
+                return None, cell_params, "Cell creation for code index query returned no cell_id"
+        except Exception as e:
+            ai_logger.error(f"Failed to create code_index_query cell for step {step.step_id}: {e}", exc_info=True)
+            return None, cell_params, str(e)
+
     async def create_markdown_cell(
         self,
         cell_tools: NotebookCellTools, 

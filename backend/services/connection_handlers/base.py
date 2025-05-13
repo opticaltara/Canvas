@@ -115,4 +115,12 @@ class MCPConnectionHandler(ABC):
     # Optional helper for common validation patterns?
     # async def _run_mcp_validation(self, params: StdioServerParameters) -> Tuple[bool, str]:
     #     # Common logic for stdio_client, initialize, list_tools could go here
-    #     pass 
+    #     pass
+
+    async def post_create_actions(self, connection_config: Any) -> None: # Using Any to avoid circular import with ConnectionConfig from manager
+        """
+        Optional actions to perform after a connection has been successfully created and saved.
+        For example, triggering initial data indexing.
+        By default, does nothing. Subclasses can override.
+        """
+        pass

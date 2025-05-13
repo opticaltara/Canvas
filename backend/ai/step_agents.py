@@ -3,7 +3,7 @@ Agent implementations for different step types.
 """
 
 import logging
-from typing import Any, Dict, AsyncGenerator, Union, Optional
+from typing import Any, Dict, AsyncGenerator, Union, Optional, List # Added List
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 
@@ -87,17 +87,48 @@ class StepAgent(ABC):
 
 class MarkdownStepAgent(StepAgent):
     """Agent for executing markdown steps"""
-    def __init__(self, notebook_id: str, model: OpenAIModel, notebook_manager: Optional[NotebookManager]):
+    def __init__(
+        self,
+        notebook_id: str,
+        model: OpenAIModel,
+        notebook_manager: Optional[NotebookManager],
+        mcp_servers: Optional[List[Any]] = None,
+    ) -> None:
+        """Create a MarkdownStepAgent.
+
+        Parameters
+        ----------
+        notebook_id : str
+            The notebook UUID this agent operates in.
+        model : OpenAIModel
+            LLM wrapper to use for markdown generation.
+        notebook_manager : Optional[NotebookManager]
+            Gives the agent access to notebook-level helpers/tools.
+        mcp_servers : Optional[List[Any]]
+            A list of already-initialised MCP servers (e.g. for qdrant) that
+            should be forwarded to the internal pydantic-ai Agent so that
+            markdown generation can call tools such as `qdrant.qdrant-find`.
+        """
+
         super().__init__(notebook_id)
         self.model = model
-        self.notebook_manager = notebook_manager # Store notebook_manager
+        self.notebook_manager = notebook_manager  # Store notebook_manager
+        # Keep only Qdrant MCP servers – Markdown generation only needs semantic code search,
+        # not GitHub or Filesystem toolsets.
+        self.mcp_servers = [
+            s for s in (mcp_servers or [])
+            if str(getattr(s, "command", "")).endswith("mcp-server-qdrant")
+        ]
+
         # Create notebook context tools
         notebook_tools = create_notebook_context_tools(self.notebook_id, self.notebook_manager)
+
+        # pydantic-ai Agent with tool + MCP support
         self.markdown_generator = Agent(
             self.model,
             output_type=MarkdownQueryResult,
             system_prompt=MARKDOWN_GENERATOR_SYSTEM_PROMPT,
-            tools=notebook_tools # Pass tools to the agent
+            tools=notebook_tools,
         )
     
     def get_agent_type(self) -> AgentType:
@@ -307,10 +338,11 @@ class PythonStepAgent(StepAgent):
 
 class MediaTimelineStepAgent(StepAgent):
     """Agent for executing media timeline steps"""
-    def __init__(self, notebook_id: str, connection_manager, notebook_manager: Optional[NotebookManager] = None):
+    def __init__(self, notebook_id: str, connection_manager: Any, notebook_manager: Optional[NotebookManager] = None, mcp_servers: Optional[List[Any]] = None): # Added mcp_servers
         super().__init__(notebook_id)
         self.connection_manager = connection_manager
         self.notebook_manager = notebook_manager
+        self.mcp_servers = mcp_servers or [] # Store mcp_servers
         # Will be instantiated per execute call since it requires session_id
         self.timeline_agent: Optional[MediaTimelineAgent] = None
 
@@ -337,6 +369,7 @@ class MediaTimelineStepAgent(StepAgent):
             session_id=session_id,
             connection_manager=self.connection_manager,
             notebook_manager=self.notebook_manager,
+            mcp_servers=self.mcp_servers # Pass mcp_servers
         )
 
         ai_logger.info(f"Processing MediaTimeline step {step.step_id} using timeline agent...")
@@ -360,8 +393,9 @@ class MediaTimelineStepAgent(StepAgent):
 
 class ReportStepAgent(StepAgent):
     """Agent for generating investigation reports"""
-    def __init__(self, notebook_id: str):
+    def __init__(self, notebook_id: str, mcp_servers: Optional[List[Any]] = None): # Added mcp_servers
         super().__init__(notebook_id)
+        self.mcp_servers = mcp_servers or [] # Store mcp_servers
         self.report_generator = None  # Lazily initialized
     
     def get_agent_type(self) -> AgentType:
@@ -386,7 +420,7 @@ class ReportStepAgent(StepAgent):
         # Lazy initialization
         if self.report_generator is None:
             ai_logger.info("Lazily initializing InvestigationReportAgent.")
-            self.report_generator = InvestigationReportAgent(notebook_id=self.notebook_id)
+            self.report_generator = InvestigationReportAgent(notebook_id=self.notebook_id, mcp_servers=self.mcp_servers) # Pass mcp_servers
         
         ai_logger.info(f"Processing Report step {step.step_id}...")
         final_report_object = None

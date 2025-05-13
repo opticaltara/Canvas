@@ -1,7 +1,7 @@
 """
 Main AI Agent for investigation planning and execution.
 """
-
+import os # Added import for os.getenv
 import logging
 import asyncio
 from typing import Any, Dict, List, Optional, Tuple, Union, AsyncGenerator
@@ -86,7 +86,7 @@ class AIAgent:
         available_data_sources: List[str],
         notebook_manager: NotebookManager,
         connection_manager_override: Optional[ConnectionManager] = None,
-        mcp_servers_list: Optional[List[MCPServerStdio]] = None
+        mcp_servers_list: Optional[List[Any]] = None # Allow mixed MCP server types
     ):
         self.settings = get_settings()
         self.model = SafeOpenAIModel(
@@ -135,7 +135,8 @@ class AIAgent:
             notebook_id=self.notebook_id,
             model=self.model,
             connection_manager=self.connection_manager,
-            notebook_manager=self.notebook_manager
+            notebook_manager=self.notebook_manager,
+            mcp_servers=self._mcp_servers_for_agents
         )
 
         self.investigation_planner = Agent(
@@ -160,6 +161,7 @@ class AIAgent:
             output_type=str,
             system_prompt=MARKDOWN_GENERATOR_SYSTEM_PROMPT,
             tools=self._notebook_tools,
+            mcp_servers=self._mcp_servers_for_agents # Pass MCP servers
         )
         ai_logger.info(f"AIAgent: Markdown generator initialized for notebook {self.notebook_id} with {len(self._notebook_tools)} notebook tools and {len(self._mcp_servers_for_agents)} MCPs.")
         
@@ -200,8 +202,9 @@ class AIAgent:
 
         github_mcp = await cls._create_mcp_server("github", conn_manager)
         filesystem_mcp = await cls._create_mcp_server("filesystem", conn_manager)
+        git_repo_mcp = await cls._create_mcp_server("git_repo", conn_manager)
         
-        mcp_servers = []
+        mcp_servers: List[Any] = [] # Allow mixed MCP server types
         if github_mcp:
             mcp_servers.append(github_mcp)
             ai_logger.info("GitHub MCP Server successfully created for AIAgent.")
@@ -213,6 +216,12 @@ class AIAgent:
             ai_logger.info("Filesystem MCP Server successfully created for AIAgent.")
         else:
             ai_logger.warning("Filesystem MCP Server could not be created for AIAgent.")
+
+        if git_repo_mcp:
+            mcp_servers.append(git_repo_mcp)
+            ai_logger.info("Qdrant MCP Server (from git_repo connection) added for AIAgent.")
+        else:
+                ai_logger.info("A Qdrant MCP server already present; skipping git_repo MCP addition.")
 
         agent_instance = cls(
             notebook_id=notebook_id,

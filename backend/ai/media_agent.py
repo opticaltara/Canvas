@@ -119,8 +119,8 @@ class MediaUrlsExtractorAgent:
         self.agent = None
         self.notebook_manager: Optional[NotebookManager] = notebook_manager
         media_agent_logger.info(f"MediaUrlsExtractorAgent class initialized (model configured, agent instance created per run).")
-        self.github_mcp_server = None
-        self.filesystem_mcp_server = None
+        self.github_mcp_server: Optional[MCPServerStdio] = None
+        self.filesystem_mcp_server: Optional[MCPServerStdio] = None
 
     def _read_system_prompt(self) -> str:
         system_prompt = """
@@ -180,8 +180,10 @@ class MediaUrlsExtractorAgent:
         return None
         
     
-    async def _initialize_agent(self, extra_tools: Optional[list] = None) -> Agent[None, Union[MediaAgentInput, MediaUrlExtractionError]]:
+    async def _initialize_agent(self) -> Agent[None, Union[MediaAgentInput, MediaUrlExtractionError]]:
         system_prompt = self._read_system_prompt()
+        
+        # Fetch standard servers if not already initialized
         if not self.github_mcp_server:
             self.github_mcp_server = await self._get_mcp_server("github")
         if not self.filesystem_mcp_server:
@@ -200,7 +202,7 @@ class MediaUrlsExtractorAgent:
             tools=notebook_tools,
             output_type=MediaAgentInput | MediaUrlExtractionError # type: ignore
         )
-        media_agent_logger.info(f"MediaUrlsExtractorAgent initialized with {len(extra_tools) if extra_tools else 0} tools.")
+        media_agent_logger.info(f"MediaUrlsExtractorAgent initialized with {len(mcp_servers_for_agent)} MCPs and {len(notebook_tools)} tools.")
         return agent
 
     async def run_query(self, query: str) -> Union[MediaAgentInput, MediaUrlExtractionError]:
@@ -244,14 +246,19 @@ class MediaUrlsExtractorAgent:
 
 
 class MediaCorrelatorAgent:
-    def __init__(self, notebook_id: str, connection_manager: ConnectionManager, notebook_manager: Optional[NotebookManager] = None):
+    def __init__(self, notebook_id: str, connection_manager: ConnectionManager, notebook_manager: Optional[NotebookManager] = None, mcp_servers: Optional[List[Any]] = None): # mcp_servers are additional
         self.notebook_id = notebook_id
         media_agent_logger.info(f"Initializing MediaCorrelatorAgent for notebook: {self.notebook_id}")
         self.connection_manager = connection_manager
         self.settings = get_settings()
         self.notebook_manager: Optional[NotebookManager] = notebook_manager
-        self.github_mcp_server = None
-        self.filesystem_mcp_server = None
+        
+        self.additional_mcp_servers = mcp_servers or [] # Store additional mcp_servers
+
+        # Standard MCP servers to be fetched by the agent
+        self.github_mcp_server: Optional[MCPServerStdio] = None
+        self.filesystem_mcp_server: Optional[MCPServerStdio] = None
+        self.qdrant_git_repo_mcp_server: Optional[MCPServerStdio] = None # For Qdrant via git_repo
 
     async def _get_mcp_server(self, connection_type: str) -> Optional[MCPServerStdio]:
         """Helper to get an MCP server instance for a given connection type."""
@@ -278,35 +285,52 @@ class MediaCorrelatorAgent:
         media_agent_logger.info("Initializing MediaCorrelatorAgent with real MCPs and LLM...")
 
         notebook_tools = create_notebook_context_tools(self.notebook_id, self.notebook_manager)
+        
+        current_mcp_servers: List[MCPServerStdio] = []
 
-        if not self.github_mcp_server:
+        # Fetch standard MCP servers if not already initialized
+        if self.github_mcp_server is None:
             self.github_mcp_server = await self._get_mcp_server("github")
-        if not self.filesystem_mcp_server:
-            self.filesystem_mcp_server = await self._get_mcp_server("filesystem")
-        
-        mcp_servers_for_agent = []
-        if self.github_mcp_server: mcp_servers_for_agent.append(self.github_mcp_server)
-        if self.filesystem_mcp_server: mcp_servers_for_agent.append(self.filesystem_mcp_server)
+        if self.github_mcp_server:
+            current_mcp_servers.append(self.github_mcp_server)
 
-        if not mcp_servers_for_agent:
-            media_agent_logger.error("Cannot initialize correlator agent: No MCP servers (GitHub/Filesystem) could be configured.")
-            return None
-        
+        if self.filesystem_mcp_server is None:
+            self.filesystem_mcp_server = await self._get_mcp_server("filesystem")
+        if self.filesystem_mcp_server:
+            current_mcp_servers.append(self.filesystem_mcp_server)
+
+        if self.qdrant_git_repo_mcp_server is None: # Fetch Qdrant server via git_repo connection
+            self.qdrant_git_repo_mcp_server = await self._get_mcp_server("git_repo")
+        if self.qdrant_git_repo_mcp_server:
+            current_mcp_servers.append(self.qdrant_git_repo_mcp_server)
+
+        # Add any additional MCP servers passed during initialization
+        for server in self.additional_mcp_servers:
+            if isinstance(server, MCPServerStdio) and server not in current_mcp_servers: # Avoid duplicates if passed
+                 current_mcp_servers.append(server)
+            elif not isinstance(server, MCPServerStdio):
+                 media_agent_logger.warning(f"Non-MCPServerStdio object found in additional_mcp_servers: {type(server)}")
+
+
+        if not current_mcp_servers:
+             media_agent_logger.error("Cannot initialize correlator agent: No MCP servers could be configured (standard or additional).")
+             return None
+
         self.model = SafeOpenAIModel(
-            "openai/gpt-4.1",
+            "openai/gpt-4.1", # Consider using a more capable model if complex reasoning over tools is needed
             provider=OpenAIProvider(
                 base_url='https://openrouter.ai/api/v1',
                 api_key=self.settings.openrouter_api_key,
             ),
-            )
+        )
         self.correlator_agent = Agent[None, CorrelatorResult](
             self.model,
             system_prompt=CORRELATOR_SYSTEM_PROMPT,
-            mcp_servers=mcp_servers_for_agent,
+            mcp_servers=current_mcp_servers, # Use the comprehensive list
             output_type=CorrelatorResult,
             tools=notebook_tools
         )
-        media_agent_logger.info(f"MediaCorrelatorAgent initialized successfully with {len(mcp_servers_for_agent)} MCPs.")
+        media_agent_logger.info(f"MediaCorrelatorAgent initialized successfully with {len(current_mcp_servers)} MCPs: {[type(s).__name__ for s in current_mcp_servers]}.")
 
         # Return the fully configured correlator agent so callers can use it
         return self.correlator_agent
@@ -412,14 +436,16 @@ class MediaCorrelatorAgent:
 
 
 class MediaTimelineAgent:
-    def __init__(self, notebook_id: str, session_id: str, connection_manager: ConnectionManager, notebook_manager: Optional[NotebookManager] = None):
+    def __init__(self, notebook_id: str, session_id: str, connection_manager: ConnectionManager, notebook_manager: Optional[NotebookManager] = None, mcp_servers: Optional[List[Any]] = None): # Added mcp_servers
         self.notebook_id = notebook_id
         self.connection_manager = connection_manager
         self.notebook_manager = notebook_manager
         self.session_id = session_id
+        self.mcp_servers = mcp_servers or [] # Store mcp_servers
         self.urls_extractor_agent = MediaUrlsExtractorAgent(notebook_id, connection_manager, notebook_manager)
         self.describer_agent = None
-        self.correlator_agent = MediaCorrelatorAgent(notebook_id, connection_manager, notebook_manager)
+        # Pass mcp_servers to MediaCorrelatorAgent
+        self.correlator_agent = MediaCorrelatorAgent(notebook_id, connection_manager, notebook_manager, mcp_servers=self.mcp_servers)
 
     async def run_query(
         self,
@@ -512,5 +538,3 @@ class MediaTimelineAgent:
         media_agent_logger.info(f"Correlator result: {correlator_result}")
 
         yield correlator_result
-
-        
