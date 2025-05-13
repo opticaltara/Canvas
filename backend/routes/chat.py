@@ -7,14 +7,16 @@ This module implements the chat API endpoints for interacting with the AI agent.
 import json
 import logging
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from uuid import uuid4, UUID
 from uuid import uuid4
 from datetime import datetime, timezone
 import sqlite3
+import shutil
+from pathlib import Path as PyPath
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, Form, Path
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, Form, Path, File, UploadFile
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from pydantic_ai.messages import (
     ModelRequest,
@@ -31,6 +33,7 @@ from backend.ai.chat_agent import (
 )
 from backend.db.chat_db import ChatDatabase
 from backend.db.database import get_db, get_async_db_session
+from backend.db.models import UploadedFile
 from backend.services.notebook_manager import NotebookManager, get_notebook_manager
 from backend.services.connection_manager import ConnectionManager, get_connection_manager
 from backend.services.redis_client import get_redis_client
@@ -273,8 +276,9 @@ async def create_session(
         raise HTTPException(status_code=500, detail=f"Failed to create or retrieve chat session: {str(e)}")
 
 
-@router.get("/sessions/{session_id}/messages")
-async def get_session_messages(
+# Duplicate removed: the handler below is superseded by an updated version later in the file.
+# @router.get("/sessions/{session_id}/messages")  # Commented to disable duplicate route
+async def _get_session_messages_duplicate_removed(
     session_id: str,
     chat_db: ChatDatabase = Depends(get_chat_db)
 ) -> Response:
@@ -494,7 +498,7 @@ async def post_message(
             'session_id': session_id,
             'prompt': prompt,
             'history_length': len(history_from_db), # Log length before adding current prompt
-            'context_added': True # Indicate cell context was added
+            'context_added': bool(cell_history_context) # Indicate cell context was added
         }
     )
 
@@ -586,14 +590,14 @@ async def post_message(
                 exc_info=True
             )
             # Stream an error message to the client
-            error_message = ChatMessage(
+            error_message_obj = ChatMessage(
                 role="error", # Custom role for errors
                 content=f"An error occurred: {str(e)}",
                 timestamp=datetime.now(timezone.utc).isoformat()
             ).model_dump()
             try:
-                error_msg = json.dumps(error_message) + "\n"
-                yield error_msg.encode('utf-8') # Encode to bytes
+                error_msg_json = json.dumps(error_message_obj) + "\n" # Renamed
+                yield error_msg_json.encode('utf-8') # Encode to bytes
             except Exception as serialization_error:
                  chat_logger.error(f"Failed to serialize error message: {serialization_error}", exc_info=True)
 
@@ -687,3 +691,177 @@ async def delete_session(
 # Removed commented-out unified_chat endpoint for now
 
 # Removed commented-out unified_chat endpoint for now 
+
+# --- Pydantic Models for File Upload ---
+class FileUploadResponse(BaseModel):
+    id: UUID
+    session_id: str
+    notebook_id: Optional[UUID] = None
+    filename: str
+    filepath: str # This will be the relative path as stored in DB
+    file_type: Optional[str] = None
+    size: Optional[int] = None
+    created_at: datetime
+    message: str = "File uploaded successfully"
+
+@router.post("/sessions/{session_id}/files", response_model=FileUploadResponse)
+async def upload_file_to_session(
+    session_id: str = Path(...),
+    file: UploadFile = File(...),
+    notebook_id_str: Optional[str] = Form(None), # Receive as string, convert to UUID later
+    chat_db: ChatDatabase = Depends(get_chat_db), # For session validation
+    db: AsyncSession = Depends(get_async_db_session),
+    settings: Settings = Depends(get_settings)
+):
+    """
+    Upload a file and associate it with a chat session.
+    Optionally, link it to a notebook_id.
+    """
+    correlation_id = str(uuid4())
+    chat_logger.info(
+        f"File upload request for session {session_id}, filename: {file.filename}",
+        extra={'correlation_id': correlation_id}
+    )
+
+    # 1. Validate session
+    session_data = await chat_db.get_session(session_id)
+    if not session_data:
+        chat_logger.warning(f"Session {session_id} not found for file upload.", extra={'correlation_id': correlation_id})
+        raise HTTPException(status_code=404, detail=f"Chat session {session_id} not found")
+
+    notebook_uuid: Optional[UUID] = None
+    if notebook_id_str:
+        try:
+            notebook_uuid = UUID(notebook_id_str)
+        except ValueError:
+            chat_logger.warning(f"Invalid notebook_id format: {notebook_id_str}", extra={'correlation_id': correlation_id})
+            raise HTTPException(status_code=400, detail="Invalid notebook_id format.")
+
+    # 2. Define storage path and create directory
+    # Using /app/uploads as discussed
+    base_upload_dir = PyPath("/app/uploads")
+    session_upload_dir = base_upload_dir / session_id
+    try:
+        session_upload_dir.mkdir(parents=True, exist_ok=True)
+        chat_logger.info(f"Ensured upload directory exists: {session_upload_dir}", extra={'correlation_id': correlation_id})
+    except Exception as e:
+        chat_logger.error(f"Could not create upload directory {session_upload_dir}: {e}", exc_info=True, extra={'correlation_id': correlation_id})
+        raise HTTPException(status_code=500, detail="Could not create upload directory.")
+
+    file_location = session_upload_dir / (file.filename or f"upload_{uuid4()}") # Handle case where filename might be None
+
+    # 3. Save the file
+    try:
+        with open(file_location, "wb+") as file_object:
+            shutil.copyfileobj(file.file, file_object)
+        file_size = file_location.stat().st_size
+        chat_logger.info(f"File {file.filename} saved to {file_location}, size: {file_size} bytes", extra={'correlation_id': correlation_id})
+    except Exception as e:
+        chat_logger.error(f"Could not save uploaded file {file.filename} to {file_location}: {e}", exc_info=True, extra={'correlation_id': correlation_id})
+        raise HTTPException(status_code=500, detail=f"Could not save file: {file.filename}")
+    finally:
+        await file.close() # Ensure the UploadFile is closed
+
+    # 4. Create database record
+    try:
+        db_uploaded_file = UploadedFile(
+            session_id=session_id,
+            notebook_id=notebook_uuid,
+            filename=file.filename or "",
+            filepath=str(file_location.relative_to(base_upload_dir)), # Store relative path
+            file_type=file.content_type,
+            size=file_size,
+            # created_at and updated_at have defaults
+        )
+        db.add(db_uploaded_file)
+        await db.commit()
+        await db.refresh(db_uploaded_file)
+        chat_logger.info(f"Saved file metadata to DB for {file.filename}, ID: {db_uploaded_file.id}", extra={'correlation_id': correlation_id})
+        
+        # Use getattr to avoid static-analysis confusion with SQLAlchemy attributes
+        _id = getattr(db_uploaded_file, "id")
+        _sess = getattr(db_uploaded_file, "session_id")
+        _nb_id_raw = getattr(db_uploaded_file, "notebook_id")
+        _fname = getattr(db_uploaded_file, "filename")
+        _fpath = getattr(db_uploaded_file, "filepath")
+        _ftype = getattr(db_uploaded_file, "file_type")
+        _fsize = getattr(db_uploaded_file, "size")
+        _created = getattr(db_uploaded_file, "created_at")
+
+        return FileUploadResponse(
+            id=UUID(str(_id)),
+            session_id=str(_sess),
+            notebook_id=UUID(str(_nb_id_raw)) if _nb_id_raw else None,
+            filename=str(_fname),
+            filepath=str(_fpath),
+            file_type=str(_ftype) if _ftype else None,
+            size=int(_fsize) if _fsize is not None else None,
+            created_at=_created,
+        )
+    except Exception as e:
+        chat_logger.error(f"Database error saving file metadata for {file.filename}: {e}", exc_info=True, extra={'correlation_id': correlation_id})
+        # Attempt to delete the orphaned file if DB save fails
+        try:
+            file_location.unlink(missing_ok=True)
+        except Exception as del_err:
+            chat_logger.error(f"Failed to delete orphaned file {file_location} after DB error: {del_err}", extra={'correlation_id': correlation_id})
+        raise HTTPException(status_code=500, detail="Could not save file metadata to database.")
+
+
+@router.get("/sessions/{session_id}/messages")
+async def get_session_messages(
+    session_id: str,
+    chat_db: ChatDatabase = Depends(get_chat_db)
+) -> Response:
+    """
+    Get all messages for a chat session
+    
+    Returns:
+        Newline-delimited JSON messages
+    """
+    start_time = time.time()
+    
+    try:
+        # Verify the session exists
+        session = await chat_db.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail=f"Chat session {session_id} not found")
+        
+        # Get messages from the database
+        messages = await chat_db.get_messages(session_id)
+        
+        process_time = time.time() - start_time
+        chat_logger.info(
+            f"Retrieved chat session messages",
+            extra={
+                'correlation_id': str(uuid4()),
+                'session_id': session_id,
+                'message_count': len(messages),
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
+        
+        # Convert to ChatMessage format and serialize as newline-delimited JSON
+        chat_messages = [json.dumps(to_chat_message(msg).model_dump()) for msg in messages]
+        return Response(
+            content="\n".join(chat_messages),
+            media_type="text/plain"
+        )
+    
+    except HTTPException:
+        raise
+    
+    except Exception as e:
+        process_time = time.time() - start_time
+        chat_logger.error(
+            f"Error getting chat session messages",
+            extra={
+                'correlation_id': str(uuid4()),
+                'session_id': session_id,
+                'error': str(e),
+                'error_type': type(e).__name__,
+                'processing_time_ms': round(process_time * 1000, 2)
+            },
+            exc_info=True
+        )
+        raise HTTPException(status_code=500, detail=f"Failed to get chat messages: {str(e)}") 
