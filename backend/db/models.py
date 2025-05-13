@@ -7,7 +7,6 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List, Set
 
 from sqlalchemy import Column, String, DateTime, ForeignKey, Boolean, JSON, func, Text, Integer, Enum, Float, UUID, Index
-from sqlalchemy import Column, String, DateTime, ForeignKey, Boolean, JSON, func, Text, Integer, Enum, Float, UUID, Index
 from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
@@ -184,6 +183,7 @@ class CellDependency(Base):
     
     dependent_id = Column(String(36), ForeignKey("cells.id", ondelete="CASCADE"), primary_key=True)
     dependency_id = Column(String(36), ForeignKey("cells.id", ondelete="CASCADE"), primary_key=True)
+
 
 class UploadedFile(Base):
     __tablename__ = "uploaded_files"
