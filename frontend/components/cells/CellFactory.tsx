@@ -10,6 +10,7 @@ const InvestigationReportCell = dynamic(() => import('./InvestigationReportCell'
 const FileSystemCell = dynamic(() => import('./FileSystemCell'), { loading: () => <p>Loading FileSystem Cell...</p> });
 const PythonCell = dynamic(() => import('./PythonCell'), { loading: () => <p>Loading Python Cell...</p> });
 const MediaTimelineCell = dynamic(() => import('./MediaTimelineCell'), { loading: () => <p>Loading Media Timeline...</p> });
+const CodeIndexQueryCell = dynamic(() => import('./CodeIndexQueryCell'), { loading: () => <p>Loading Code Index Query Cell...</p> });
 
 interface CellFactoryProps {
   cell: Cell
@@ -72,6 +73,14 @@ const CellFactory: React.FC<CellFactoryProps> = ({ cell, onExecute, onUpdate, on
         <MediaTimelineCell
           cell={cell}
           onDelete={onDelete}
+        />
+      )
+    case "code_index_query":
+      return (
+        <CodeIndexQueryCell
+          cell={cell}
+          // Add other props like onDelete if needed, similar to SummarizationCell
+          // For now, keeping it simple as it's primarily for display
         />
       )
     default:

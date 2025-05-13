@@ -6,7 +6,7 @@ Agent for synthesizing investigation findings into a structured InvestigationRep
 
 import logging
 import os
-from typing import Optional, AsyncGenerator, Union, Dict, Any, TYPE_CHECKING
+from typing import Optional, AsyncGenerator, Union, Dict, Any, TYPE_CHECKING, List # Added List
 
 from pydantic_ai import Agent, UnexpectedModelBehavior
 from pydantic_ai.models.openai import OpenAIModel
@@ -32,14 +32,15 @@ investigation_report_agent_logger = logging.getLogger("ai.investigation_report_a
 
 class InvestigationReportAgent:
     """Agent for generating structured investigation reports."""
-    def __init__(self, notebook_id: str, notebook_manager: Optional['NotebookManager'] = None):
+    def __init__(self, notebook_id: str, notebook_manager: Optional['NotebookManager'] = None, mcp_servers: Optional[List[Any]] = None): # Added mcp_servers
         investigation_report_agent_logger.info(f"Initializing InvestigationReportAgent for notebook_id: {notebook_id}")
         self.settings = get_settings()
         # Consider using a different model or settings if report generation is more complex
         self.notebook_id = notebook_id
         self.notebook_manager = notebook_manager
+        self.mcp_servers = mcp_servers or [] # Store mcp_servers
         self.agent: Optional[Agent] = None # Agent instance created lazily
-        investigation_report_agent_logger.info(f"InvestigationReportAgent initialized successfully.")
+        investigation_report_agent_logger.info(f"InvestigationReportAgent initialized successfully with {len(self.mcp_servers)} MCP servers.")
 
     def _read_system_prompt(self) -> str:
         """Reads the system prompt from the dedicated file."""
@@ -78,9 +79,9 @@ class InvestigationReportAgent:
             output_type=InvestigationReport, # Use the target Pydantic model
             system_prompt=system_prompt,
             tools=tools, # Pass the tools to the agent
-            # No MCP needed for this specific agent if tools are handled directly by Pydantic-AI
+            mcp_servers=self.mcp_servers # Pass MCP servers
         )
-        investigation_report_agent_logger.info(f"InvestigationReportAgent Pydantic AI instance created with {len(tools)} tools.")
+        investigation_report_agent_logger.info(f"InvestigationReportAgent Pydantic AI instance created with {len(tools)} tools and {len(self.mcp_servers)} MCPs.")
         return agent # type: ignore
 
     async def run_report_generation(
@@ -250,4 +251,4 @@ Please analyze the above and generate the InvestigationReport JSON object.
                 error=final_error_msg
             )
 
-# Example usage could be added here for testing if needed 
+# Example usage could be added here for testing if needed

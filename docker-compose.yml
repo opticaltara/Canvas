@@ -11,12 +11,14 @@ services:
       - ${SHERLOG_HOST_FS_ROOT}:${SHERLOG_HOST_FS_ROOT}:ro
     env_file:
       - .env
-    environment:
+    environment: # Single environment block
       - SHERLOG_OPENROUTER_API_KEY=${SHERLOG_OPENROUTER_API_KEY:-}
       - SHERLOG_AI_MODEL=${SHERLOG_AI_MODEL:-anthropic/claude-3.7-sonnet}
       - SHERLOG_REDIS_HOST=redis
       - SHERLOG_REDIS_PORT=6379
       - SHERLOG_HOST_FS_ROOT=${SHERLOG_HOST_FS_ROOT}
+      - SHERLOG_QDRANT_DB_URL=http://qdrant:6333 # Used by git_repo_handler (indexing) and stdio mcp-server-qdrant (querying)
+      - SHERLOG_QDRANT_EMBEDDING_MODEL=${SHERLOG_QDRANT_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
     ports:
       - "9091:8000"
       - "9092:8100"
@@ -29,6 +31,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      qdrant: # Dependency for backend (indexing) and potential stdio MCPs
+        condition: service_started
 
   redis:
     image: redis:7-alpine
@@ -56,30 +60,24 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  tests:
-    build:
-      context: .
-      dockerfile: Dockerfile.tests
-    container_name: sherlog-canvas-tests
+  # New Qdrant Database Service
+  qdrant:
+    image: qdrant/qdrant
+    container_name: sherlog-canvas-qdrant
+    ports:
+      - "6333:6333" # HTTP REST API
+      - "6334:6334" # gRPC API
     volumes:
-      - ./integration_tests:/app/integration_tests
-      - ./backend:/app/backend # Mount local backend code
-      # If tests also need to simulate this host FS access, they might need a similar mount
-      # - ${SHERLOG_HOST_FS_ROOT}:${SHERLOG_HOST_FS_ROOT}:ro 
-    env_file:
-      - .env # Or define specific environment variables if needed
+      - qdrant_data:/qdrant/storage
     environment:
-      - BACKEND_URL=http://backend:8000 # Service name 'backend' is resolvable within Docker network
-      - SHERLOG_HOST_FS_ROOT=${SHERLOG_HOST_FS_ROOT} # Make it available to tests too
-    depends_on:
-      backend:
-        condition: service_healthy
-    # The command will be defined in Dockerfile.tests or overridden here if needed
-    # For example: command: ["pytest", "/app/integration_tests"]
-    # We'll keep it simple for now and let the Dockerfile handle the CMD
+      # QDRANT__LOG_LEVEL: DEBUG # Optional: for more verbose Qdrant logs
+      QDRANT__SERVICE__HTTP_PORT: 6333
+      QDRANT__SERVICE__GRPC_PORT: 6334
 
 volumes:
   data:
     driver: local
   redis_data: # Define the named volume for Redis persistence
+    driver: local
+  qdrant_data: # Define the named volume for Qdrant persistence
     driver: local

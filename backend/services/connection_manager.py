@@ -323,6 +323,18 @@ class ConnectionManager:
         # Add to in-memory cache
         self.connections[connection.id] = connection
 
+        # Perform post-creation actions (like indexing for git_repo)
+        try:
+            logger.info(f"Executing post-create actions for connection {connection.id} of type {type}", extra={'correlation_id': correlation_id})
+            # Schedule as a background task so it doesn't block the API response
+            asyncio.create_task(handler.post_create_actions(connection))
+            # If direct await is needed and acceptable for API response time:
+            # await handler.post_create_actions(connection) 
+            logger.info(f"Successfully scheduled/executed post-create actions for {connection.id}", extra={'correlation_id': correlation_id})
+        except Exception as post_create_err:
+            # Log error but don't let it fail the connection creation response
+            logger.error(f"Error during post-create actions for connection {connection.id}: {post_create_err}", extra={'correlation_id': correlation_id}, exc_info=True)
+
         # Set as default if first of its type (check *after* creation)
         # Use the existing method which queries DB
         connections_of_type = await self.get_connections_by_type(type)
@@ -742,6 +754,69 @@ class ConnectionManager:
             ]
             logger.info(f"Returning {len(python_tools)} predefined Python tools.", extra={'correlation_id': correlation_id})
             return python_tools
+
+        # --- New: static tool definitions for Git Repo / Qdrant MCP ----
+        if connection_type == "git_repo":
+            logger.info(f"Handling special case for 'git_repo' (Qdrant MCP) tool type discovery.", extra={'correlation_id': correlation_id})
+            qdrant_tools = [
+                MCPToolInfo(
+                    name="qdrant-find",
+                    description="Semantic search over a Qdrant collection.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "title": "Search Query",
+                                "description": "Natural language search query to execute.",
+                                "format": "textarea"
+                            },
+                            "collection_name": {
+                                "type": "string",
+                                "title": "Collection Name",
+                                "description": "Name of the Qdrant collection to search."
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "title": "Limit",
+                                "description": "Maximum number of results to return.",
+                                "default": 5,
+                                "minimum": 1
+                            }
+                        },
+                        "required": ["query", "collection_name"]
+                    }
+                ),
+                MCPToolInfo(
+                    name="qdrant-store",
+                    description="Store (upsert) a document into a Qdrant collection.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "information": {
+                                "type": "string",
+                                "title": "Information Text",
+                                "description": "The text or document content to store.",
+                                "format": "textarea"
+                            },
+                            "metadata": {
+                                "type": "object",
+                                "title": "Metadata",
+                                "description": "Arbitrary metadata describing the document.",
+                                "additionalProperties": True
+                            },
+                            "collection_name": {
+                                "type": "string",
+                                "title": "Collection Name",
+                                "description": "Name of the Qdrant collection to store the document in."
+                            }
+                        },
+                        "required": ["information", "collection_name"]
+                    }
+                )
+            ]
+            logger.info(f"Returning {len(qdrant_tools)} predefined Qdrant tools for git_repo.", extra={'correlation_id': correlation_id})
+            return qdrant_tools
 
         # Existing logic for MCP-based connections:
         default_conn = await self.get_default_connection(connection_type)

@@ -48,6 +48,9 @@ class EventType(str, Enum):
     MEDIA_TIMELINE_CELL_CREATED = "media_timeline_cell_created"
     # Plan revision
     PLAN_REVISED = "plan_revised"
+    # Code Index Query Events
+    CODE_INDEX_QUERY_TOOL_CELL_CREATED = "code_index_query_tool_cell_created"
+    CODE_INDEX_QUERY_TOOL_ERROR = "code_index_query_tool_error"
 
 class AgentType(str, Enum):
     GITHUB = "github_agent"
@@ -66,6 +69,8 @@ class AgentType(str, Enum):
     S3 = "s3"
     METRIC = "metric"
     MEDIA_TIMELINE = "media_timeline"
+    CODE_INDEX_QUERY = "code_index_query" # For CodeIndexQueryAgent
+
 class StatusType(str, Enum):
     # General Statuses
     STARTING = "starting"
@@ -228,6 +233,7 @@ class StepExecutionCompleteEvent(BaseEvent):
     github_step_has_tool_errors: bool = Field(False, description="Did any GitHub tool fail within this step?")
     filesystem_step_has_tool_errors: bool = Field(False, description="Did any Filesystem tool fail within this step?")
     python_step_has_tool_errors: bool = Field(False, description="Did any Python tool fail within this step?")
+    code_index_query_step_has_tool_errors: bool = Field(False, description="Did any Code Index Query tool fail within this step?") # Added
     step_outputs: Optional[List[Any]] = Field(None, description="Collected outputs for the step (especially for GitHub multi-tool steps)")
 
 
@@ -441,3 +447,26 @@ class PlanRevisedEvent(BaseEvent):
     message: Optional[str] = Field(
         None, description="Explanation or reasoning behind the plan revision"
     )
+
+# --- Code Index Query Events ---
+
+class CodeIndexQueryToolCellCreatedEvent(BaseEvent):
+    type: EventType = Field(default=EventType.CODE_INDEX_QUERY_TOOL_CELL_CREATED, description="Event type identifier")
+    status: StatusType = Field(default=StatusType.SUCCESS, description="Fixed status")
+    agent_type: AgentType = Field(default=AgentType.CODE_INDEX_QUERY, description="Fixed agent type")
+    original_plan_step_id: str = Field(..., description="Original plan step ID this tool belongs to")
+    cell_id: Optional[str] = Field(..., description="ID of the created cell for the query result")
+    tool_name: Optional[str] = Field(default="qdrant-find", description="Name of the specific tool")
+    tool_args: Optional[Dict[str, Any]] = Field(None, description="Arguments passed to the tool")
+    result: Optional[Any] = Field(None, description="Result content for the cell (e.g., list of search results)")
+    cell_params: Optional[Dict[str, Any]] = Field(None, description="Parameters used to create the cell")
+
+class CodeIndexQueryToolErrorEvent(BaseEvent):
+    type: EventType = Field(default=EventType.CODE_INDEX_QUERY_TOOL_ERROR, description="Event type identifier")
+    status: StatusType = Field(default=StatusType.ERROR, description="Fixed status")
+    agent_type: AgentType = Field(default=AgentType.CODE_INDEX_QUERY, description="Fixed agent type")
+    original_plan_step_id: str = Field(..., description="Original plan step ID this tool belongs to")
+    tool_call_id: Optional[str] = Field(None, description="ID of the failed tool call, if available")
+    tool_name: Optional[str] = Field(default="qdrant-find", description="Name of the specific tool that failed")
+    tool_args: Optional[Dict[str, Any]] = Field(None, description="Arguments passed to the tool")
+    error: str = Field(..., description="Error message from the failed tool")

@@ -2,3 +2,4 @@ pytest
 pytest-asyncio
 httpx
 pydantic-evals
+gitingest>=0.1.0 # Added for Git repo indexing
