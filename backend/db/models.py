@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Set
 
-from sqlalchemy import Column, String, DateTime, ForeignKey, Boolean, JSON, func, Text, Integer, Enum, Float, UUID
+from sqlalchemy import Column, String, DateTime, ForeignKey, Boolean, JSON, func, Text, Integer, Enum, Float, UUID, Index
 from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
@@ -183,3 +183,29 @@ class CellDependency(Base):
     
     dependent_id = Column(String(36), ForeignKey("cells.id", ondelete="CASCADE"), primary_key=True)
     dependency_id = Column(String(36), ForeignKey("cells.id", ondelete="CASCADE"), primary_key=True)
+
+
+class UploadedFile(Base):
+    __tablename__ = "uploaded_files"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id = Column(String, nullable=False, index=True)
+    notebook_id = Column(UUID(as_uuid=True), nullable=True, index=True) # Can be linked to a notebook
+    
+    filename = Column(String, nullable=False)
+    filepath = Column(String, nullable=False, unique=True) # Path on the server
+    file_type = Column(String, nullable=True) # MIME type
+    size = Column(Integer, nullable=True) # Size in bytes
+    
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    
+    metadata_ = Column("metadata", JSON, nullable=True) # Additional metadata
+
+    __table_args__ = (
+        Index("ix_uploaded_files_session_id", "session_id"),
+        Index("ix_uploaded_files_notebook_id", "notebook_id"),
+    )
+
+    def __repr__(self):
+        return f"<UploadedFile(id={self.id}, filename='{self.filename}', session_id='{self.session_id}')>" 

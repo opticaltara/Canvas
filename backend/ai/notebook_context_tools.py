@@ -27,6 +27,8 @@ from enum import Enum
 from pydantic import BaseModel, Field, UUID4
 
 from backend.db.database import get_db_session
+from backend.db.models import UploadedFile
+
 if TYPE_CHECKING:
     from backend.services.notebook_manager import NotebookManager
 
@@ -68,6 +70,17 @@ class ListCellsParams(BaseModel):
                     "'position_asc': sort by cell position, oldest/lowest index first. "
                     "'position_desc': sort by cell position, newest/highest index first.",
     )
+
+
+# New Pydantic schemas for uploaded-files tools
+class ListUploadedFilesParams(BaseModel):
+    """Parameters for listing uploaded files for a chat session."""
+    session_id: str = Field(..., description="Chat session ID whose uploaded files should be listed.")
+
+
+class GetUploadedFilePathParams(BaseModel):
+    """Parameters for retrieving a single uploaded-file path by file ID."""
+    file_id: UUID4 = Field(..., description="UploadedFile.id to fetch its server-side path")
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +173,47 @@ def create_notebook_context_tools(
             return results
 
     # ---------------------------------------------------------------------
+    # list_uploaded_files implementation
+    # ---------------------------------------------------------------------
+
+    async def list_uploaded_files(params: ListUploadedFilesParams) -> List[Dict[str, Any]]:
+        """Return minimal metadata for all files uploaded in *session_id* (most recent first)."""
+        async with get_db_session() as db:
+            rows = (
+                await db.execute(
+                    sa.select(UploadedFile)  # type: ignore[name-defined]
+                    .where(UploadedFile.session_id == params.session_id)
+                    .order_by(UploadedFile.created_at.desc())
+                )
+            ).scalars().all()
+
+            return [
+                {
+                    "id": str(row.id),
+                    "filename": row.filename,
+                    "filepath": row.filepath,
+                    "size": row.size,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                }
+                for row in rows
+            ]
+
+    # ---------------------------------------------------------------------
+    # get_uploaded_file_path implementation
+    # ---------------------------------------------------------------------
+
+    async def get_uploaded_file_path(params: GetUploadedFilePathParams) -> str:
+        """Return the server-side relative filepath for *file_id*.
+
+        Raises ValueError if not found so the LLM sees an explicit error message.
+        """
+        async with get_db_session() as db:
+            row = await db.get(UploadedFile, params.file_id)  # type: ignore[arg-type]
+            if not row:
+                raise ValueError(f"Uploaded file {params.file_id} not found")
+            return str(row.filepath)
+
+    # ---------------------------------------------------------------------
     # get_cell implementation
     # ---------------------------------------------------------------------
 
@@ -178,9 +232,11 @@ def create_notebook_context_tools(
     # Name the functions for nicer tool labels
     list_cells.__name__ = "list_cells"
     get_cell.__name__ = "get_cell"
+    list_uploaded_files.__name__ = "list_uploaded_files"
+    get_uploaded_file_path.__name__ = "get_uploaded_file_path"
 
     # Always return raw functions – the Agent constructor will wrap them
     # automatically, and this avoids generic type mismatches with different
     # deps_type parameters across agents.
 
-    return [list_cells, get_cell] 
+    return [list_cells, get_cell, list_uploaded_files, get_uploaded_file_path] 
