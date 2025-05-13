@@ -67,8 +67,8 @@ COPY requirements.txt .
 RUN PATH=/root/.local/bin:$PATH /root/.local/bin/uv pip install --system --no-cache -r requirements.txt
 
 # Create necessary directories in one go
-RUN mkdir -p node_modules data logs \
- && chmod 777 node_modules logs
+RUN mkdir -p node_modules data logs uploads \
+ && chmod -R 777 node_modules logs data uploads
 
 # Copy application code
 COPY backend/ ./backend/

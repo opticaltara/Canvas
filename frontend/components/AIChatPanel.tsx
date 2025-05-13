@@ -5,7 +5,7 @@ import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
-import { Send, Bot, User, Loader2, ChevronRight, AlertCircle, RefreshCw, XCircle, ChevronDown } from "lucide-react"
+import { Send, Bot, User, Loader2, ChevronRight, AlertCircle, RefreshCw, XCircle, ChevronDown, Paperclip } from "lucide-react"
 import { api } from "@/api/client"
 import type { ChatMessage, CellCreationEvent } from "@/api/chat"
 import { useToast } from "@/hooks/use-toast"
@@ -75,10 +75,12 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
   const [lastFailedMessage, setLastFailedMessage] = useState<string | null>(null)
   const [isRetrying, setIsRetrying] = useState(false)
   const [agentStatuses, setAgentStatuses] = useState<Record<string, AgentStatus>>({})
+  const [selectedFile, setSelectedFile] = useState<File | null>(null); // State for selected file
 
   const { toast } = useToast()
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null); // Ref for file input
 
   // --- Get cell handlers from Zustand store --- 
   const handleCellUpdate = useCanvasStore((state) => state.handleCellUpdate);
@@ -543,11 +545,14 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
     await programmaticSendMessage(messageToSend);
   }
 
-  // ADDED: Function to programmatically send a message (used by store action)
   const programmaticSendMessage = async (messageContent: string) => {
     // Check session and loading state
-    if (!messageContent || isLoading || !sessionId) {
-      console.warn("[AIChatPanel programmaticSendMessage] Aborted: Invalid state (isLoading, no sessionId, or empty message)", { isLoading, sessionId, messageContent });
+    if (!messageContent && !selectedFile) { // Allow sending if only a file is selected
+      console.warn("[AIChatPanel programmaticSendMessage] Aborted: No message content or file selected", { isLoading, sessionId, messageContent, selectedFile });
+      return;
+    }
+    if (isLoading || !sessionId) {
+      console.warn("[AIChatPanel programmaticSendMessage] Aborted: Invalid state (isLoading or no sessionId)", { isLoading, sessionId });
       return;
     }
 
@@ -556,9 +561,19 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
     setIsLoading(true)
 
     // 1. Add user message to the UI immediately
+    // Include file information if a file is selected
+    let userMessageContent = messageContent;
+    if (selectedFile) {
+      // For now, just append a note about the file.
+      // Later, this will be replaced with a proper file reference after upload.
+      userMessageContent += `\n[File attached: ${selectedFile.name}]`;
+      console.log(`[AIChatPanel] Sending message with file: ${selectedFile.name}`);
+      // Placeholder: In a real scenario, you'd upload the file here.
+    }
+
     const userMessage: ChatMessage = {
       role: 'user',
-      content: messageContent,
+      content: userMessageContent,
       timestamp: new Date().toISOString(),
       id: `user-${Date.now()}`
     };
@@ -584,6 +599,7 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
       // Remove the loading placeholder *after* the stream finishes
       // The stream might have added the actual message, or status updates handled elsewhere
       setMessages((prev) => prev.filter((msg) => msg.id !== assistantPlaceholder.id))
+      setSelectedFile(null); // Clear selected file after successful send
 
     } catch (error) {
       console.error("Error sending message:", error)
@@ -592,6 +608,8 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
       setMessages((prev) => prev.filter((msg) => msg.id !== assistantPlaceholder.id))
 
       // Store the failed message for potential retry
+      // If a file was part of the message, this retry logic might need adjustment
+      // For now, it retries the text content.
       setLastFailedMessage(messageContent) // Use function argument
 
       // Set a more user-friendly error message
@@ -702,6 +720,35 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
       return ""
     }
   }
+
+  // --- ADDED: Handle file selection ---
+  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      if (file.type === "text/csv") { // Basic CSV type check
+        setSelectedFile(file);
+        console.log("File selected:", file.name, file.type);
+      } else {
+        setSelectedFile(null);
+        toast({
+          variant: "destructive",
+          title: "Invalid File Type",
+          description: "Please select a CSV file.",
+        });
+      }
+      // Reset the file input value to allow selecting the same file again if needed
+      if (event.target) {
+        event.target.value = "";
+      }
+    } else {
+      setSelectedFile(null);
+    }
+  };
+
+  // --- ADDED: Trigger file input click ---
+  const handleUploadClick = () => {
+    fileInputRef.current?.click();
+  };
 
   // Clear error
   const dismissError = () => {
@@ -1001,7 +1048,24 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
 
           {/* Input */}
           <div className="p-4 border-t bg-white">
-            <form onSubmit={handleSendMessage} className="flex space-x-2">
+            {selectedFile && (
+              <div className="mb-2 p-2 border border-gray-300 rounded-md bg-gray-50 text-sm flex justify-between items-center">
+                <span className="truncate">
+                  <Paperclip className="h-4 w-4 mr-2 inline-block text-gray-500" />
+                  {selectedFile.name}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setSelectedFile(null)}
+                  className="h-6 w-6 p-0 text-gray-500 hover:text-red-500"
+                  aria-label="Remove file"
+                >
+                  <XCircle className="h-4 w-4" />
+                </Button>
+              </div>
+            )}
+            <form onSubmit={handleSendMessage} className="flex space-x-2 items-end">
               <Textarea
                 ref={inputRef as any}
                 value={input}
@@ -1011,6 +1075,24 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
                 disabled={isLoading || !sessionId}
                 rows={1}
               />
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleFileChange}
+                accept=".csv" // Accept only CSV files for now
+                className="hidden"
+              />
+              <Button
+                type="button"
+                size="icon"
+                variant="outline"
+                onClick={handleUploadClick}
+                disabled={isLoading || !sessionId}
+                className="text-gray-600 hover:text-purple-600"
+                aria-label="Attach file"
+              >
+                <Paperclip className="h-4 w-4" />
+              </Button>
               <Button
                 type="submit"
                 size="icon"
