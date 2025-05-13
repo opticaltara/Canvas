@@ -5,6 +5,7 @@ Connection API Endpoints
 from typing import Dict, List, Optional, Any, Union, Annotated
 from uuid import uuid4
 import time
+import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Body
 from pydantic import BaseModel, Field, model_validator
@@ -28,6 +29,11 @@ from backend.services.connection_handlers.jira_handler import (
 from backend.services.connection_handlers.filesystem_handler import (
     FileSystemConnectionCreate, FileSystemConnectionUpdate, FileSystemConnectionBase
     # FileSystemConnectionTest is skipped for now, using FileSystemConnectionBase for test
+)
+# Import git_repo model
+from backend.services.connection_handlers.git_repo_handler import (
+    GitRepoConnectionCreate,
+    GitRepoConnectionHandler # Import handler class
 )
 # Import function to get registered types and handler getter
 from backend.services.connection_handlers.registry import get_all_handler_types, get_handler
@@ -68,9 +74,10 @@ router = APIRouter()
 # Union for specific config fields during creation
 CreatePayloadUnion = Annotated[
     Union[
-        GithubConnectionCreate, 
+        GithubConnectionCreate,
         JiraConnectionCreate,
-        FileSystemConnectionCreate # Add Filesystem create model
+        FileSystemConnectionCreate, # Add Filesystem create model
+        GitRepoConnectionCreate # Add Git Repo create model
     ],
     Field(discriminator="type")
 ]
@@ -79,9 +86,10 @@ CreatePayloadUnion = Annotated[
 # Note: Update models in handlers allow optional fields
 UpdatePayloadUnion = Annotated[
     Union[
-        GithubConnectionUpdate, 
+        GithubConnectionUpdate,
         JiraConnectionUpdate,
-        FileSystemConnectionUpdate # Add Filesystem update model
+        FileSystemConnectionUpdate, # Add Filesystem update model
+        GitRepoConnectionCreate # Reuse Create model for Git Repo update for now
     ],
     Field(discriminator="type")
 ]
@@ -91,7 +99,8 @@ TestPayloadUnion = Annotated[
     Union[
         GithubConnectionTest,
         JiraConnectionTest,
-        FileSystemConnectionBase # Added for filesystem connection testing
+        FileSystemConnectionBase, # Added for filesystem connection testing
+        GitRepoConnectionCreate # Reuse Create model for Git Repo test for now
     ],
     Field(discriminator="type")
 ]
@@ -592,3 +601,99 @@ async def get_tools_for_connection_type(
             exc_info=True
         )
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred retrieving tools for {connection_type}")
+
+
+# --- Re-index Endpoint --- 
+
+@router.post(
+    "/{connection_id}/reindex", 
+    status_code=202, # 202 Accepted for async operation
+    summary="Re-index Git Repository Connection",
+    description="Triggers a background re-indexing process for a specific Git repository connection."
+)
+async def reindex_git_repo_connection(
+    connection_id: str,
+    connection_manager: ConnectionManager = Depends(get_connection_manager)
+):
+    """
+    Triggers a re-indexing process for a specific git_repo connection.
+    This fetches the latest data from the Git repository and updates the Qdrant index.
+    """
+    # Relying on module-level imports for get_db_session and ConnectionRepository
+    
+    correlation_id = str(uuid4())
+    start_time = time.time()
+    connection_logger.info(f"Received request to re-index connection {connection_id}", extra={'correlation_id': correlation_id})
+
+    # Fetch the full connection object using the manager (uses DB)
+    # We need the actual DB model instance for post_create_actions
+    connection = await connection_manager.get_connection(connection_id)
+    
+    # Use explicit None check
+    if connection is None:
+        connection_logger.error(f"Re-index failed: Connection {connection_id} not found", extra={'correlation_id': correlation_id})
+        raise HTTPException(status_code=404, detail=f"Connection {connection_id} not found")
+
+    # Ensure it's the correct type - cast to str for type checker
+    connection_type_str = str(connection.type)
+    if connection_type_str != "git_repo":
+        connection_logger.error(f"Re-index failed: Connection {connection_id} is type '{connection_type_str}', not 'git_repo'", extra={'correlation_id': correlation_id})
+        raise HTTPException(
+            status_code=400,
+            detail=f"Re-indexing is only supported for 'git_repo' connections. Found type '{connection_type_str}'."
+        )
+
+    try:
+        # Get the specific handler using the casted string type
+        handler = get_handler(connection_type_str)
+        if not isinstance(handler, GitRepoConnectionHandler):
+            connection_logger.error(f"Re-index failed: Could not get GitRepoConnectionHandler for {connection_id}", extra={'correlation_id': correlation_id})
+            raise HTTPException(status_code=500, detail="Internal server error: Could not get appropriate handler.")
+
+        # Call post_create_actions as a background task
+        connection_logger.info(f"Scheduling re-indexing task for {connection_id} ('{connection.name}')", extra={'correlation_id': correlation_id})
+        # Pass the SQLAlchemy model instance directly
+        asyncio.create_task(handler.post_create_actions(connection))
+        
+        process_time = time.time() - start_time
+        connection_logger.info(
+            f"Successfully scheduled re-indexing for connection {connection_id}",
+            extra={
+                'correlation_id': correlation_id,
+                'connection_name': connection.name,
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
+        return {"message": f"Re-indexing process started for connection '{connection.name}' ({connection_id})."}
+
+    except (ValueError, RuntimeError) as e:
+        process_time = time.time() - start_time
+        # Catch specific errors that might be raised during handler setup or if post_create_actions was awaited and failed
+        connection_logger.error(
+            f"Re-index failed for {connection_id}: {e}", 
+            extra={
+                'correlation_id': correlation_id,
+                'error': str(e), 
+                'error_type': type(e).__name__, 
+                'processing_time_ms': round(process_time * 1000, 2)
+            },
+            exc_info=True # Include traceback for unexpected RuntimeErrors
+        )
+        # Return 400 for configuration/validation type errors, 500 for runtime issues
+        status_code = 400 if isinstance(e, ValueError) else 500
+        raise HTTPException(status_code=status_code, detail=str(e))
+    except Exception as e:
+        process_time = time.time() - start_time
+        connection_logger.exception(
+            f"Unexpected error during re-indexing request for {connection_id}: {e}", 
+            extra={
+                'correlation_id': correlation_id, 
+                'processing_time_ms': round(process_time * 1000, 2)
+            }
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"An unexpected error occurred while trying to re-index: {str(e)}"
+        )
+
+# --- End Re-index Endpoint ---

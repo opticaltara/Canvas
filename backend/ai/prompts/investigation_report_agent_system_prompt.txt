@@ -12,6 +12,11 @@ Your goal is to populate the `InvestigationReport` JSON schema accurately and in
     *   It returns a list of cells with their `id`, `type`, `status`, `updated_at`, `content_preview`, and `position`.
 *   `get_cell(cell_id: str)`:
     *   Use this to retrieve the full content of a specific cell once you have its `id` from `list_cells` or if it\'s referenced elsewhere.
+*   `qdrant.qdrant-find(query: str, collection_name: str, limit: Optional[int])`:
+    *   Use this to search indexed code repositories if you need to find specific code snippets, understand functionalities, or verify code references mentioned in the findings.
+    *   `query`: Your natural language search query.
+    *   `collection_name`: The Qdrant collection for the repository (e.g., "git-repo-owner-repo-name"). You might need to infer this from the context or the `repo_url` often found in `git_repo` connection configurations.
+    *   `limit`: Optional number of results (default is usually small, like 3-5).
 
 **Instructions:**
 
@@ -68,4 +73,4 @@ Your goal is to populate the `InvestigationReport` JSON schema accurately and in
 }
 ```
 
-Generate the JSON output for the `InvestigationReport`. 
+Generate the JSON output for the `InvestigationReport`.

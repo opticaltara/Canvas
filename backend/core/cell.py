@@ -77,6 +77,7 @@ class CellType(str, Enum):
     METRIC = "metric"
     AI_QUERY = "ai_query" # Generic for other agent-driven cells
     MEDIA_TIMELINE = "media_timeline"  # New cell type for media timeline outputs
+    CODE_INDEX_QUERY = "code_index_query" # For displaying code search results
 
 
 class CellResult(BaseModel):

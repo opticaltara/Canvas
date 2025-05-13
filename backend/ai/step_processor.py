@@ -5,7 +5,7 @@ Step processor for executing and processing individual investigation steps.
 import logging
 import os
 import traceback # Added
-from typing import Any, Dict, List, Optional, Tuple, Union, Type, AsyncGenerator
+from typing import Any, Dict, List, Optional, Tuple, Union, Type, AsyncGenerator, cast
 from uuid import UUID, uuid4
 
 # Model Imports
@@ -13,6 +13,7 @@ from backend.ai.models import StepType, InvestigationStepModel, PythonAgentInput
 from backend.ai.step_result import StepResult
 from backend.ai.step_agents import StepAgent, MarkdownStepAgent, GitHubStepAgent, FileSystemStepAgent, PythonStepAgent, ReportStepAgent
 from backend.ai.media_agent import MediaTimelineAgent # Import MediaTimelineAgent
+from backend.ai.code_index_query_agent import CodeIndexQueryAgent # Import CodeIndexQueryAgent
 from backend.ai.cell_creator import CellCreator
 from pydantic_ai.models.openai import OpenAIModel
 from backend.core.cell import CellType, CellStatus # Added CellStatus
@@ -34,15 +35,21 @@ from backend.ai.events import (
     GitHubToolCellCreatedEvent, GitHubToolErrorEvent, 
     FileSystemToolCellCreatedEvent, FileSystemToolErrorEvent, 
     PythonToolCellCreatedEvent, PythonToolErrorEvent,
+    CodeIndexQueryToolCellCreatedEvent, CodeIndexQueryToolErrorEvent, # Added events for code index query
     StepCompletedEvent, StepErrorEvent, StepExecutionCompleteEvent,
     SummaryCellCreatedEvent, SummaryCellErrorEvent, FatalErrorEvent, # Added FatalErrorEvent
     MediaTimelineCellCreatedEvent  # Local import to avoid circular
 )
 
+# Model imports
+from backend.ai.models import SafeOpenAIModel  # For using Claude model
+from pydantic_ai.providers.openai import OpenAIProvider  # Provider for Claude model
+from backend.config import get_settings  # Access OpenRouter API key
+
 ai_logger = logging.getLogger("ai")
 
-STEP_CONTEXT_SNIPPET_LIMIT = 10000
-REPORT_CONTEXT_SNIPPET_LIMIT = 10000
+STEP_CONTEXT_SNIPPET_LIMIT = 40000
+REPORT_CONTEXT_SNIPPET_LIMIT = 40000
 
 class StepProcessor:
     """Handles the execution and processing of individual investigation steps"""
@@ -53,12 +60,14 @@ class StepProcessor:
         notebook_id: str, 
         model: OpenAIModel,
         connection_manager: ConnectionManager,
-        notebook_manager: Optional[NotebookManager] = None # Added notebook_manager
+        notebook_manager: Optional[NotebookManager] = None, # Added notebook_manager
+        mcp_servers: Optional[List[Any]] = None # Added mcp_servers
     ):
         self.notebook_id = notebook_id
         self.model = model
         self.connection_manager = connection_manager
         self.notebook_manager = notebook_manager # Store notebook_manager
+        self.mcp_servers = mcp_servers or [] # Store mcp_servers
         self.cell_creator = CellCreator(notebook_id, connection_manager)
         
         # Initialize step agent registry
@@ -68,7 +77,22 @@ class StepProcessor:
         """Get or create the appropriate agent for a step type"""
         if step_type not in self._step_agents:
             if step_type == StepType.MARKDOWN:
-                self._step_agents[step_type] = MarkdownStepAgent(self.notebook_id, self.model, notebook_manager=self.notebook_manager)
+                # Use Claude Sonnet model for markdown generation instead of GPT-4
+                settings = get_settings()
+                claude_model = SafeOpenAIModel(
+                    "anthropic/claude-3.7-sonnet:thinking",
+                    provider=OpenAIProvider(
+                        base_url="https://openrouter.ai/api/v1",
+                        api_key=settings.openrouter_api_key,
+                    ),
+                )
+
+                self._step_agents[step_type] = MarkdownStepAgent(
+                    notebook_id=self.notebook_id,
+                    model=self.model,
+                    notebook_manager=self.notebook_manager,
+                    mcp_servers=self.mcp_servers,
+                )
             elif step_type == StepType.GITHUB:
                 self._step_agents[step_type] = GitHubStepAgent(self.notebook_id)
             elif step_type == StepType.FILESYSTEM:
@@ -77,10 +101,18 @@ class StepProcessor:
                 # Pass notebook_manager to PythonStepAgent
                 self._step_agents[step_type] = PythonStepAgent(self.notebook_id, notebook_manager=self.notebook_manager)
             elif step_type == StepType.INVESTIGATION_REPORT:
-                self._step_agents[step_type] = ReportStepAgent(self.notebook_id)
+                self._step_agents[step_type] = ReportStepAgent(self.notebook_id, mcp_servers=self.mcp_servers) # Pass mcp_servers
             elif step_type == StepType.MEDIA_TIMELINE: # Add case for MediaTimelineAgent
                 from backend.ai.step_agents import MediaTimelineStepAgent
-                self._step_agents[step_type] = MediaTimelineStepAgent(notebook_id=self.notebook_id, connection_manager=self.connection_manager, notebook_manager=self.notebook_manager)
+                # MediaTimelineStepAgent itself initializes MediaTimelineAgent which uses CorrelatorAgent.
+                # CorrelatorAgent needs mcp_servers. MediaTimelineAgent constructor needs to accept and pass them.
+                self._step_agents[step_type] = MediaTimelineStepAgent(notebook_id=self.notebook_id, connection_manager=self.connection_manager, notebook_manager=self.notebook_manager, mcp_servers=self.mcp_servers)
+            elif step_type == StepType.CODE_INDEX_QUERY: # Add case for CodeIndexQueryAgent
+                self._step_agents[step_type] = CodeIndexQueryAgent(
+                    notebook_id=self.notebook_id,
+                    connection_manager=self.connection_manager,
+                    mcp_servers=self.mcp_servers
+                )
             else:
                 raise ValueError(f"Unsupported step type: {step_type}")
                 
@@ -155,6 +187,7 @@ class StepProcessor:
         github_step_has_tool_errors = False
         filesystem_step_has_tool_errors = False
         python_step_has_tool_errors = False
+        code_index_query_step_has_tool_errors = False # Added for code index query
         
         # Special handling for report steps
         if step.step_type == StepType.INVESTIGATION_REPORT:
@@ -209,7 +242,8 @@ class StepProcessor:
                 step_id=step.step_id, final_result_data=final_result_data,
                 step_outputs=step_result.outputs, step_error=step_result.get_combined_error(),
                 github_step_has_tool_errors=False, filesystem_step_has_tool_errors=False,
-                python_step_has_tool_errors=False, session_id=session_id, notebook_id=self.notebook_id
+                python_step_has_tool_errors=False, code_index_query_step_has_tool_errors=code_index_query_step_has_tool_errors, # Use the variable
+                session_id=session_id, notebook_id=self.notebook_id
             )
             return
         
@@ -258,7 +292,7 @@ class StepProcessor:
                 )
                 step_result.add_error(error_msg)
                 step_results[step.step_id] = step_result
-                yield StepExecutionCompleteEvent(step_id=step.step_id, final_result_data=None, step_outputs=step_result.outputs, step_error=step_result.get_combined_error(), github_step_has_tool_errors=False, filesystem_step_has_tool_errors=False, python_step_has_tool_errors=True, session_id=session_id, notebook_id=self.notebook_id)
+                yield StepExecutionCompleteEvent(step_id=step.step_id, final_result_data=None, step_outputs=step_result.outputs, step_error=step_result.get_combined_error(), github_step_has_tool_errors=False, filesystem_step_has_tool_errors=False, python_step_has_tool_errors=True, code_index_query_step_has_tool_errors=code_index_query_step_has_tool_errors, session_id=session_id, notebook_id=self.notebook_id) # Use the variable
                 return
         
         # This was the part with agent_input_data for PythonAgent, MediaTimelineAgent also takes similar care
@@ -311,34 +345,100 @@ class StepProcessor:
                     StepType.GITHUB: GitHubToolCellCreatedEvent,
                     StepType.FILESYSTEM: FileSystemToolCellCreatedEvent,
                     StepType.PYTHON: PythonToolCellCreatedEvent,
+                    StepType.CODE_INDEX_QUERY: CodeIndexQueryToolCellCreatedEvent,
                 }
                 created_event_class = created_event_map.get(step.step_type)
                 if created_event_class:
-                    _, tool_event = await self._process_tool_success_event(
-                        event=event, step=step, step_type=step.step_type, agent_type=agent_type,
-                        plan_step_id_to_cell_ids=plan_step_id_to_cell_ids, cell_tools=cell_tools,
-                        session_id=session_id, created_event_class=created_event_class,
-                        step_result=step_result
-                    )
-                    yield tool_event
+                    # For CodeIndexQuery steps, create a dedicated cell regardless of the exact MCP tool name.
+                    if step.step_type == StepType.CODE_INDEX_QUERY and isinstance(event, ToolSuccessEvent):
+                        # Accept tool names like "qdrant-find" or "qdrant.qdrant-find" etc.
+                        tool_name_for_display = event.tool_name or "qdrant-find"
+                        created_cell_id, cell_params_model, cell_creation_error_msg = await self.cell_creator.create_code_index_query_cell(
+                            cell_tools=cell_tools, step=step, tool_event=event,
+                            dependency_cell_ids=[cid for dep_id in step.dependencies for cid in plan_step_id_to_cell_ids.get(dep_id, [])],
+                            session_id=session_id
+                        )
+                        if cell_creation_error_msg:
+                            step_result.add_error(cell_creation_error_msg)
+                            # Yield a ToolErrorEvent if cell creation fails for this specific case
+                            yield CodeIndexQueryToolErrorEvent(
+                                original_plan_step_id=step.step_id,
+                                tool_name=tool_name_for_display,
+                                tool_args=event.tool_args,
+                                error=cell_creation_error_msg,
+                                agent_type=agent_type,
+                                session_id=session_id,
+                                notebook_id=self.notebook_id,
+                                tool_call_id=event.tool_call_id
+                            )
+                            code_index_query_step_has_tool_errors = True
+                        elif created_cell_id and cell_params_model:
+                            step_result.add_cell_id(created_cell_id)
+                            plan_step_id_to_cell_ids.setdefault(step.step_id, []).append(created_cell_id)
+                            yield CodeIndexQueryToolCellCreatedEvent(
+                                original_plan_step_id=step.step_id,
+                                cell_id=str(created_cell_id),
+                                tool_name=tool_name_for_display,
+                                tool_args=event.tool_args,
+                                result=event.tool_result,
+                                cell_params=cell_params_model.model_dump(),
+                                session_id=session_id,
+                                notebook_id=self.notebook_id
+                            )
+                        step_result.add_output(self.cell_creator._serialize_tool_result(event.tool_result, tool_name_for_display))
+
+                    elif created_event_class != ToolSuccessEvent: # For other specific tool cell created events
+                        _, tool_event = await self._process_tool_success_event(
+                            event=event, step=step, step_type=step.step_type, agent_type=agent_type,
+                            plan_step_id_to_cell_ids=plan_step_id_to_cell_ids, cell_tools=cell_tools,
+                            session_id=session_id, created_event_class=created_event_class,
+                            step_result=step_result
+                        )
+                        yield tool_event
+                    # If created_event_class is ToolSuccessEvent but not handled above (e.g. internal tools), it's processed by _process_tool_success_event
+                    # but the resulting event might not be yielded if it's for an internal tool.
+                    # The CodeIndexQueryAgent itself yields a ToolSuccessEvent, which is caught here.
+                    # We only want to create a cell and yield CodeIndexQueryToolCellCreatedEvent.
+                    # Other ToolSuccessEvents are handled by _process_tool_success_event.
+
             elif isinstance(event, ToolErrorEvent):
                 error_event_map = {
                     StepType.GITHUB: GitHubToolErrorEvent,
                     StepType.FILESYSTEM: FileSystemToolErrorEvent,
                     StepType.PYTHON: PythonToolErrorEvent,
+                    StepType.CODE_INDEX_QUERY: CodeIndexQueryToolErrorEvent,
                 }
                 error_event_class = error_event_map.get(step.step_type)
                 if error_event_class:
+                    # For generic ToolErrorEvent, we might need to pass more fields if its constructor expects them
+                    # For now, assuming it matches the specific error events' signature or handles missing fields.
                     ai_logger.info(f"Step {step.step_id} yielding {error_event_class.__name__} for tool {event.tool_name} error: {event.error}")
-                    yield error_event_class(
-                        original_plan_step_id=step.step_id, tool_call_id=event.tool_call_id,
-                        tool_name=event.tool_name, tool_args=event.tool_args, error=event.error,
-                        session_id=session_id, notebook_id=self.notebook_id
-                    )
+                    
+                    # Construct the event based on whether it's a generic ToolErrorEvent or a specific one
+                    # For generic ToolErrorEvent, we might need to pass more fields if its constructor expects them
+                    # For now, assuming it matches the specific error events' signature or handles missing fields.
+                    # This block will now primarily handle specific error events.
+                    # The CodeIndexQueryAgent yields a ToolErrorEvent directly with all necessary fields.
+                    if error_event_class and error_event_class != ToolErrorEvent: # Only yield specific, non-generic error events here
+                        yield error_event_class(
+                            original_plan_step_id=step.step_id, tool_call_id=event.tool_call_id,
+                            tool_name=event.tool_name, tool_args=event.tool_args, error=event.error,
+                            session_id=session_id, notebook_id=self.notebook_id
+                        )
+                    elif error_event_class == ToolErrorEvent: # If it's a generic ToolErrorEvent (e.g. from CodeIndexQueryAgent)
+                        yield event # Forward the already constructed ToolErrorEvent
+                    else:
+                        ai_logger.warning(f"No specific error event class found for step type {step.step_type} and tool {event.tool_name}")
+
+
                 if step.step_type == StepType.FILESYSTEM: filesystem_step_has_tool_errors = True
                 if step.step_type == StepType.PYTHON: python_step_has_tool_errors = True
+                if step.step_type == StepType.CODE_INDEX_QUERY: code_index_query_step_has_tool_errors = True # Added
                 step_result.add_error(f"Error in tool {event.tool_name}: {event.error}")
-            elif isinstance(event, BaseEvent):
+            elif isinstance(event, BaseEvent): # Catch other BaseEvents that might be ToolErrorEvent from CodeIndexQueryAgent
+                if isinstance(event, ToolErrorEvent) and event.tool_name and event.tool_name.endswith("qdrant-find"):
+                    code_index_query_step_has_tool_errors = True
+                    step_result.add_error(f"Error in tool {event.tool_name}: {event.error}")
                 ai_logger.info(f"Step {step.step_id} yielding generic BaseEvent: {type(event)}")
                 yield event
         
@@ -438,6 +538,7 @@ class StepProcessor:
             github_step_has_tool_errors=github_step_has_tool_errors,
             filesystem_step_has_tool_errors=filesystem_step_has_tool_errors,
             python_step_has_tool_errors=python_step_has_tool_errors,
+            code_index_query_step_has_tool_errors=code_index_query_step_has_tool_errors, # Added
             session_id=session_id, notebook_id=self.notebook_id
         )
     
@@ -458,9 +559,13 @@ class StepProcessor:
         
         # Determine cell_type (needed if cell is created)
         agent_to_cell_type_map = {
-            AgentType.GITHUB: CellType.GITHUB, AgentType.FILESYSTEM: CellType.FILESYSTEM,
-            AgentType.PYTHON: CellType.PYTHON, AgentType.SQL: CellType.SQL,
-            AgentType.S3: CellType.S3, AgentType.METRIC: CellType.METRIC
+            AgentType.GITHUB: CellType.GITHUB,
+            AgentType.FILESYSTEM: CellType.FILESYSTEM,
+            AgentType.PYTHON: CellType.PYTHON,
+            AgentType.SQL: CellType.SQL,
+            AgentType.S3: CellType.S3,
+            AgentType.METRIC: CellType.METRIC,
+            AgentType.CODE_INDEX_QUERY: CellType.CODE_INDEX_QUERY,
         }
         current_event_agent_type = event.agent_type if event.agent_type is not None else AgentType.UNKNOWN
         cell_type = agent_to_cell_type_map.get(current_event_agent_type, CellType.AI_QUERY)

@@ -33,6 +33,7 @@ interface ConnectionState {
   testConnection: (connectionData: Partial<Connection>) => Promise<{ valid: boolean; message: string }>
   fetchToolsForConnection: (connectionType: string) => Promise<void>
   toggleAllCellsExpanded: () => void
+  reindexConnection: (connectionId: string) => Promise<{ message: string }>
 
   // Utility
   getConnectionsByType: (type: string) => Connection[]
@@ -301,6 +302,27 @@ export const useConnectionStore = create<ConnectionState>()(
         getDefaultConnection: (type) => {
           const connections = get().getConnectionsByType(type)
           return connections.find((conn) => conn.is_default) || connections[0] || null
+        },
+
+        // Reindex a connection
+        reindexConnection: async (connectionId) => {
+          // Set loading state? Maybe specific reindexing state?
+          // set(state => ({ ... }))
+          try {
+            const result = await api.connections.reindex(connectionId); // result is { message: string }
+            // Optionally update some state here if needed
+            return result; // Return { message: string } directly
+          } catch (err) {
+            console.error("Failed to reindex connection:", err);
+            // Re-throw the error for the UI to handle
+            if (err instanceof Error) {
+                throw err; // Throw error caught by API client (includes backend message)
+            }
+            throw new Error("An unknown error occurred during re-indexing.");
+          } finally {
+            // Reset loading state?
+            // set(state => ({ ... }))
+          }
         },
       }),
       {

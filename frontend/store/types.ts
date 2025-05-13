@@ -20,6 +20,7 @@ export const CellTypeSchema = z.enum([
   "filesystem",
   "python",
   "media_timeline",
+  "code_index_query", // Added new cell type
 ])
 export type CellType = z.infer<typeof CellTypeSchema>
 
@@ -66,7 +67,7 @@ export const NotebookSchema = z.object({
 export type Notebook = z.infer<typeof NotebookSchema>
 
 // --- Update: Remove 'grafana' and 'python' from ConnectionTypeSchema ---
-export const ConnectionTypeSchema = z.enum(["github", "jira", "filesystem"])
+export const ConnectionTypeSchema = z.enum(["github", "jira", "filesystem", "git_repo"]) // Added "git_repo"
 export type ConnectionType = z.infer<typeof ConnectionTypeSchema>
 
 export const ConnectionSchema = z.object({
@@ -131,6 +132,13 @@ export interface FileSystemConnectionConfig {
   [key: string]: any; // Allow other potential fields
 }
 
+// New interface for GitRepo redacted config
+export interface GitRepoConnectionConfig {
+  repo_url?: string; // This is the main config
+  collection_name?: string; // This might be added by the backend
+  [key: string]: any;
+}
+
 // Represents a fully loaded connection object (potentially used in UI state after fetching details)
 // The config here uses the specific interfaces defined above.
 export interface Connection {
@@ -138,7 +146,7 @@ export interface Connection {
   name: string;
   type: ConnectionType;
   is_default: boolean;
-  config: GithubConnectionConfig | JiraConnectionConfig | FileSystemConnectionConfig | Record<string, any>; // Use specific types + fallback
+  config: GithubConnectionConfig | JiraConnectionConfig | FileSystemConnectionConfig | GitRepoConnectionConfig | Record<string, any>; // Use specific types + fallback
 }
 export interface GithubConnectionCreateFormData {
   name: string;
@@ -166,4 +174,8 @@ export interface FileSystemConnectionCreateFormData {
   allowed_paths?: string[]; // Optional example
 }
 
-
+// New interface for GitRepo form data
+export interface GitRepoConnectionCreateFormData {
+  name: string;
+  repo_url: string;
+}
