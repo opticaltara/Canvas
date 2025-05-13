@@ -177,7 +177,8 @@ async def list_connection_types() -> List[str]:
     start_time = time.time()
     try:
         handler_types = get_all_handler_types()
-        connection_types = sorted(list(set(handler_types)))
+        # "log_ai" and "python" are virtual connection types not backed by handlers
+        connection_types = sorted(list(set(handler_types) | {"python", "log_ai"}))
         
         process_time = time.time() - start_time
         connection_logger.info(

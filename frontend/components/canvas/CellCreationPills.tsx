@@ -2,7 +2,7 @@
 
 import { useState } from "react"
 import { Button } from "@/components/ui/button"
-import { Plus, FileText, Github, Folder, CodeIcon } from "lucide-react" // Added CodeIcon
+import { Plus, FileText, Github, Folder, CodeIcon, ActivityIcon } from "lucide-react" // Added ActivityIcon for Log-AI
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 
 interface CellCreationPillsProps {
@@ -62,6 +62,14 @@ export default function CellCreationPills({ onAddCell }: CellCreationPillsProps)
             >
               <CodeIcon className="h-4 w-4 mr-2 text-emerald-700" />
               <span>Python Code</span>
+            </Button>
+            <Button
+              variant="ghost"
+              className="flex justify-start items-center px-2 py-1 text-sm hover:bg-purple-50 transition-colors duration-200"
+              onClick={() => handleAddCell("log_ai")}
+            >
+              <ActivityIcon className="h-4 w-4 mr-2 text-purple-700" />
+              <span>Log-AI</span>
             </Button>
           </div>
         </PopoverContent>

@@ -65,6 +65,8 @@ class CellType(str, Enum):
         METRIC: Cell representing a metric query
         AI_QUERY: Generic for other agent-driven cells
         MEDIA_TIMELINE: New cell type for media timeline outputs
+        CODE_INDEX_QUERY: For displaying code search results
+        LOG_AI: Log analysis FastMCP server
     """
     MARKDOWN = "markdown"
     GITHUB = "github"
@@ -78,6 +80,7 @@ class CellType(str, Enum):
     AI_QUERY = "ai_query" # Generic for other agent-driven cells
     MEDIA_TIMELINE = "media_timeline"  # New cell type for media timeline outputs
     CODE_INDEX_QUERY = "code_index_query" # For displaying code search results
+    LOG_AI = "log_ai"  # Log analysis FastMCP server
 
 
 class CellResult(BaseModel):

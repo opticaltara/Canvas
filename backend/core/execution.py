@@ -529,6 +529,36 @@ class CellExecutor:
                 self.logger.error(f"Unexpected error during Python cell {cell.id} execution with mcp-server-data-exploration: {e}", exc_info=True, extra={'correlation_id': correlation_id, 'cell_id': cell.id})
                 raise # Re-raise to be caught by the outer try-except
         
+        elif cell.type == CellType.LOG_AI:
+            # Execute Log-AI tool calls (FastMCP server)
+            self.logger.info(f"Executing Log-AI cell {cell.id} via logai MCP server.", extra={'correlation_id': correlation_id, 'cell_id': cell.id})
+
+            # For Log-AI cells we expect they encode a tool call directly (tool_name + tool_arguments)
+            if not cell.tool_name:
+                raise ValueError("Log-AI cell requires tool_name to be set.")
+
+            server_params = StdioServerParameters(
+                command='/root/.local/bin/uv',
+                args=[
+                    'run',
+                    '--script',
+                    '/opt/mcp-sherlog-log-analysis/logai_mcp_server.py'
+                ],
+                env=os.environ.copy()
+            )
+
+            try:
+                async with stdio_client(server_params) as (read, write):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        self.logger.info(f"Calling Log-AI tool '{cell.tool_name}' for cell {cell.id}…", extra={'correlation_id': correlation_id, 'cell_id': cell.id})
+                        mcp_result = await session.call_tool(cell.tool_name, arguments=cell.tool_arguments or {})
+                        self.logger.info(f"Log-AI tool '{cell.tool_name}' call completed for cell {cell.id}.", extra={'correlation_id': correlation_id, 'cell_id': cell.id})
+                        return mcp_result
+            except Exception as e:
+                self.logger.error(f"Log-AI MCP execution error for cell {cell.id}: {e}", exc_info=True, extra={'correlation_id': correlation_id, 'cell_id': cell.id})
+                raise
+        
         # Check if this cell represents a tool call (This is the original logic for other tool calls)
         elif cell.tool_name and cell.tool_arguments is not None:
             tool_name = cell.tool_name

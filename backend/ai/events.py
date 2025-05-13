@@ -51,6 +51,8 @@ class EventType(str, Enum):
     # Code Index Query Events
     CODE_INDEX_QUERY_TOOL_CELL_CREATED = "code_index_query_tool_cell_created"
     CODE_INDEX_QUERY_TOOL_ERROR = "code_index_query_tool_error"
+    LOG_AI_TOOL_CELL_CREATED = "log_ai_tool_cell_created"
+    LOG_AI_TOOL_ERROR = "log_ai_tool_error"
 
 class AgentType(str, Enum):
     GITHUB = "github_agent"
@@ -70,6 +72,7 @@ class AgentType(str, Enum):
     METRIC = "metric"
     MEDIA_TIMELINE = "media_timeline"
     CODE_INDEX_QUERY = "code_index_query" # For CodeIndexQueryAgent
+    LOG_AI = "log_ai"  # For LogAI analysis agent
 
 class StatusType(str, Enum):
     # General Statuses
@@ -470,3 +473,28 @@ class CodeIndexQueryToolErrorEvent(BaseEvent):
     tool_name: Optional[str] = Field(default="qdrant-find", description="Name of the specific tool that failed")
     tool_args: Optional[Dict[str, Any]] = Field(None, description="Arguments passed to the tool")
     error: str = Field(..., description="Error message from the failed tool")
+
+class LogAIToolCellCreatedEvent(BaseEvent):
+    """Event indicating a cell was created for a successful Log-AI tool execution."""
+
+    type: EventType = Field(default=EventType.LOG_AI_TOOL_CELL_CREATED, description="Event type identifier")
+    status: StatusType = Field(default=StatusType.TOOL_SUCCESS, description="Fixed status for success")
+    agent_type: AgentType = Field(default=AgentType.LOG_AI, description="Fixed agent type")
+    original_plan_step_id: str = Field(..., description="The ID of the original investigation plan step")
+    cell_id: Optional[str] = Field(..., description="The ID of the created notebook cell")
+    tool_name: str = Field(..., description="The name of the specific Log-AI tool executed")
+    tool_args: Optional[Dict[str, Any]] = Field(None, description="The arguments passed to the tool")
+    result: Optional[Any] = Field(..., description="The result object from the tool execution to store in the cell")
+    cell_params: Optional[Dict[str, Any]] = Field(None, description="Parameters used by the backend to create the cell (for potential frontend use)")
+
+class LogAIToolErrorEvent(BaseEvent):
+    """Event indicating an error occurred during Log-AI tool execution or cell creation."""
+
+    type: EventType = Field(default=EventType.LOG_AI_TOOL_ERROR, description="Event type identifier")
+    status: StatusType = Field(default=StatusType.ERROR, description="Fixed status for error")
+    agent_type: AgentType = Field(default=AgentType.LOG_AI, description="Fixed agent type")
+    original_plan_step_id: Optional[str] = Field(None, description="The ID of the original plan step, if known")
+    tool_call_id: Optional[str] = Field(None, description="The unique ID for the specific tool call that failed")
+    tool_name: Optional[str] = Field(None, description="The name of the tool that failed")
+    tool_args: Optional[Dict[str, Any]] = Field(None, description="The arguments passed to the failed tool")
+    error: str = Field(..., description="The error message")

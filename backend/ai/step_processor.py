@@ -38,7 +38,8 @@ from backend.ai.events import (
     CodeIndexQueryToolCellCreatedEvent, CodeIndexQueryToolErrorEvent, # Added events for code index query
     StepCompletedEvent, StepErrorEvent, StepExecutionCompleteEvent,
     SummaryCellCreatedEvent, SummaryCellErrorEvent, FatalErrorEvent, # Added FatalErrorEvent
-    MediaTimelineCellCreatedEvent  # Local import to avoid circular
+    MediaTimelineCellCreatedEvent, # Local import to avoid circular
+    LogAIToolCellCreatedEvent, LogAIToolErrorEvent,
 )
 
 # Model imports
@@ -113,6 +114,9 @@ class StepProcessor:
                     connection_manager=self.connection_manager,
                     mcp_servers=self.mcp_servers
                 )
+            elif step_type == StepType.LOG_AI:
+                from backend.ai.step_agents import LogAIStepAgent
+                self._step_agents[step_type] = LogAIStepAgent(self.notebook_id)
             else:
                 raise ValueError(f"Unsupported step type: {step_type}")
                 
@@ -346,6 +350,7 @@ class StepProcessor:
                     StepType.FILESYSTEM: FileSystemToolCellCreatedEvent,
                     StepType.PYTHON: PythonToolCellCreatedEvent,
                     StepType.CODE_INDEX_QUERY: CodeIndexQueryToolCellCreatedEvent,
+                    StepType.LOG_AI: LogAIToolCellCreatedEvent,
                 }
                 created_event_class = created_event_map.get(step.step_type)
                 if created_event_class:
@@ -401,12 +406,50 @@ class StepProcessor:
                     # We only want to create a cell and yield CodeIndexQueryToolCellCreatedEvent.
                     # Other ToolSuccessEvents are handled by _process_tool_success_event.
 
+                    elif step.step_type == StepType.LOG_AI and isinstance(event, ToolSuccessEvent):
+                        tool_name_display = event.tool_name or "log_ai_tool"
+                        created_cell_id, cell_params_model, cell_creation_error_msg = await self.cell_creator.create_log_ai_tool_cell(
+                            cell_tools=cell_tools,
+                            step=step,
+                            tool_event=event,
+                            dependency_cell_ids=[cid for dep_id in step.dependencies for cid in plan_step_id_to_cell_ids.get(dep_id, [])],
+                            session_id=session_id,
+                        )
+
+                        if cell_creation_error_msg:
+                            step_result.add_error(cell_creation_error_msg)
+                            yield LogAIToolErrorEvent(
+                                original_plan_step_id=step.step_id,
+                                tool_call_id=event.tool_call_id,
+                                tool_name=tool_name_display,
+                                tool_args=event.tool_args,
+                                error=cell_creation_error_msg,
+                                session_id=session_id,
+                                notebook_id=self.notebook_id,
+                            )
+                        elif created_cell_id and cell_params_model:
+                            step_result.add_cell_id(created_cell_id)
+                            plan_step_id_to_cell_ids.setdefault(step.step_id, []).append(created_cell_id)
+                            yield LogAIToolCellCreatedEvent(
+                                original_plan_step_id=step.step_id,
+                                cell_id=str(created_cell_id),
+                                tool_name=tool_name_display,
+                                tool_args=event.tool_args,
+                                result=event.tool_result,
+                                cell_params=cell_params_model.model_dump(),
+                                session_id=session_id,
+                                notebook_id=self.notebook_id,
+                            )
+                        # Skip generic processing for LOG_AI since handled here
+                        continue
+
             elif isinstance(event, ToolErrorEvent):
                 error_event_map = {
                     StepType.GITHUB: GitHubToolErrorEvent,
                     StepType.FILESYSTEM: FileSystemToolErrorEvent,
                     StepType.PYTHON: PythonToolErrorEvent,
                     StepType.CODE_INDEX_QUERY: CodeIndexQueryToolErrorEvent,
+                    StepType.LOG_AI: LogAIToolErrorEvent,
                 }
                 error_event_class = error_event_map.get(step.step_type)
                 if error_event_class:
@@ -566,6 +609,7 @@ class StepProcessor:
             AgentType.S3: CellType.S3,
             AgentType.METRIC: CellType.METRIC,
             AgentType.CODE_INDEX_QUERY: CellType.CODE_INDEX_QUERY,
+            AgentType.LOG_AI: CellType.LOG_AI,
         }
         current_event_agent_type = event.agent_type if event.agent_type is not None else AgentType.UNKNOWN
         cell_type = agent_to_cell_type_map.get(current_event_agent_type, CellType.AI_QUERY)

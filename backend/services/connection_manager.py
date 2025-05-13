@@ -14,7 +14,7 @@ import asyncio
 from pydantic import BaseModel, Field, ValidationError
 import aiofiles
 
-from mcp import ClientSession
+from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from backend.config import get_settings
@@ -817,6 +817,70 @@ class ConnectionManager:
             ]
             logger.info(f"Returning {len(qdrant_tools)} predefined Qdrant tools for git_repo.", extra={'correlation_id': correlation_id})
             return qdrant_tools
+
+        # --- LogAI (FastMCP) virtual connection type --------------------------------------
+        if connection_type == "log_ai":
+            logger.info(
+                "Handling virtual 'log_ai' connection-type tool discovery via direct FastMCP stdio call.",
+                extra={'correlation_id': correlation_id}
+            )
+            try:
+                server_params = StdioServerParameters(
+                    command="/root/.local/bin/uv",
+                    args=[
+                        "run",
+                        "--script",
+                        "/opt/mcp-sherlog-log-analysis/logai_mcp_server.py",
+                    ],
+                    env=os.environ.copy(),
+                )
+
+                async with stdio_client(server_params) as (read, write):
+                    async with ClientSession(read, write) as session:
+                        logger.info(
+                            "Initializing MCP session for Log-AI list_tools…",
+                            extra={'correlation_id': correlation_id},
+                        )
+                        await asyncio.wait_for(session.initialize(), timeout=90.0)
+                        response = await asyncio.wait_for(session.list_tools(), timeout=30.0)
+
+                        parsed_tools: List[MCPToolInfo] = []
+                        for mcp_tool in getattr(response, "tools", []) or []:
+                            try:
+                                parsed_tools.append(
+                                    MCPToolInfo(
+                                        name=getattr(mcp_tool, "name", "unknown"),
+                                        description=getattr(mcp_tool, "description", None),
+                                        inputSchema=getattr(mcp_tool, "inputSchema", {}) or {},
+                                    )
+                                )
+                            except Exception as tool_parse_err:
+                                logger.error(
+                                    "Failed parsing tool from Log-AI list_tools response: %s",
+                                    tool_parse_err,
+                                    extra={'correlation_id': correlation_id},
+                                    exc_info=True,
+                                )
+                                continue
+
+                        logger.info(
+                            "Retrieved %d Log-AI tools via MCP list_tools.",
+                            len(parsed_tools),
+                            extra={'correlation_id': correlation_id},
+                        )
+                        return parsed_tools
+            except asyncio.TimeoutError:
+                raise ValueError("Timeout communicating with Log-AI MCP server while listing tools.")
+            except FileNotFoundError as e:
+                raise ValueError(f"Log-AI MCP server command not found: {e}")
+            except Exception as e:
+                logger.error(
+                    "Unexpected error during Log-AI MCP list_tools: %s",
+                    e,
+                    extra={'correlation_id': correlation_id},
+                    exc_info=True,
+                )
+                raise ValueError(f"Failed to communicate with Log-AI MCP server: {e}")
 
         # Existing logic for MCP-based connections:
         default_conn = await self.get_default_connection(connection_type)

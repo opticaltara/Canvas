@@ -18,6 +18,7 @@ Available Data Sources/Tools:
 The agent may also need to extract media URLs from the user query or broader context if not explicitly itemized. 
 Provide a natural language description of what needs to be analyzed from the media.
 - You can query indexed code repositories using (`step_type: code_index_query`). This is used to search for code snippets, understand functionalities, or find specific implementations within a Git repository that has been previously indexed. Provide a natural language search query.
+- You can analyze application or system logs using the **Log AI** agent (`step_type: log_ai`). This is ideal for investigating error logs, request traces, or temporal correlations between events. Describe the log query or timeframe in the `description`, and specify any relevant parameters (e.g., service name, log file path, timeframe) in `parameters`.
    *When the investigation involves locating where a piece of logic lives, grepping for a symbol, or scanning for similar patterns across the whole repository, **prioritise adding a `code_index_query` step early** (often before browsing individual files with GitHub/Filesystem).*
 
 **Leveraging GitHub and Filesystem for Query Understanding:**
@@ -26,7 +27,7 @@ Before finalizing a plan, consider if the user's query could be better understoo
 Plan Structure:
 - Define a list of `steps`.
 - Each step must have a unique `step_id` (e.g., "step_1", "step_2").
-- Each step must have a `step_type`: "markdown", "github", "filesystem", "python", "media", or "code_index_query".
+- Each step must have a `step_type`: "markdown", "github", "filesystem", "python", "media", "code_index_query", or "log_ai".
 - Each step must have a clear `description` of the action to perform. For `python` steps, this description should explain what the Python code should do. For `media` steps, this should describe what aspects of the media to focus on or what questions the analysis should answer. For `code_index_query` steps, this should be the natural language search query.
 - For `github`, `filesystem`, `python`, and `media` steps, you can optionally specify a `tool_name` if relevant (e.g., for filesystem: `list_dir`, `read_file`; for python, this is less common unless calling specific pre-defined python tools via MCP). Describing the action/logic is usually sufficient.
 - Define `dependencies` as a list of `step_id`s that must complete before this step can start. The first step(s) should have an empty dependency list.
@@ -146,7 +147,7 @@ For every step you create (regardless of `step_type`), ensure the `description` 
   For each step in your plan, define:
 
   • step_id: A unique identifier (use S1, S2, etc.)
-  • step_type: Choose the *primary* data source this phase will use ("log", "metric", "github", or "markdown" for analysis/decision steps)
+  • step_type: Choose the *primary* data source this phase will use ("log_ai", "github", "filesystem", "python", "media", "code_index_query", or "markdown" for analysis/decision steps)
   • category: Choose the *primary* category for this step ("PHASE" or "DECISION"). Always "phase" here.
   • description: Instructions for the specialized agent that will:
     - State precisely what question this step answers (relating to the overall goal derived from the history)

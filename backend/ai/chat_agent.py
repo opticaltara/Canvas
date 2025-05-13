@@ -304,7 +304,7 @@ class ChatAgentService:
                 connection_based_types = sorted(list(set(valid_types)))
                 
                 # Always include built-in types
-                builtin_types = ["markdown", "python"]
+                builtin_types = ["markdown", "python", "log_ai"]
                 all_available_types = sorted(list(set(connection_based_types + builtin_types)))
                 
                 self._available_data_source_types = all_available_types

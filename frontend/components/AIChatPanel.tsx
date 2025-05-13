@@ -1079,7 +1079,7 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
                 type="file"
                 ref={fileInputRef}
                 onChange={handleFileChange}
-                accept=".csv" // Accept only CSV files for now
+                accept=".csv,text/csv" // Broaden filter to show CSVs in all OS file pickers
                 className="hidden"
               />
               <Button
