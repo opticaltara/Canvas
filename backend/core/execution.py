@@ -538,11 +538,12 @@ class CellExecutor:
                 raise ValueError("Log-AI cell requires tool_name to be set.")
 
             server_params = StdioServerParameters(
-                command='/root/.local/bin/uv',
+                command='docker',
                 args=[
                     'run',
-                    '--script',
-                    '/opt/mcp-sherlog-log-analysis/logai_mcp_server.py'
+                    '--rm',
+                    '-i',
+                    'ghcr.io/navneet-mkr/logai-mcp:0.1.2'
                 ],
                 env=os.environ.copy()
             )

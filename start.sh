@@ -57,6 +57,13 @@ set -x
 echo "Stopping running containers..."
 docker-compose down
 
+# Pull necessary Docker images manually if needed
+echo "Pulling ghcr.io/navneet-mkr/logai-mcp:0.1.2 if not present..."
+docker pull ghcr.io/navneet-mkr/logai-mcp:0.1.2
+
+echo "Pulling ghcr.io/github/github-mcp-server:latest if not present..."
+docker pull ghcr.io/github/github-mcp-server:latest
+
 # Remove any old images to ensure clean build
 echo "Removing old Docker images..."
 docker-compose rm -f

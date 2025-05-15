@@ -10,6 +10,7 @@ import os
 from typing import Dict, List, Optional, Tuple, Union, Any
 from uuid import uuid4
 import asyncio
+from asyncio import Lock  # For Log-AI tool list cache locking
 
 from pydantic import BaseModel, Field, ValidationError
 import aiofiles
@@ -22,6 +23,18 @@ from backend.db.database import get_db_session
 from backend.db.repositories import ConnectionRepository
 
 from backend.core.types import MCPToolInfo
+
+# Cache for expensive Log-AI tool discovery
+# --------------------------------------------------
+#   We keep the discovered tool list in-memory for the
+#   lifetime of the process so subsequent requests can be
+#   served instantly without spinning up the docker image
+#   again.  A very small async Lock is used to ensure only
+#   one coroutine performs the initial discovery.
+# --------------------------------------------------
+
+_logai_tools_cache: Optional[list['MCPToolInfo']] = None  # Populated lazily
+_logai_tools_cache_lock: Lock = Lock()
 
 # Import handler registry functions
 from backend.services.connection_handlers.registry import get_handler, get_all_handler_types
@@ -824,13 +837,41 @@ class ConnectionManager:
                 "Handling virtual 'log_ai' connection-type tool discovery via direct FastMCP stdio call.",
                 extra={'correlation_id': correlation_id}
             )
+
+            # If we've already fetched the LogAI tool list once during the
+            # lifetime of this process just return the cached copy straight
+            # away – no need to spin up the Docker container again.
+            global _logai_tools_cache
+            global _logai_tools_cache_lock
+            if _logai_tools_cache is not None:
+                logger.debug(
+                    "Returning cached list of %d Log-AI tools.",
+                    len(_logai_tools_cache),
+                    extra={'correlation_id': correlation_id},
+                )
+                return _logai_tools_cache
+
+            # Ensure only one coroutine performs the expensive discovery the
+            # first time while others wait on the result.
+            async with _logai_tools_cache_lock:
+                # Another coroutine might have already populated the cache
+                # while we were waiting for the lock.
+                if _logai_tools_cache is not None:
+                    logger.debug(
+                        "Log-AI tools cache was populated by another task while waiting for lock.",
+                        extra={'correlation_id': correlation_id},
+                    )
+                    return _logai_tools_cache
+
             try:
+                # Run the Log-AI MCP via published Docker image instead of building it on the fly
                 server_params = StdioServerParameters(
-                    command="/root/.local/bin/uv",
+                    command="docker",
                     args=[
                         "run",
-                        "--script",
-                        "/opt/mcp-sherlog-log-analysis/logai_mcp_server.py",
+                        "--rm",
+                        "-i",  # attach STDIN for stdio transport
+                        "ghcr.io/navneet-mkr/logai-mcp:0.1.2",
                     ],
                     env=os.environ.copy(),
                 )
@@ -868,6 +909,10 @@ class ConnectionManager:
                             len(parsed_tools),
                             extra={'correlation_id': correlation_id},
                         )
+
+                        # Populate the cache so the next call is instantaneous.
+                        _logai_tools_cache = parsed_tools
+
                         return parsed_tools
             except asyncio.TimeoutError:
                 raise ValueError("Timeout communicating with Log-AI MCP server while listing tools.")

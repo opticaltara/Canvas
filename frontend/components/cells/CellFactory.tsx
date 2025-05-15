@@ -88,6 +88,10 @@ const CellFactory: React.FC<CellFactoryProps> = ({ cell, onExecute, onUpdate, on
       return (
         <LogAICell
           cell={cell}
+          onExecute={onExecute}
+          onUpdate={onUpdate}
+          onDelete={onDelete}
+          isExecuting={isExecuting}
         />
       )
     default:

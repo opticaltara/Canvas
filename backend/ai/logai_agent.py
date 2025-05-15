@@ -73,14 +73,16 @@ class LogAIAgent:
     # ---------------------------------------------------------------------
 
     def _get_stdio_server_params(self) -> StdioServerParameters:
-        """Return hard-coded command/args for the Log-AI MCP server installed in the image."""
+        """Return Docker-based command/args for the Log-AI MCP server image."""
+        # Use the published container image instead of building via uv/poetry each time
         env_copy = os.environ.copy()
         return StdioServerParameters(
-            command="/root/.local/bin/uv",
+            command="docker",
             args=[
                 "run",
-                "--script",
-                "/opt/mcp-sherlog-log-analysis/logai_mcp_server.py",
+                "--rm",
+                "-i",  # keep STDIN open for MCP protocol
+                "ghcr.io/navneet-mkr/logai-mcp:0.1.2",
             ],
             env=env_copy,
         )
