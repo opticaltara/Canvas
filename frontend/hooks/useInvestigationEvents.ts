@@ -198,6 +198,9 @@ export type InvestigationEvent =
   | PythonToolErrorEvent
   // ADDED: Media Timeline Event
   | MediaTimelineCellCreatedEvent
+  // ADDED: Log-AI Tool Events
+  | LogAIToolCellCreatedEvent
+  | LogAIToolErrorEvent
 
 // Define cell creation parameters
 export interface CellCreationParams {
@@ -266,6 +269,31 @@ export interface PythonToolErrorEvent extends BaseEvent {
   agent_type: "python"; // Specific agent type
 }
 // --- END: Added Python Interfaces ---
+
+// --- ADDED: Log-AI Tool Event Interfaces (mirroring Python/GitHub) ---
+export interface LogAIToolCellCreatedEvent extends BaseEvent {
+  type: "log_ai_tool_cell_created";
+  status: "success";
+  original_plan_step_id?: string; // Optional, as LogAI might be used outside a plan
+  cell_id: string;
+  tool_call_record_id?: string; // Corresponds to the external_tool_call_id from backend
+  tool_name: string;
+  tool_args: Record<string, any>;
+  result: any; // The 'content' part of the backend CellResult
+  agent_type: "log_ai";
+  cell_params: Partial<CellCreationParams>; // Params used by backend to create cell
+}
+
+export interface LogAIToolErrorEvent extends BaseEvent {
+  type: "log_ai_tool_error";
+  status: "error";
+  original_plan_step_id?: string;
+  tool_name?: string;
+  tool_args?: Record<string, any>;
+  error: string;
+  agent_type: "log_ai";
+}
+// --- END: Added Log-AI Interfaces ---
 
 export interface MediaTimelineCellCreatedEvent extends BaseEvent {
   type: "media_timeline_cell_created";
@@ -702,6 +730,61 @@ export function useInvestigationEvents({
   );
   // --- END: Media Timeline Handler ---
 
+  // --- ADDED: Handler for Log-AI Tool Cell Created ---
+  const handleLogAIToolCellCreated = useCallback(
+    (event: LogAIToolCellCreatedEvent) => {
+      setCurrentStatus(`Completed Log-AI tool: ${event.tool_name}`);
+
+      const backendCellParams = event.cell_params || {};
+      const backendMetadata = backendCellParams.metadata || {};
+      
+      const cellParams: CellCreationParams = {
+        id: event.cell_id,
+        step_id: event.original_plan_step_id || backendCellParams.step_id || event.cell_id,
+        type: "log_ai", // Ensure this matches CellType enum/string values
+        content: backendCellParams.content || `Log-AI Analysis: ${event.tool_name}`, 
+        status: "success", 
+        result: event.result, // This 'result' on the event is the 'content' of backend's CellResult
+        error: backendCellParams.error || undefined,
+        metadata: {
+          ...backendMetadata,
+          tool_name: event.tool_name,
+          tool_args: event.tool_args,
+          tool_call_record_id: event.tool_call_record_id, // Store the original tool call id if provided
+          source_agent: event.agent_type,
+        },
+      };
+
+      console.log(`[handleLogAIToolCellCreated] Creating cell ${event.cell_id} with type: log_ai, status: success.`);
+      onCreateCell(cellParams);
+
+      toast({
+        title: "Log-AI Tool Completed",
+        description: `Log-AI tool '${event.tool_name}' executed successfully.`,
+      });
+    },
+    [onCreateCell, toast, setCurrentStatus]
+  );
+  // --- END: Added Log-AI Handler ---
+
+  // --- ADDED: Handler for Log-AI Tool Error ---
+  const handleLogAIToolError = useCallback(
+    (event: LogAIToolErrorEvent) => {
+      const errorMsg = `Log-AI tool '${event.tool_name || 'unknown'}' failed: ${event.error}`;
+      console.error(errorMsg);
+      onError(errorMsg); 
+      setCurrentStatus(`Error with Log-AI tool: ${event.tool_name || 'unknown'}`);
+      
+      toast({
+        variant: "destructive",
+        title: "Log-AI Tool Error",
+        description: errorMsg,
+      });
+    },
+    [onError, toast, setCurrentStatus]
+  );
+  // --- END: Added Log-AI Handler ---
+
   // handleStepUpdate
   const handleStepUpdate = useCallback((event: any) => {
     // Example: Update cell status visually if needed
@@ -839,6 +922,12 @@ export function useInvestigationEvents({
         case "media_timeline_cell_created":
           handleMediaTimelineCellCreated(event as MediaTimelineCellCreatedEvent);
           break;
+        case "log_ai_tool_cell_created":
+          handleLogAIToolCellCreated(event as LogAIToolCellCreatedEvent);
+          break;
+        case "log_ai_tool_error":
+          handleLogAIToolError(event as LogAIToolErrorEvent);
+          break;
         default:
           // Check if it's a step completion event
           if (event.type.startsWith("step_") && event.type.endsWith("_completed")) {
@@ -858,7 +947,7 @@ export function useInvestigationEvents({
       }
     },
     // Add new handlers to dependency array
-    [handlePlanCreated, handlePlanCellCreated, handlePlanRevised, handleSummaryStarted, handleSummaryUpdate, handleSummaryCellCreated, handleSummaryCellError, handleGithubToolCellCreated, handleGithubToolError, handleError, handleStepCompleted, handleStepUpdate, handleInvestigationReport, handleCellUpdate, handleFileSystemToolCellCreated, handleFileSystemToolError, handlePythonToolCellCreated, handlePythonToolError, handleMediaTimelineCellCreated]
+    [handlePlanCreated, handlePlanCellCreated, handlePlanRevised, handleSummaryStarted, handleSummaryUpdate, handleSummaryCellCreated, handleSummaryCellError, handleGithubToolCellCreated, handleGithubToolError, handleError, handleStepCompleted, handleStepUpdate, handleInvestigationReport, handleCellUpdate, handleFileSystemToolCellCreated, handleFileSystemToolError, handlePythonToolCellCreated, handlePythonToolError, handleMediaTimelineCellCreated, handleLogAIToolCellCreated, handleLogAIToolError]
   );
 
   // Process incoming WebSocket messages from the internal hook

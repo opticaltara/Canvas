@@ -158,7 +158,12 @@ class StepProcessor:
         step_result = StepResult(step.step_id, step.step_type)
         
         # Build context for the step from dependencies
-        context = self._build_step_context(step, executed_steps, step_results)
+        context = self._build_step_context(
+            step,
+            executed_steps,
+            step_results,
+            plan_step_id_to_cell_ids # Pass plan_step_id_to_cell_ids
+        )
         ai_logger.info(f"Step {step.step_id} context: {context}")
         
         # Always include the original user query for downstream agents
@@ -677,7 +682,8 @@ class StepProcessor:
         self,
         step: InvestigationStepModel,
         executed_steps: Dict[str, Any],
-        step_results: Dict[str, StepResult] # Ensure this is StepResult
+        step_results: Dict[str, StepResult], # Ensure this is StepResult
+        plan_step_id_to_cell_ids: Dict[str, List[UUID]] # New parameter
     ) -> Dict[str, Any]:
         """Build context from dependencies for a step"""
         context = {"prompt": step.description}
@@ -762,6 +768,21 @@ class StepProcessor:
         if dependency_context:
             context["prompt"] += f"\n\nContext from Dependencies:\n" + "\n".join(dependency_context)
             ai_logger.info(f"Step {step.step_id} full dependency context: {' '.join(dependency_context)}")
+
+        # Add dependency_cell_ids to the prompt
+        dep_cell_ids_for_prompt = {}
+        for dep_id in step.dependencies:
+            if dep_id in plan_step_id_to_cell_ids and plan_step_id_to_cell_ids[dep_id]:
+                dep_cell_ids_for_prompt[dep_id] = [str(uuid_val) for uuid_val in plan_step_id_to_cell_ids[dep_id]]
+
+        if dep_cell_ids_for_prompt:
+            import json # Ensure json is imported if not already available globally in this file
+            dep_cell_ids_str = json.dumps(dep_cell_ids_for_prompt, indent=2)
+            context["prompt"] += f"\n\nDependency Cell IDs (from orchestrator):\n{dep_cell_ids_str}"
+            # Optionally, store it separately in the context dict if needed structurally,
+            # but for LogAIAgent, adding to the prompt string is the primary goal.
+            # context["dependency_cell_ids_map"] = dep_cell_ids_for_prompt
+        
         return context
     
     def _format_findings_for_report(

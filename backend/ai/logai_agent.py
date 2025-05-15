@@ -201,7 +201,9 @@ class LogAIAgent:
         # Build prompt
         current_time_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z")
         prompt = (
-            f"Current time: {current_time_utc}.\nUser request: {user_query}\n"
+            f"Current time: {current_time_utc}.\\n"
+            f"Current Notebook ID: {self.notebook_id}.\\n"
+            f"User request: {user_query}\\n"  # user_query is expected to be context-rich
             "Analyse the supplied logs or perform the requested log-analysis task."
         )
 
