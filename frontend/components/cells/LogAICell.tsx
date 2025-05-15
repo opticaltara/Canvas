@@ -110,8 +110,59 @@ const LogAICell: React.FC<LogAICellProps> = ({ cell, onExecute, onUpdate, onDele
 
           const type = prop.type;
 
+          const isFileInput =
+            prop.format === "file" ||
+            prop.format === "filepath" ||
+            (/file|path/i.test(name) && type === "string");
+
+          const isNumberInput =
+            type === "number" ||
+            type === "integer" ||
+            (prop.format === "int32" || prop.format === "int64");
+
           let field: React.ReactNode;
-          if (type === "string" && (prop.format === "textarea" || (prop.description && prop.description.length > 50))) {
+          if (isFileInput) {
+            const fileInputId = `${id}-picker`;
+            field = (
+              <div className="flex items-center space-x-2 mt-1">
+                {/* Hidden native file input */}
+                <input
+                  id={fileInputId}
+                  type="file"
+                  className="hidden"
+                  accept=".csv,.txt,.log,text/plain,application/vnd.ms-excel"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      handleArgChange(name, (file as any).path || file.name);
+                    }
+                  }}
+                  required={isReq}
+                />
+
+                {/* Styled trigger button */}
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-8 px-3 text-xs"
+                  onClick={() => {
+                    const el = document.getElementById(fileInputId) as HTMLInputElement | null;
+                    el?.click();
+                  }}
+                >
+                  Browse…
+                </Button>
+
+                {/* Chosen file path / name */}
+                {val && (
+                  <span className="text-[11px] font-mono text-gray-700 truncate max-w-xs" title={val}>
+                    {val}
+                  </span>
+                )}
+              </div>
+            );
+          } else if (type === "string" && (prop.format === "textarea" || (prop.description && prop.description.length > 50))) {
             field = (
               <Textarea
                 id={id}
@@ -119,6 +170,18 @@ const LogAICell: React.FC<LogAICellProps> = ({ cell, onExecute, onUpdate, onDele
                 value={val}
                 placeholder={placeholder}
                 onChange={(e) => handleArgChange(name, e.target.value)}
+                required={isReq}
+              />
+            );
+          } else if (isNumberInput) {
+            field = (
+              <Input
+                id={id}
+                type="number"
+                className="mt-1 h-8 text-xs font-mono"
+                value={val}
+                placeholder={placeholder}
+                onChange={(e) => handleArgChange(name, e.target.valueAsNumber ?? e.target.value)}
                 required={isReq}
               />
             );
@@ -166,9 +229,36 @@ const LogAICell: React.FC<LogAICellProps> = ({ cell, onExecute, onUpdate, onDele
     <div className="border rounded-md overflow-hidden mb-3 mx-8">
       {/* Header */}
       <div className={`p-2 flex justify-between items-center border-b ${headerBg} ${headerBorder}`}>
-        <div className="flex items-center">
-          <ActivityIcon className={`h-4 w-4 mr-2 ${headerText} flex-shrink-0`} />
-          <span className={`font-medium text-sm ${headerText}`}>{toolName}</span>
+        <div className="flex items-center space-x-2">
+          <ActivityIcon className={`h-4 w-4 ${headerText} flex-shrink-0`} />
+          {toolLoadingStatus === "loading" ? (
+            <span className={`text-xs font-medium ${headerText}`}>Loading tools…</span>
+          ) : toolLoadingStatus === "error" ? (
+            <span className={`text-xs font-medium text-red-500`}>Failed to load.</span>
+          ) : toolDefinitions && toolDefinitions.length > 0 ? (
+            <div className="relative flex items-center">
+              <select
+                id={`tool-${cell.id}`}
+                className="h-7 text-xs font-medium bg-transparent text-rose-800 pl-2 pr-7 appearance-none focus:outline-none focus:ring-0 cursor-pointer rounded-md hover:bg-rose-200/50 transition-colors"
+                value={toolName}
+                onChange={(e) => {
+                  const newTool = e.target.value;
+                  setToolName(newTool);
+                  setToolArgs({});
+                  onUpdate(cell.id, cell.content ?? "", { toolName: newTool, toolArgs: {} });
+                }}
+              >
+                {toolDefinitions.map((d) => (
+                  <option key={d.name} value={d.name} className="text-sm text-black">
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+              <ChevronDownIcon className={`h-4 w-4 ${headerText} absolute right-1.5 top-1/2 -translate-y-1/2 pointer-events-none`} />
+            </div>
+          ) : (
+            <span className={`text-xs font-medium ${headerText}`}>{toolName || "Select Tool"}</span>
+          )}
         </div>
         <div className="flex items-center space-x-1.5">
           <Button
@@ -195,30 +285,6 @@ const LogAICell: React.FC<LogAICellProps> = ({ cell, onExecute, onUpdate, onDele
 
       {/* Body */}
       <div className="p-3 space-y-4">
-        {/* Tool selector */}
-        <div>
-          <Label className="text-xs text-gray-700" htmlFor={`tool-${cell.id}`}>Select Log-AI Tool</Label>
-          {toolLoadingStatus === "loading" && <p className="text-xs text-gray-500 mt-1">Loading tools…</p>}
-          {toolLoadingStatus === "error" && <p className="text-xs text-red-500 mt-1">Failed to load tools.</p>}
-          {toolDefinitions && toolDefinitions.length > 0 && (
-            <select
-              id={`tool-${cell.id}`}
-              className="mt-1 h-8 text-xs border rounded px-2"
-              value={toolName}
-              onChange={(e) => {
-                const newTool = e.target.value;
-                setToolName(newTool);
-                setToolArgs({});
-                onUpdate(cell.id, cell.content ?? "", { toolName: newTool, toolArgs: {} });
-              }}
-            >
-              {toolDefinitions.map((d) => (
-                <option key={d.name} value={d.name}>{d.name}</option>
-              ))}
-            </select>
-          )}
-        </div>
-
         {/* Tool Args */}
         <Card className={cardBorder}>
           <CardHeader className={`p-2 ${resultBg}`}>

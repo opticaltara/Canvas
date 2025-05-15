@@ -537,14 +537,22 @@ class CellExecutor:
             if not cell.tool_name:
                 raise ValueError("Log-AI cell requires tool_name to be set.")
 
+            docker_args = [
+                'run',
+                '--rm',
+                '-i', # Keep STDIN open for MCP protocol
+            ]
+
+            host_fs_root = os.environ.get("SHERLOG_HOST_FS_ROOT")
+            if host_fs_root:
+                docker_args.append("-v")
+                docker_args.append(f"{host_fs_root}:{host_fs_root}:ro")
+
+            docker_args.append('ghcr.io/navneet-mkr/logai-mcp:0.1.3')
+
             server_params = StdioServerParameters(
                 command='docker',
-                args=[
-                    'run',
-                    '--rm',
-                    '-i',
-                    'ghcr.io/navneet-mkr/logai-mcp:0.1.2'
-                ],
+                args=docker_args,
                 env=os.environ.copy()
             )
 

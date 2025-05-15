@@ -864,15 +864,25 @@ class ConnectionManager:
                     return _logai_tools_cache
 
             try:
+                # Prepare Docker arguments
+                docker_args = [
+                    "run",
+                    "--rm",
+                    "-i",  # attach STDIN for stdio transport
+                ]
+                
+                # Add volume mount if SHERLOG_HOST_FS_ROOT is set
+                host_fs_root = os.environ.get("SHERLOG_HOST_FS_ROOT")
+                if host_fs_root:
+                    docker_args.append(f"-v")
+                    docker_args.append(f"{host_fs_root}:{host_fs_root}:ro")
+
+                docker_args.append("ghcr.io/navneet-mkr/logai-mcp:0.1.3")
+
                 # Run the Log-AI MCP via published Docker image instead of building it on the fly
                 server_params = StdioServerParameters(
                     command="docker",
-                    args=[
-                        "run",
-                        "--rm",
-                        "-i",  # attach STDIN for stdio transport
-                        "ghcr.io/navneet-mkr/logai-mcp:0.1.2",
-                    ],
+                    args=docker_args,
                     env=os.environ.copy(),
                 )
 
