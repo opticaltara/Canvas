@@ -367,6 +367,9 @@ class MediaTimelineStepAgent(StepAgent):
 
         description = agent_input_data
 
+        # Local import to handle potential NameError if module-level import isn't effective.
+        from backend.ai.media_agent import MediaTimelineAgent
+
         # (Re)instantiate the MediaTimelineAgent for this execution so it has correct session_id
         self.timeline_agent = MediaTimelineAgent(
             notebook_id=self.notebook_id,

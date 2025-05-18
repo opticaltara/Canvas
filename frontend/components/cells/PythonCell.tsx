@@ -1,7 +1,6 @@
 "use client"
 
-import React from "react"
-import { useState, useEffect } from "react"
+import React, { useState, useEffect, useCallback } from "react"
 import { PlayIcon, CopyIcon, CheckIcon, Trash2Icon, AlertCircleIcon, ServerIcon, ChevronsUpDownIcon, CodeIcon, ChevronDownIcon, ChevronUpIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -24,6 +23,21 @@ import { githubLight } from '@uiw/codemirror-theme-github'; // Or choose another
 import type { ViewUpdate } from "@codemirror/view"; // Import type for onChange handler
 
 import { type Cell } from "@/store/types"
+
+// Helper for debouncing
+function debounce<F extends (...args: any[]) => any>(func: F, waitFor: number) {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+
+  const debounced = (...args: Parameters<F>) => {
+    if (timeout !== null) {
+      clearTimeout(timeout);
+      timeout = null;
+    }
+    timeout = setTimeout(() => func(...args), waitFor);
+  };
+
+  return debounced as (...args: Parameters<F>) => void;
+}
 
 // Define the expected structure of the result content from the Python MCP server
 interface PythonExecutionResult {
@@ -146,7 +160,14 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
   const [toolArgs, setToolArgs] = useState<Record<string, any>>(initialToolArgs);
 
   useEffect(() => {
-    setToolArgs(initialToolArgs);
+    // initialToolArgs is derived from cell.metadata.tool_args or cell.tool_arguments
+    const newInitialArgsString = JSON.stringify(initialToolArgs);
+    const currentLocalArgsString = JSON.stringify(toolArgs); // toolArgs is the local state
+
+    if (currentLocalArgsString !== newInitialArgsString) {
+      setToolArgs(initialToolArgs);
+    }
+    // The dependency array still reacts to changes in initialToolArgs stringified form
   }, [cell.id, JSON.stringify(initialToolArgs)]); 
 
   /* ---------------------- Connection Store -------------------- */
@@ -155,10 +176,20 @@ const PythonCellComponent: React.FC<PythonCellProps> = ({ cell, onExecute, onUpd
   const toolInfo = toolDefinitions?.find((def) => def.name === toolName);
 
   /* ---------------------- Helpers ----------------------------- */
+
+  // Debounced onUpdate function
+  const debouncedOnUpdate = useCallback(
+    debounce((cellId: string, content: string, metadata?: Record<string, any>) => {
+      onUpdate(cellId, content, metadata);
+    }, 500), // 500ms debounce delay
+    [onUpdate] // Dependency: onUpdate prop
+  );
+
   const handleToolArgChange = (argName: string, value: any) => {
     setToolArgs((prev) => {
       const updated = { ...prev, [argName]: value };
-      onUpdate(cell.id, cell.content, { toolName: toolName, toolArgs: updated });
+      // Call the debounced function for backend update
+      debouncedOnUpdate(cell.id, cell.content, { toolName: toolName, toolArgs: updated });
       return updated;
     });
   };

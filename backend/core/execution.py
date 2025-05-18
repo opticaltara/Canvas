@@ -541,6 +541,7 @@ class CellExecutor:
                 'run',
                 '--rm',
                 '-i', # Keep STDIN open for MCP protocol
+                "--volume=/var/run/docker.sock:/var/run/docker.sock",
             ]
 
             host_fs_root = os.environ.get("SHERLOG_HOST_FS_ROOT")

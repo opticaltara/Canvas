@@ -56,7 +56,10 @@ from backend.ai.events import (
     BaseEvent,
     FileSystemToolCellCreatedEvent,
     PythonToolCellCreatedEvent,
-    StatusType
+    LogAIToolCellCreatedEvent,
+    LogAIToolErrorEvent,
+    StatusType,
+    StepExecutionCompleteEvent # Added import
 )
 from backend.ai.models import SafeOpenAIModel # Import the custom model
 
@@ -457,7 +460,11 @@ class ChatAgentService:
                 agent_type_attr = getattr(event, 'agent_type', None)
                 agent_type_str = agent_type_attr.value if agent_type_attr else AgentType.UNKNOWN.value
                 chat_agent_logger.info(f"Yielding event update for session {session_id}. Type: {event_type_str}")
-                chat_agent_logger.debug(f"Received event object: {event!r}")
+                chat_agent_logger.debug(f"Received event object: {event!r} of type {type(event)}") # Added type logging
+
+                # Detailed logging for StepExecutionCompleteEvent before match
+                if isinstance(event, StepExecutionCompleteEvent):
+                    chat_agent_logger.info(f"Pre-match check: Event IS StepExecutionCompleteEvent. step_id: {getattr(event, 'step_id', 'N/A')}")
 
                 response_part: Optional[Union[CellResponsePart, StatusResponsePart]] = None # Initialize to None
                 
@@ -527,6 +534,34 @@ class ChatAgentService:
                             agent_type=at.value, # Use agent_type from the event
                             result=result_dict
                         )
+                    case LogAIToolCellCreatedEvent(
+                        cell_id=cid, 
+                        cell_params=cp, 
+                        status=st, # This is StatusType.SUCCESS from the event
+                        result=r, 
+                        tool_name=tn, 
+                        agent_type=at # This is AgentType.LOG_AI from the event
+                    ):
+                        chat_agent_logger.info(f"Creating CellResponsePart for {event_type_str} (LogAI Tool)")
+                        
+                        result_content_for_frontend = None
+                        if isinstance(r, BaseModel):
+                            try:
+                                result_content_for_frontend = r.model_dump(mode='json')
+                            except Exception as e:
+                                chat_agent_logger.warning(f"Could not model_dump LogAI result: {e}, falling back to str.")
+                                result_content_for_frontend = str(r)
+                        elif r is not None:
+                            result_content_for_frontend = str(r)
+
+                        result_dict = {"content": result_content_for_frontend, "tool_name": tn}
+                        response_part = CellResponsePart(
+                            cell_id=str(cid) if cid else "",
+                            cell_params=cp or {},
+                            status_type=st.value, # e.g., "success"
+                            agent_type=at.value, # e.g., "log_ai"
+                            result=result_dict
+                        )
                     case SummaryCellCreatedEvent(cell_id=cid, cell_params=cp, status=st, error=err):
                         chat_agent_logger.info(f"Creating CellResponsePart for {event_type_str} (Investigation Report)")
                         # Extract the report JSON string stored by AIAgent
@@ -589,14 +624,33 @@ class ChatAgentService:
                         if att: content += f" (Attempt: {att}/{ma})"
                         response_part = StatusResponsePart(content=content, agent_type=agent_type_str)
                     
+                    case StepExecutionCompleteEvent() as exec_event: # Simplified pattern
+                        event_step_id = exec_event.step_id
+                        event_step_error = getattr(exec_event, 'step_error', None)
+                        chat_agent_logger.info(f"MATCHED StepExecutionCompleteEvent for step {event_step_id}. Error: {event_step_error}")
+
+                        if event_step_error:
+                            event_agent_type_attr = getattr(exec_event, 'agent_type', None)
+                            current_agent_type_str = event_agent_type_attr.value if event_agent_type_attr and hasattr(event_agent_type_attr, 'value') else AgentType.UNKNOWN.value
+                            error_message = f"Step {event_step_id} completed with error: {event_step_error}"
+                            response_part = StatusResponsePart(
+                                content=error_message,
+                                agent_type=current_agent_type_str
+                            )
+                        else:
+                            chat_agent_logger.info(f"Step {event_step_id} completed successfully (from StepExecutionCompleteEvent). No new status sent to frontend.")
+                            response_part = None
+
                     # --- Catch-all for BaseEvent --- 
                     case BaseEvent(session_id=sid, notebook_id=nid):
                         # Handle any other event inheriting from BaseEvent that wasn't explicitly matched
                         chat_agent_logger.warning(f"Unhandled BaseEvent type: {type(event)}. Creating generic StatusResponsePart.")
                         status_val = getattr(event, 'status', None)
                         message = f"Status: {status_val.value if status_val and hasattr(status_val, 'value') else 'Unknown Status'}"
-                        agent_type_val = getattr(event, 'agent_type', AgentType.UNKNOWN)
-                        response_part = StatusResponsePart(content=message, agent_type=agent_type_val.value)
+                        # Try to get agent_type from the event, default to UNKNOWN
+                        actual_agent_type_attr = getattr(event, 'agent_type', AgentType.UNKNOWN)
+                        actual_agent_type_str = actual_agent_type_attr.value if hasattr(actual_agent_type_attr, 'value') else AgentType.UNKNOWN.value
+                        response_part = StatusResponsePart(content=message, agent_type=actual_agent_type_str)
 
                     # --- Fallback for non-BaseEvent types (should ideally not happen) ---
                     case _:

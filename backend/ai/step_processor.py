@@ -116,7 +116,7 @@ class StepProcessor:
                 )
             elif step_type == StepType.LOG_AI:
                 from backend.ai.step_agents import LogAIStepAgent
-                self._step_agents[step_type] = LogAIStepAgent(self.notebook_id)
+                self._step_agents[step_type] = LogAIStepAgent(self.notebook_id, notebook_manager=self.notebook_manager)
             else:
                 raise ValueError(f"Unsupported step type: {step_type}")
                 
@@ -410,43 +410,6 @@ class StepProcessor:
                     # The CodeIndexQueryAgent itself yields a ToolSuccessEvent, which is caught here.
                     # We only want to create a cell and yield CodeIndexQueryToolCellCreatedEvent.
                     # Other ToolSuccessEvents are handled by _process_tool_success_event.
-
-                    elif step.step_type == StepType.LOG_AI and isinstance(event, ToolSuccessEvent):
-                        tool_name_display = event.tool_name or "log_ai_tool"
-                        created_cell_id, cell_params_model, cell_creation_error_msg = await self.cell_creator.create_log_ai_tool_cell(
-                            cell_tools=cell_tools,
-                            step=step,
-                            tool_event=event,
-                            dependency_cell_ids=[cid for dep_id in step.dependencies for cid in plan_step_id_to_cell_ids.get(dep_id, [])],
-                            session_id=session_id,
-                        )
-
-                        if cell_creation_error_msg:
-                            step_result.add_error(cell_creation_error_msg)
-                            yield LogAIToolErrorEvent(
-                                original_plan_step_id=step.step_id,
-                                tool_call_id=event.tool_call_id,
-                                tool_name=tool_name_display,
-                                tool_args=event.tool_args,
-                                error=cell_creation_error_msg,
-                                session_id=session_id,
-                                notebook_id=self.notebook_id,
-                            )
-                        elif created_cell_id and cell_params_model:
-                            step_result.add_cell_id(created_cell_id)
-                            plan_step_id_to_cell_ids.setdefault(step.step_id, []).append(created_cell_id)
-                            yield LogAIToolCellCreatedEvent(
-                                original_plan_step_id=step.step_id,
-                                cell_id=str(created_cell_id),
-                                tool_name=tool_name_display,
-                                tool_args=event.tool_args,
-                                result=event.tool_result,
-                                cell_params=cell_params_model.model_dump(),
-                                session_id=session_id,
-                                notebook_id=self.notebook_id,
-                            )
-                        # Skip generic processing for LOG_AI since handled here
-                        continue
 
             elif isinstance(event, ToolErrorEvent):
                 error_event_map = {

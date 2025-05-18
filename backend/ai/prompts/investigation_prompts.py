@@ -61,7 +61,7 @@ This section details the capabilities of agents you can use to build investigati
 *   **Output (Typical):** Python code execution results, which could be printed output, variable assignments (available to subsequent Python cells), or generated artifacts like plots displayed in the notebook.
 *   **Example Task Description:** "Analyze the `weblog_df` DataFrame (assumed to be loaded from weblog.csv in a previous step) to calculate the frequency of each HTTP status code."
 
-**Media Agent (`step_type: media`)**
+**Media Agent (`step_type: media_timeline`)**
 *   **Primary Use Cases:** Analyzing visual media like videos or images, often to correlate them with code or user-reported issues. Can be used to generate timelines and hypotheses related to bugs shown in screen recordings or screenshots. Extracting media URLs from user queries or context.
 *   **Strengths:** Specialized for understanding issues from visual context.
 *   **Limitations & When NOT to Use:** Only for media analysis. Requires URLs or accessible media content.
@@ -92,17 +92,18 @@ This section details the capabilities of agents you can use to build investigati
     *   Advanced anomaly detection (e.g., based on statistical methods, patterns).
     *   Log event clustering and pattern identification.
     *   Investigating specific events, errors, or correlations within log data.
-*   **Strengths:** Utilizes specialized tools and models for efficient and effective log analysis. Can often identify insights not easily found with generic tools.
+    *   Interacting with Docker containers: listing running containers and tailing their logs.
+*   **Strengths:** Utilizes specialized tools and models for efficient and effective log analysis. Can often identify insights not easily found with generic tools. Direct interaction with Docker for live log streaming and container inspection.
 *   **Limitations & When NOT to Use:**
-    *   It does not directly read files from the filesystem; that should be done by a preceding `filesystem` step. The path to the log file (or reference to the data from a previous step) is given as a parameter.
+    *   It does not directly read files from the filesystem; that should be done by a preceding `filesystem` step for static log files. The path to the log file (or reference to the data from a previous step, or container identifiers for Docker logs) is given as a parameter.
     *   While versatile, its capabilities are defined by the tools exposed by its MCP server. Highly esoteric or brand-new custom log analysis tasks not covered by its tools might require `python` as a fallback, but `log_ai` should always be the first choice.
     *   Not for general CSV data analysis unrelated to logs (use `python`).
 *   **Key Parameters (Commonly Used):**
-    *   `description`: Natural language detailing the analysis needed (e.g., "Find anomalies in the provided weblog data, focusing on unusual status codes and high request rates.").
-    *   `parameters: {{"log_file_path": "output_of_filesystem_step_or_explicit_path_if_already_accessible_to_agent", "analysis_type": "anomaly_detection"}}` (Other parameters might include timeframes, specific keywords, etc., based on the underlying tools available to the Log AI agent).
-*   **Input (Typical):** The log data itself (often referenced as an output from a previous `filesystem` step if it needed reading, or a path if the LogAI agent can access it directly) and a clear description of the analysis task.
-*   **Output (Typical):** Structured results of the analysis, such as a list of anomalies, clustered log entries, statistical summaries, or markdown reports. These are typically presented in new notebook cells.
-*   **Example Task Description:** "Analyze the log data from step_1 (which read 'weblog.csv') to find anomalies related to HTTP 500 errors and summarize them."
+    *   `description`: Natural language detailing the analysis needed (e.g., "Find anomalies in the provided weblog data, focusing on unusual status codes and high request rates.", "List running docker containers", "Tail logs for container 'xyz'").
+    *   `parameters: {{"log_file_path": "output_of_filesystem_step_or_explicit_path_if_already_accessible_to_agent", "analysis_type": "anomaly_detection"}}` (Other parameters might include timeframes, specific keywords, container IDs, etc., based on the underlying tools available to the Log AI agent).
+*   **Input (Typical):** The log data itself (often referenced as an output from a previous `filesystem` step if it needed reading, or a path if the LogAI agent can access it directly, or container ID for Docker logs) and a clear description of the analysis task.
+*   **Output (Typical):** Structured results of the analysis, such as a list of anomalies, clustered log entries, statistical summaries, markdown reports, list of Docker containers, or streamed Docker logs. These are typically presented in new notebook cells.
+*   **Example Task Description:** "Analyze the log data from step_1 (which read 'weblog.csv') to find anomalies related to HTTP 500 errors and summarize them." or "List all currently running Docker containers." or "Tail the logs of the Docker container named 'web-server-prod'."
 
 **Leveraging GitHub and Filesystem for Query Understanding:**
 Before finalizing a plan, consider if the user's query could be better understood or contextualized by first using GitHub tools (e.g., to check file existence, browse a repository structure) or Filesystem tools (e.g., to verify local paths, list relevant project files). If such preliminary exploration can clarify the query or identify key entities (files, repositories, etc.), you are encouraged to include an initial step in your plan that uses `github` or `filesystem` step types for this reconnaissance. This can lead to a more accurate and effective overall investigation plan.
@@ -218,7 +219,7 @@ For every step you create (regardless of `step_type`), ensure the `description` 
   For each step in your plan, define:
 
   • step_id: A unique identifier (use S1, S2, etc.)
-  • step_type: Choose the *primary* data source this phase will use ("log_ai", "github", "filesystem", "python", "media", "code_index_query", or "markdown" for analysis/decision steps). Refer to "Agent Capabilities Reference".
+  • step_type: Choose the *primary* data source this phase will use ("log_ai", "github", "filesystem", "python", "media_timeline", "code_index_query", or "markdown" for analysis/decision steps). Refer to "Agent Capabilities Reference".
   • category: Choose the *primary* category for this step ("PHASE" or "DECISION"). Always "phase" here.
   • description: Instructions for the specialized agent that will:
     - State precisely what question this step answers (relating to the overall goal derived from the history)

@@ -868,7 +868,8 @@ class ConnectionManager:
                 docker_args = [
                     "run",
                     "--rm",
-                    "-i",  # attach STDIN for stdio transport
+                    "-i",  # attach STDIN for stdio transport,
+                    "--volume=/var/run/docker.sock:/var/run/docker.sock",
                 ]
                 
                 # Add volume mount if SHERLOG_HOST_FS_ROOT is set

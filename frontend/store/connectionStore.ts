@@ -327,7 +327,10 @@ export const useConnectionStore = create<ConnectionState>()(
       }),
       {
         name: "connection-store",
-        partialize: (state) => ({}), // Don't persist any state
+        partialize: (state) => ({
+          toolDefinitions: state.toolDefinitions,
+          toolLoadingStatus: state.toolLoadingStatus,
+        }), // Persist tool definitions and their loading statuses
       },
     ),
   ),

@@ -211,6 +211,25 @@ export const useCanvasStore = create<NotebookState>()(
 
         // Handle cell update from WebSocket
         handleCellUpdate: (cellData) => {
+          // Defensive check: Ensure the cell update is for the active notebook
+          if (cellData.notebook_id && cellData.notebook_id !== get().activeNotebookId) {
+            console.warn(
+              `[CanvasStore] Received cell_update for cell ${cellData.id} (event notebook_id: ${cellData.notebook_id}) ` +
+              `that does not match active notebook ${get().activeNotebookId}. Ignoring.`
+            );
+            return;
+          }
+          
+          // If the update indicates the cell is deleted, filter it out directly.
+          // Ensure cellData is properly typed, assuming it can have a 'deleted' property.
+          if ((cellData as any).deleted === true) { 
+            console.log(`🔧 Cell ${(cellData as any).id} marked as deleted via WebSocket, removing from store.`);
+            set((state) => ({
+              cells: state.cells.filter((cell) => cell.id !== (cellData as any).id),
+            }));
+            return; // Stop further processing for this cell
+          }
+
           // Utility function for shallow comparison (top-level keys only)
           const shallowEqual = (objA: any, objB: any) => {
             if (objA === objB) return true;
@@ -241,11 +260,11 @@ export const useCanvasStore = create<NotebookState>()(
           )
 
           // Create a new cells array to ensure reference change
-          const updatedCells = [...currentCells]
-          const index = updatedCells.findIndex((c) => c.id === cellData.id)
+          const index = currentCells.findIndex((c) => c.id === cellData.id) // Find in a non-mutated array
           console.log("🔧 Found cell at index:", index)
 
           if (index >= 0) {
+            const updatedCells = [...currentCells]; // Create a new array for modification if cell found
             // Merge while ignoring undefined values from partial updates so that
             // we never overwrite an existing field with `undefined`.
             const mergedCell = {
@@ -264,16 +283,21 @@ export const useCanvasStore = create<NotebookState>()(
             console.log("🔧 Updating existing cell in store:", cellData.id)
             // Merge incoming data with existing cell data after change detection
             updatedCells[index] = mergedCell;
+            set({ cells: updatedCells }); // Set the modified array
           } else {
-            console.log("🔧 Adding new cell to store:", cellData.id, cellData.type)
-            updatedCells.push({ ...cellData }) // Just push the new cell data
+            // If cellData.deleted was not true (handled above) and the cell isn't found,
+            // then it's a new cell (or an update for a cell not yet in store).
+            console.log("🔧 Adding new cell to store (or cell not found for update):", cellData.id, cellData.type)
+            // updatedCells.push({ ...cellData }) // This was problematic if updatedCells was based on a filtered list
+            set((state) => ({ cells: [...state.cells, { ...cellData }] }));
           }
 
-          console.log("🔧 New cells array length:", updatedCells.length)
-          console.log("🔧 Is cells array reference changed:", updatedCells !== currentCells)
+          // These logs might be misleading if we returned early for deletion.
+          // Consider moving them or making them conditional.
+          // console.log("🔧 New cells array length:", get().cells.length) 
+          // console.log("🔧 Is cells array reference changed:", updatedCells !== currentCells) // 'updatedCells' might not be defined here if returned early
 
-          // Update the state with the new cells array ONCE
-          set({ cells: updatedCells })
+          // set({ cells: updatedCells }) // This was the original problematic line if cell was re-added.
         },
 
         // Handle cell execution started from WebSocket

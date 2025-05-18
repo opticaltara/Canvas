@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { Cell } from "@/store/types";
 import {
   PlayIcon,
@@ -17,6 +17,22 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 import { useConnectionStore } from "@/app/store/connectionStore";
+
+// Helper for debouncing (can be moved to a shared utils file later)
+function debounce<F extends (...args: any[]) => any>(func: F, waitFor: number) {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const debounced = (...args: Parameters<F>) => {
+    if (timeout !== null) {
+      clearTimeout(timeout);
+      timeout = null;
+    }
+    timeout = setTimeout(() => func(...args), waitFor);
+  };
+  return debounced as (...args: Parameters<F>) => void;
+}
+
+// Define a stable empty object reference for default tool arguments
+const DEFAULT_EMPTY_TOOL_ARGS = {};
 
 interface LogAICellProps {
   cell: Cell;
@@ -45,14 +61,23 @@ const LogAICell: React.FC<LogAICellProps> = ({ cell, onExecute, onUpdate, onDele
 
   // --- Tool meta (Log-AI uses single tool most of the time) ---
   const [toolName, setToolName] = useState<string>(cell.tool_name || "");
-  const [toolArgs, setToolArgs] = useState<Record<string, any>>(cell.tool_arguments || {});
+  const [toolArgs, setToolArgs] = useState<Record<string, any>>(cell.tool_arguments || DEFAULT_EMPTY_TOOL_ARGS);
 
   // Keep local state in sync with parent updates (e.g. when cell metadata changes)
   useEffect(() => {
-    setToolName(cell.tool_name || "");
-    setToolArgs(cell.tool_arguments || {});
+    const currentCellToolName = cell.tool_name || "";
+    if (toolName !== currentCellToolName) {
+      setToolName(currentCellToolName);
+    }
+
+    const newCellToolArgumentsString = JSON.stringify(cell.tool_arguments || DEFAULT_EMPTY_TOOL_ARGS);
+    const currentLocalToolArgsString = JSON.stringify(toolArgs);
+
+    if (currentLocalToolArgsString !== newCellToolArgumentsString) {
+      setToolArgs(cell.tool_arguments || DEFAULT_EMPTY_TOOL_ARGS);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cell.id, cell.tool_name, cell.tool_arguments]);
+  }, [cell.id, cell.tool_name, JSON.stringify(cell.tool_arguments || DEFAULT_EMPTY_TOOL_ARGS)]);
 
   // Attempt to fetch tool definitions (may be undefined if none cached)
   const toolDefinitions = useConnectionStore((s) => s.toolDefinitions.log_ai);
@@ -69,8 +94,18 @@ const LogAICell: React.FC<LogAICellProps> = ({ cell, onExecute, onUpdate, onDele
   }, []);
 
   /* ---------------- Handlers ---------------- */
+
+  // Debounced onUpdate function
+  const debouncedOnUpdate = useCallback(
+    debounce((cellId: string, content: string, metadata?: Record<string, any>) => {
+      onUpdate(cellId, content, metadata);
+    }, 500), // 500ms debounce delay
+    [onUpdate] // Dependency: onUpdate prop
+  );
+
   const handleExecute = () => {
     // Persist description (cell.content) & arguments to metadata then run
+    // For execute, we want to send the latest state immediately, so no debounce here.
     onUpdate(cell.id, cell.content ?? "", { toolName, toolArgs });
     onExecute(cell.id);
   };
@@ -78,7 +113,8 @@ const LogAICell: React.FC<LogAICellProps> = ({ cell, onExecute, onUpdate, onDele
   const handleArgChange = (arg: string, value: any) => {
     setToolArgs((prev) => {
       const upd = { ...prev, [arg]: value };
-      onUpdate(cell.id, cell.content ?? "", { toolName, toolArgs: upd });
+      // Use debounced update for arg changes
+      debouncedOnUpdate(cell.id, cell.content ?? "", { toolName, toolArgs: upd });
       return upd;
     });
   };
@@ -218,6 +254,87 @@ const LogAICell: React.FC<LogAICellProps> = ({ cell, onExecute, onUpdate, onDele
 
   const renderResultContent = () => {
     if (resultContent === null || resultContent === undefined) return <p className="text-xs text-gray-500">No result.</p>;
+
+    // Specific handling for list_containers
+    if (toolName === "list_containers" && typeof resultContent === "string") {
+      try {
+        const lines = resultContent.trim().split('\n');
+        if (lines.length < 2) { // Header + at least one data row
+          throw new Error("Invalid table format for list_containers");
+        }
+
+        // Extract headers: "ID ... Status" -> ["ID", "...", "Status"]
+        // The "..." column is tricky. Pandas often uses it for truncated wide dataframes.
+        // We'll try to split by multiple spaces.
+        const headerLine = lines[0];
+        // Remove leading index like "0" from data lines if present
+        const dataLines = lines.slice(1).filter(line => !line.startsWith('[') && line.trim() !== ''); // Filter out summary line like "[6 rows x 4 columns]"
+
+        // Heuristic for header splitting: split by 2 or more spaces
+        const headers = headerLine.trim().split(/\s{2,}/);
+        // console.log("Parsed headers:", headers);
+
+
+        const rows = dataLines.map(line => {
+          // Attempt to parse rows based on header positions or split by multiple spaces
+          // This is a heuristic and might need refinement based on actual output variety
+          const values = line.trim().split(/\s{2,}/);
+          // console.log("Original line:", line, "Parsed values:", values);
+
+          // Remove the initial index value if present (e.g., "0 ", "1 ", etc.)
+          if (values.length > 0 && /^\d+$/.test(values[0])) {
+            return values.slice(1);
+          }
+          return values;
+        });
+        // console.log("Parsed rows:", rows);
+
+
+        if (headers.length === 0 || rows.length === 0) {
+           throw new Error("Could not parse table from list_containers output.");
+        }
+
+        return (
+          <div className="overflow-x-auto bg-white p-1.5 border border-gray-200 rounded max-h-[400px]">
+            <table className="min-w-full text-xs border-collapse">
+              <thead>
+                <tr className="bg-gray-50">
+                  {headers.map((header, index) => (
+                    <th key={index} className="p-1.5 border border-gray-300 text-left font-medium text-gray-700">
+                      {header.trim()}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, rowIndex) => (
+                  <tr key={rowIndex} className="hover:bg-gray-100">
+                    {row.map((cellValue, cellIndex) => (
+                      <td key={cellIndex} className="p-1.5 border border-gray-300 text-gray-800">
+                        {cellValue.trim()}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        );
+      } catch (e: any) {
+        console.error("Error parsing list_containers output:", e);
+        return (
+          <div className="p-2 bg-yellow-50 text-yellow-700 border border-yellow-200 rounded text-xs">
+            <p>Could not display table: {e.message}</p>
+            <p className="mt-1">Raw output:</p>
+            <pre className="text-xs whitespace-pre-wrap break-words font-mono bg-white p-1.5 border border-gray-200 rounded max-h-[400px] overflow-auto mt-1">
+              {resultContent}
+            </pre>
+          </div>
+        );
+      }
+    }
+
+    // Default rendering for other tools or non-string results
     return (
       <pre className="text-xs whitespace-pre-wrap break-words font-mono bg-white p-1.5 border border-gray-200 rounded max-h-[400px] overflow-auto">
         {typeof resultContent === "string" ? resultContent : JSON.stringify(resultContent, null, 2)}

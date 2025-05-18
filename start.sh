@@ -70,7 +70,7 @@ docker-compose rm -f
 
 # Build all services with no cache to ensure latest changes
 echo "Building Docker images..."
-docker-compose build --no-cache
+docker-compose build
 
 # Start services in detached mode, force recreate
 echo "Starting containers..."
