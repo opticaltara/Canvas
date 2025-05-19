@@ -44,7 +44,7 @@ Getting from clone to a fully working instance only requires two steps: create a
    cd sherlog-canvas
    ```
 
-2. **Create a `.env` file** (minimum required configuration)
+2. **Clone the `.env.example` file and rename to  `.env` file** (minimum required configuration)
 
    ```env
    # .env – minimal setup
