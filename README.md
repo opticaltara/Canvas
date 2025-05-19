@@ -1,6 +1,6 @@
 # Sherlog Canvas (Alpha)
 
-**Note**: Sherlog is still in development and there might be quite a few kinks and issues. We are actively working on fixing those. Whenever you find an problem, feel free to create an issue and we will try to resolve ASAP
+**Note: Sherlog is still in development and there might be quite a few kinks and issues. We are actively working on fixing those. Whenever you find an problem, feel free to create an issue and we will try to resolve ASAP**
 
 Sherlog Canvas is a reactive jupyter notebook like interface for software engineering investigation tasks, focused on debugging, log analysis, metric analysis, and database queries. It integrates advanced AI capabilities to assist with complex investigations.
 
@@ -11,6 +11,8 @@ Sherlog Canvas is a reactive jupyter notebook like interface for software engine
 - **Multiple Data Source Integration**: Connect to Log sources, github, filesystem, code repos, metric sources, docker etc via the power of MCP
 - **Specialized Cell Types**: SQL, log queries, metrics, Python code, and more
 - **Collaborative Investigation Environment**: AI and users work together to solve problems
+
+Demo - 
 
 ## Supported Cell Types
 
