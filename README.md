@@ -14,6 +14,10 @@ Sherlog Canvas is a reactive jupyter notebook like interface for software engine
 
 Demo - 
 
+https://github.com/user-attachments/assets/c04bd260-452b-442f-b19b-66dba6bcca19
+
+
+
 ## Supported Cell Types
 
 | Cell Type | Purpose |
