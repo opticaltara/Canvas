@@ -69,6 +69,32 @@ RUN PATH=/root/.local/bin:$PATH /root/.local/bin/uv pip install --system --no-ca
 # immediately, failing the build if the sub-command is missing.
 RUN PATH=/root/.local/bin:$PATH uvx mcp-server-qdrant --help >/dev/null 2>&1
 
+# ------------------------------------------------------------
+# Install Sherlog Log Analysis MCP (Python/FastMCP)
+# ------------------------------------------------------------
+# We keep the approach consistent with other Python-based MCP servers:
+# 1. Clone the repository under /opt
+# 2. Use **uv** to install the dependencies listed in the script header
+#    globally into the system environment so that the runtime can launch
+#    the server via `uv run --script` or similar without having to
+#    resolve packages at first boot.
+# NOTE: The script embeds its requirements, but pre-installing them here
+#       speeds up container start-up and prevents runtime network access.
+RUN PATH=/root/.local/bin:$PATH git clone https://github.com/GetSherlog/mcp-sherlog-log-analysis.git /opt/mcp-sherlog-log-analysis \
+ && cd /opt/mcp-sherlog-log-analysis \
+ && PATH=/root/.local/bin:$PATH /root/.local/bin/uv pip install --system --no-cache \
+        logai \
+        mcp \
+        fastmcp \
+        pandas \
+        numpy \
+        scikit-learn \
+        nltk \
+        Cython \
+        requests \
+        'scipy<2.0' \
+        gensim
+
 # Copy requirements first for better caching
 COPY requirements.txt .
 

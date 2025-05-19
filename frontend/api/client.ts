@@ -56,7 +56,26 @@ const cells = {
   },
 
   update: async (notebookId: string, cellId: string, data: any) => {
-    const response = await apiClient.put(`/notebooks/${notebookId}/cells/${cellId}`, data)
+    // data is expected to be { content?: string, metadata?: { toolName?: string, toolArgs?: Record<string, any> } }
+    const payload: Record<string, any> = {};
+
+    if (data.content !== undefined) {
+      payload.content = data.content;
+    }
+    if (data.metadata?.toolName !== undefined) {
+      payload.tool_name = data.metadata.toolName;
+    }
+    if (data.metadata?.toolArgs !== undefined) {
+      payload.tool_arguments = data.metadata.toolArgs;
+    }
+    // If there are other properties in data.metadata that should go into cell_metadata:
+    // const { toolName, toolArgs, ...otherMetadata } = data.metadata || {};
+    // if (Object.keys(otherMetadata).length > 0) {
+    //   payload.cell_metadata = otherMetadata;
+    // }
+
+
+    const response = await apiClient.put(`/notebooks/${notebookId}/cells/${cellId}`, payload)
     return response.data
   },
 

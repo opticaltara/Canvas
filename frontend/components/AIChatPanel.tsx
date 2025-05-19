@@ -101,10 +101,9 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
         // Map InvestigationEvent CellCreationParams to Zustand's Cell format
         // Using handleCellUpdate which should handle adding new cells
         const newCellData = {
-            id: params.id,
-            notebook_id: notebookId, 
+            ...params, // Spread all params from the event first
+            notebook_id: notebookId, // Ensure notebookId from props is included/overrides
             type: params.type as any, // Cast needed if types mismatch slightly
-            content: params.content,
             status: params.status as any,
             result: params.result,
             error: params.error,
@@ -120,18 +119,14 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
         console.log("[AIChatPanel onUpdateCell using Zustand] Updating cell:", cellId, updates);
         // Use handleCellUpdate for updates as well, providing a partial Cell object
         // Construct a Cell-like object with the id and the updates
-        const partialCellData = {
+        const cellDataForStore = {
             id: cellId,
-            ...updates,
-            // Ensure type compatibility if handleCellUpdate expects a full Cell
-            // For example, add placeholders or fetch existing cell if needed.
-            // However, handleCellUpdate in the store seems designed to merge.
-             updated_at: new Date().toISOString(), // Ensure timestamp is updated
-        } as Partial<Cell> & { id: string }; // Type assertion to guide TS
+            notebook_id: notebookId, // <--- ADD THIS (notebookId is a prop)
+            ...updates, // Spread updates from the event
+            updated_at: new Date().toISOString(), // Ensure timestamp is updated
+        } as Cell; // Cast to Cell, assuming other necessary fields are in 'updates' or handled by store's merge
         
-        // Cast to 'any' temporarily if type issues persist with handleCellUpdate signature
-        // handleCellUpdate(partialCellData as any);
-        handleCellUpdate(partialCellData as Cell); // Try casting to full Cell, assuming merge logic handles missing fields
+        handleCellUpdate(cellDataForStore); // Call the store's handler
     },
     onError: (message) => {
         console.error("[AIChatPanel Investigation Error]:", message);
@@ -1079,7 +1074,7 @@ export default function AIChatPanel({ isOpen, onToggle, notebookId }: AIChatPane
                 type="file"
                 ref={fileInputRef}
                 onChange={handleFileChange}
-                accept=".csv" // Accept only CSV files for now
+                accept=".csv,text/csv" // Broaden filter to show CSVs in all OS file pickers
                 className="hidden"
               />
               <Button

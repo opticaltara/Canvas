@@ -17,8 +17,9 @@ export function useNotebook(notebookId: string) {
 
   // WebSocket onMessage handler
   const handleWebSocketMessage = useCallback((message: WebSocketMessage) => {
+    console.log(`[useNotebook ${notebookId}] handleWebSocketMessage received:`, message.type, message.data);
     setLatestMessage(message);
-  }, []);
+  }, [notebookId]);
 
   // WebSocket connection for real-time updates
   const { status: wsStatus } = useWebSocket(notebookId, handleWebSocketMessage)
@@ -73,6 +74,7 @@ export function useNotebook(notebookId: string) {
 
   // Handle cell update from WebSocket
   const handleCellUpdate = useCallback((cellData: Cell) => {
+    console.log(`[useNotebook ${notebookId}] handleCellUpdate for cell ID:`, cellData.id, "New status:", cellData.status, "Result:", cellData.result ? "Exists" : "None");
     setCells((prevCells) => {
       const index = prevCells.findIndex((c) => c.id === cellData.id)
       if (index >= 0) {
@@ -87,17 +89,24 @@ export function useNotebook(notebookId: string) {
 
   // Handle cell execution started from WebSocket
   const handleCellExecutionStarted = useCallback((cellId: string) => {
-    setExecutingCells((prev) => new Set(prev).add(cellId))
-  }, [])
+    console.log(`[useNotebook ${notebookId}] handleCellExecutionStarted for cell ID:`, cellId);
+    setExecutingCells((prev) => {
+      const newSet = new Set(prev).add(cellId);
+      console.log(`[useNotebook ${notebookId}] executingCells updated (added ${cellId}):`, Array.from(newSet));
+      return newSet;
+    });
+  }, [notebookId])
 
   // Handle cell execution completed from WebSocket
   const handleCellExecutionCompleted = useCallback((cellId: string) => {
+    console.log(`[useNotebook ${notebookId}] handleCellExecutionCompleted for cell ID:`, cellId);
     setExecutingCells((prev) => {
       const updated = new Set(prev)
       updated.delete(cellId)
+      console.log(`[useNotebook ${notebookId}] executingCells updated (deleted ${cellId}):`, Array.from(updated));
       return updated
     })
-  }, [])
+  }, [notebookId])
 
   // Handle notebook update from WebSocket
   const handleNotebookUpdate = useCallback((notebookData: Notebook) => {
@@ -107,37 +116,52 @@ export function useNotebook(notebookId: string) {
   // Execute a cell
   const executeCell = useCallback(
     async (cellId: string) => {
-      if (!notebookId) return
+      if (!notebookId) return;
+      console.log(`[useNotebook ${notebookId}] executeCell called for cell ID:`, cellId);
 
       try {
-        setExecutingCells((prev) => new Set(prev).add(cellId))
-        await api.cells.execute(notebookId, cellId)
-        // The execution status will be updated via WebSocket
-      } catch (err) {
-        console.error("Failed to execute cell:", err)
+        // Optimistically set executing state, though WS should confirm
         setExecutingCells((prev) => {
-          const updated = new Set(prev)
-          updated.delete(cellId)
-          return updated
-        })
+          const newSet = new Set(prev).add(cellId);
+          console.log(`[useNotebook ${notebookId}] executingCells updated (optimistically added ${cellId} for executeCell):`, Array.from(newSet));
+          return newSet;
+        });
+        await api.cells.execute(notebookId, cellId);
+        console.log(`[useNotebook ${notebookId}] api.cells.execute successful for cell ID:`, cellId);
+        // The execution status will be updated via WebSocket (cell_execution_started, cell_update with status QUEUED)
+      } catch (err) {
+        console.error(`[useNotebook ${notebookId}] Failed to execute cell ${cellId}:`, err);
+        setExecutingCells((prev) => {
+          const updated = new Set(prev);
+          updated.delete(cellId);
+          console.log(`[useNotebook ${notebookId}] executingCells updated (removed ${cellId} due to executeCell error):`, Array.from(updated));
+          return updated;
+        });
+        // Optionally, update cell state to error locally here too, or rely on WS
       }
     },
     [notebookId],
-  )
+  );
 
   // Update cell content
   const updateCell = useCallback(
     async (cellId: string, content: string, metadata?: Record<string, any>) => {
-      if (!notebookId) return
-
-      try {
-        await api.cells.update(notebookId, cellId, { content, metadata })
-      } catch (err) {
-        console.error("Failed to update cell:", err)
-      }
+      // TEMPORARY DEBUGGING: Log a unique error to confirm this code path is hit
+      console.error(`[USE_NOTEBOOK_UPDATE_CELL_DEBUG_CLINE] THIS IS THE REAL updateCell in useNotebook.ts for cell ID: ${cellId}. Notebook ID: ${notebookId}`);
+      
+      // Original code (commented out for now):
+      // if (!notebookId) return;
+      // console.log(`[useNotebook ${notebookId}] updateCell called for cell ID:`, cellId, "Content length:", content.length, "Metadata:", metadata);
+      // try {
+      //   await api.cells.update(notebookId, cellId, { content, metadata });
+      //   console.log(`[useNotebook ${notebookId}] api.cells.update successful for cell ID:`, cellId);
+      //   // Cell state will be updated via WebSocket (cell_update)
+      // } catch (err) {
+      //   console.error(`[useNotebook ${notebookId}] Failed to update cell ${cellId}:`, err);
+      // }
     },
     [notebookId],
-  )
+  );
 
   // Delete a cell
   const deleteCell = useCallback(

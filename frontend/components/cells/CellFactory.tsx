@@ -11,6 +11,7 @@ const FileSystemCell = dynamic(() => import('./FileSystemCell'), { loading: () =
 const PythonCell = dynamic(() => import('./PythonCell'), { loading: () => <p>Loading Python Cell...</p> });
 const MediaTimelineCell = dynamic(() => import('./MediaTimelineCell'), { loading: () => <p>Loading Media Timeline...</p> });
 const CodeIndexQueryCell = dynamic(() => import('./CodeIndexQueryCell'), { loading: () => <p>Loading Code Index Query Cell...</p> });
+const LogAICell = dynamic(() => import('./LogAICell'), { loading: () => <p>Loading Log-AI Cell...</p> });
 
 interface CellFactoryProps {
   cell: Cell
@@ -81,6 +82,16 @@ const CellFactory: React.FC<CellFactoryProps> = ({ cell, onExecute, onUpdate, on
           cell={cell}
           // Add other props like onDelete if needed, similar to SummarizationCell
           // For now, keeping it simple as it's primarily for display
+        />
+      )
+    case "log_ai":
+      return (
+        <LogAICell
+          cell={cell}
+          onExecute={onExecute}
+          onUpdate={onUpdate}
+          onDelete={onDelete}
+          isExecuting={isExecuting}
         />
       )
     default:

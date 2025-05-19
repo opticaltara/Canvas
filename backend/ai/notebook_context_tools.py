@@ -25,6 +25,7 @@ from uuid import UUID
 from enum import Enum
 
 from pydantic import BaseModel, Field, UUID4
+import sqlalchemy as sa
 
 from backend.db.database import get_db_session
 from backend.db.models import UploadedFile
@@ -187,16 +188,17 @@ def create_notebook_context_tools(
                 )
             ).scalars().all()
 
-            return [
-                {
+            result_list = []
+            for row in rows:
+                created_at_val = row.created_at
+                result_list.append({
                     "id": str(row.id),
                     "filename": row.filename,
                     "filepath": row.filepath,
                     "size": row.size,
-                    "created_at": row.created_at.isoformat() if row.created_at else None,
-                }
-                for row in rows
-            ]
+                    "created_at": created_at_val.isoformat() if created_at_val is not None else None,
+                })
+            return result_list
 
     # ---------------------------------------------------------------------
     # get_uploaded_file_path implementation

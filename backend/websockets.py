@@ -1,7 +1,7 @@
 import asyncio
 import json
 from typing import Dict, Set, Optional
-from uuid import UUID
+from uuid import UUID, uuid4 # Import uuid4
 
 from pydantic import BaseModel # Added for Pydantic models
 
@@ -56,17 +56,50 @@ class WebSocketManager:
                 extra={'notebook_id': str(notebook_id)}
             )
 
-    async def broadcast(self, notebook_id: UUID, message: Dict):
+    async def broadcast(self, notebook_id: UUID, message_payload: Dict): # Renamed message to message_payload
         """Publish a message to the Redis channel for the specific notebook."""
         if not self.redis_client:
             self.logger.error("Redis client not available, cannot broadcast message via Pub/Sub.")
             return
 
+        # Ensure message_payload is a dictionary (it should be from model_dump)
+        if not isinstance(message_payload, dict):
+            self.logger.error(f"Broadcast message_payload is not a dict: {type(message_payload)}. Skipping broadcast.")
+            return
+
+        # Add a unique message ID to the envelope
+        # The original message_payload (e.g., cell data) is wrapped.
+        # The frontend currently expects the raw cell data directly in `message.data` for `cell_update`.
+        # So, the `message_payload` itself should be what's in `event.data`.
+        # The `type` (e.g., "cell_update") is usually part of the `message_payload` already.
+        # Let's ensure the structure sent to Redis is what the frontend expects, plus our debug ID.
+        
+        # The frontend's useWebSocket.ts expects: { type: string, [key: string]: any }
+        # And useInvestigationEvents.ts expects: { type: "cell_update", data: CellData }
+        # The notify_callback in NotebookManager sends the CellData directly.
+        # So, we need to wrap this CellData.
+
+        # Let's assume the `message_payload` IS the `data` part of a "cell_update" event.
+        # The `type` like "cell_update" is added by the caller of notify_callback or needs to be.
+        # NotebookManager calls: self.notify_callback(notebook_id, updated_cell_model.model_dump(mode='json'))
+        # This means `message_payload` is the cell data.
+        # The WebSocketManager should construct the full event structure.
+
+        # Let's assume the `message_payload` is the *entire* message including its type.
+        # Example: message_payload = {"type": "cell_update", "data": {...cell_data...}}
+        # If not, this needs adjustment where notify_callback is called.
+        # For now, let's assume `message_payload` is the full event.
+        
+        event_to_send = {
+            **message_payload, # Spread the original event (e.g. {"type": "cell_update", "data": ...})
+            "ws_message_id": str(uuid4()) # Add our unique ID
+        }
+
         channel_name = self._get_channel_name(notebook_id)
-        message_json = json.dumps(message)
+        message_json = json.dumps(event_to_send)
         try:
             await self.redis_client.publish(channel_name, message_json)
-            self.logger.debug(f"Published message to Redis channel '{channel_name}' for notebook {notebook_id}")
+            self.logger.info(f"Published message to Redis channel '{channel_name}' for notebook {notebook_id} with ws_message_id: {event_to_send['ws_message_id']}")
         except redis.RedisError as e:
             self.logger.error(f"Failed to publish message to Redis channel '{channel_name}': {e}", exc_info=True)
         except Exception as e:

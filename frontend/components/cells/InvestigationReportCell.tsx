@@ -15,7 +15,6 @@ import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import type { Cell } from '@/store/types'; // Import base Cell type
 import type { InvestigationReportData, Finding, CodeReference, RelatedItem } from '@/hooks/useInvestigationEvents'; // Import report-specific types
 import { useCanvasStore } from '@/store/canvasStore';
-import { useWebSocket, type WebSocketMessage } from '@/hooks/useWebSocket'; // Added for sending messages & WebSocketMessage type
 import { v4 as uuidv4 } from 'uuid'; // Added for generating session_id
 
 interface InvestigationReportCellProps {
@@ -212,67 +211,11 @@ const InvestigationReportCell: React.FC<InvestigationReportCellProps> = ({ cell,
   console.log(`[InvestigationReportCell ${cell.id}] Render with cell prop:`, cell);
 
   const notebookId = cell.notebook_id; // Placed notebookId definition before its use in useCallback
-  const { sendSuggestedStepToChat, isSendingChatMessage, updateCell } = useCanvasStore();
+  const { sendSuggestedStepToChat, isSendingChatMessage } = useCanvasStore();
 
-  const handleWebSocketMessage = React.useCallback((message: WebSocketMessage) => {
-    console.log(`[InvestigationReportCell ${cell.id}] WebSocket message received:`, message);
+  const reportData = cell.result as InvestigationReportData | null;
 
-    // Assumption: Define the expected message type for cell updates.
-    // This should ideally come from a shared constants/types file.
-    const CELL_UPDATE_EVENT_TYPE = "cell_update"; // Example type, adjust if different
-
-    if (message.type === CELL_UPDATE_EVENT_TYPE && message.payload) {
-      const {
-        notebook_id: msgNotebookId,
-        cell_id: msgCellId,
-        // Spread the rest of the payload as potential updates to the cell
-        // This assumes the payload structure aligns with Partial<Cell>
-        ...cellUpdates 
-      } = message.payload as any; // Use 'as any' for now, or define a more specific type for payload
-
-      // Check if the update is for the current cell and its notebook
-      if (msgCellId === cell.id && msgNotebookId === notebookId) {
-        console.log(`[InvestigationReportCell ${cell.id}] Received relevant cell update from WebSocket:`, cellUpdates);
-        
-        // Ensure `cellUpdates` is treated as Partial<Cell>
-        // The backend should send updates like { status: 'completed', result: { ... } }
-        // or { error: "some error message" }
-        if (Object.keys(cellUpdates).length > 0) {
-          updateCell(notebookId as string, cell.id, cellUpdates as Partial<Cell>);
-        }
-      }
-    }
-    // Future: Handle other specific message types relevant to InvestigationReportCell if any.
-  }, [cell.id, notebookId, updateCell]); // Added notebookId and updateCell to dependencies
-
-  // Pass notebookId (or empty string if undefined) and the message handler to useWebSocket
-  // Destructure sendMessage and rename status to webSocketStatus to avoid conflict with cell.status
-  const { sendMessage, status: webSocketStatus } = useWebSocket(notebookId || '', handleWebSocketMessage);
-  const report = cell.result?.content as InvestigationReportData | undefined;
-
-  // Define message type constant locally, ideally this would come from a shared types file
-  const RERUN_INVESTIGATION_CELL = "rerun_investigation_cell";
-
-  const handleRerun = () => {
-    if (!cell.notebook_id) {
-      console.error("Notebook ID is missing, cannot rerun cell:", cell.id);
-      // Optionally show a toast or alert to the user
-      return;
-    }
-    const sessionId = uuidv4();
-    const payload = {
-        notebook_id: cell.notebook_id, // notebook_id is confirmed to be a string here
-        cell_id: cell.id,
-        session_id: sessionId,
-    };
-    console.log(`[InvestigationReportCell ${cell.id}] Sending rerun message. Type: ${RERUN_INVESTIGATION_CELL}, Payload:`, payload);
-    sendMessage(RERUN_INVESTIGATION_CELL, payload); // Use sendMessage with type and payload
-    // Optimistically update cell status in the store to provide immediate feedback
-    // The backend will send further status updates.
-    updateCell(cell.notebook_id, cell.id, { status: 'running' }); 
-  };
-
-  if (!report) {
+  if (!reportData) {
     // Handle case where result or content is missing or not the expected type
     return (
       <div className="border rounded-md overflow-hidden mb-3 mx-8 bg-yellow-50 border-yellow-200 p-3 text-xs text-yellow-800">
@@ -297,7 +240,7 @@ const InvestigationReportCell: React.FC<InvestigationReportCellProps> = ({ cell,
       <div className="bg-indigo-100 border-b border-indigo-200 p-3 flex justify-between items-center">
         <div className="flex items-center">
            <FileTextIcon className="h-4 w-4 mr-2 text-indigo-700 flex-shrink-0" />
-           <span className="font-medium text-sm text-indigo-800">{report.title || "Investigation Report"}</span>
+           <span className="font-medium text-sm text-indigo-800">{reportData.title || "Investigation Report"}</span>
         </div>
         {/* ADD Delete Button */}
         <div className="flex items-center space-x-1.5">
@@ -308,7 +251,9 @@ const InvestigationReportCell: React.FC<InvestigationReportCellProps> = ({ cell,
                             size="sm"
                             variant="ghost"
                             className="text-gray-500 hover:bg-indigo-100 hover:text-indigo-700 h-7 w-7 px-0"
-                            onClick={handleRerun}
+                            onClick={() => {
+                                // Implement rerun logic here
+                            }}
                             disabled={cell.status === 'running' || cell.status === 'queued'} // Disable if already running/queued
                         >
                             <RefreshCwIcon className={`h-4 w-4 ${ (cell.status === 'running' || cell.status === 'queued') ? 'animate-spin' : ''}`} />
@@ -340,12 +285,12 @@ const InvestigationReportCell: React.FC<InvestigationReportCellProps> = ({ cell,
       {/* Content */}
       <div className="p-4 bg-white">
         {/* Display overall error if report generation failed */}
-        {report.error && (
+        {reportData.error && (
             <Alert variant="destructive" className="mb-4">
                 <TriangleAlertIcon className="h-4 w-4" />
                 <AlertTitle>Report Generation Error</AlertTitle>
                 <AlertDescription className="text-xs">
-                    {report.error}
+                    {reportData.error}
                 </AlertDescription>
             </Alert>
         )}
@@ -355,73 +300,73 @@ const InvestigationReportCell: React.FC<InvestigationReportCellProps> = ({ cell,
           <CardContent className="p-4 space-y-3">
             <div className="flex justify-between items-start flex-wrap gap-3">
               <p className="text-sm font-medium text-gray-700 flex items-center">
-                <SearchIcon className="h-4 w-4 mr-1.5 text-gray-500"/>Original Query: <span className="ml-1 font-normal text-gray-900">{report.query}</span>
+                <SearchIcon className="h-4 w-4 mr-1.5 text-gray-500"/>Original Query: <span className="ml-1 font-normal text-gray-900">{reportData.query}</span>
               </p>
-              {report.estimated_severity && (
+              {reportData.estimated_severity && (
                 <div className="flex items-center space-x-2">
                   <BarChartIcon className="h-4 w-4 text-gray-500" />
                    <span className="text-sm font-medium text-gray-700">Severity:</span>
-                   {getSeverityBadge(report.estimated_severity)}
+                   {getSeverityBadge(reportData.estimated_severity)}
                 </div>
               )}
             </div>
-            {report.status && (
+            {reportData.status && (
               <p className="text-xs text-gray-600 flex items-center">
-                <InfoIcon className="h-3 w-3 mr-1.5 text-gray-400"/>Status: <span className="ml-1 font-medium text-gray-800">{report.status}</span>
-                {report.status_reason && <span className="ml-1 text-gray-500">({report.status_reason})</span>}
+                <InfoIcon className="h-3 w-3 mr-1.5 text-gray-400"/>Status: <span className="ml-1 font-medium text-gray-800">{reportData.status}</span>
+                {reportData.status_reason && <span className="ml-1 text-gray-500">({reportData.status_reason})</span>}
               </p>
             )}
-            {report.tags && report.tags.length > 0 && (
+            {reportData.tags && reportData.tags.length > 0 && (
               <div className="flex flex-wrap items-center gap-1 pt-1">
                 <TagIcon className="h-3.5 w-3.5 mr-1 text-gray-400"/>
-                {report.tags.map((tag, i) => <Badge key={i} variant="secondary" className="text-xs font-normal">{tag}</Badge>)}
+                {reportData.tags.map((tag, i) => <Badge key={i} variant="secondary" className="text-xs font-normal">{tag}</Badge>)}
               </div>
             )}
           </CardContent>
         </Card>
 
         {/* Core Findings: Issue Summary & Root Cause */}
-        <RenderFinding finding={report.issue_summary} title="Issue Summary" defaultOpen={true} icon={TargetIcon} />
-        <RenderFinding finding={report.root_cause} title="Root Cause Analysis" confidence={report.root_cause_confidence} defaultOpen={true} icon={WrenchIcon} />
+        <RenderFinding finding={reportData.issue_summary} title="Issue Summary" defaultOpen={true} icon={TargetIcon} />
+        <RenderFinding finding={reportData.root_cause} title="Root Cause Analysis" confidence={reportData.root_cause_confidence} defaultOpen={true} icon={WrenchIcon} />
 
         {/* Key Components */}
-        {report.key_components && report.key_components.length > 0 && (
+        {reportData.key_components && reportData.key_components.length > 0 && (
           <Card className="mt-4 shadow-sm">
             <CardHeader className="p-3">
               <CardTitle className="text-base flex items-center"><CodeIcon className="h-4 w-4 mr-2" />Key Code Components</CardTitle>
             </CardHeader>
             <CardContent className="p-3 grid grid-cols-1 md:grid-cols-2 gap-4">
-              {report.key_components.map((comp, i) => <RenderCodeReference key={i} reference={comp} />)}
+              {reportData.key_components.map((comp, i) => <RenderCodeReference key={i} reference={comp} />)}
             </CardContent>
           </Card>
         )}
 
         {/* Related Items */}
-        <RenderRelatedItems items={report.related_items} />
+        <RenderRelatedItems items={reportData.related_items} />
 
         {/* Proposed Fix */}
-        {report.proposed_fix && (
+        {reportData.proposed_fix && (
           <div className="mt-4">
-             <RenderFinding finding={report.proposed_fix} title="Proposed Fix / Solution" confidence={report.proposed_fix_confidence} icon={LightbulbIcon} />
+             <RenderFinding finding={reportData.proposed_fix} title="Proposed Fix / Solution" confidence={reportData.proposed_fix_confidence} icon={LightbulbIcon} />
           </div>
         )}
 
         {/* Affected Context */}
-        {report.affected_context && (
+        {reportData.affected_context && (
             <div className="mt-4">
-                <RenderFinding finding={report.affected_context} title="Affected Context" icon={UsersIcon} />
+                <RenderFinding finding={reportData.affected_context} title="Affected Context" icon={UsersIcon} />
             </div>
         )}
 
         {/* Suggested Next Steps */}
-        {report.suggested_next_steps && report.suggested_next_steps.length > 0 && (
+        {reportData.suggested_next_steps && reportData.suggested_next_steps.length > 0 && (
           <Card className="mt-4 shadow-sm">
             <CardHeader className="p-3">
               <CardTitle className="text-base flex items-center"><HelpCircleIcon className="h-4 w-4 mr-2" />Suggested Next Steps</CardTitle>
             </CardHeader>
             <CardContent className="p-3">
               <ul className="list-none space-y-1.5 text-xs text-gray-700">
-                {report.suggested_next_steps.map((step, i) => (
+                {reportData.suggested_next_steps.map((step, i) => (
                   <li key={i}>
                     <button
                       onClick={() => sendSuggestedStepToChat(step)}

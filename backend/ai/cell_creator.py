@@ -398,3 +398,59 @@ class CellCreator:
             except Exception as e:
                 ai_logger.warning(f"Failed to convert tool result for {tool_name} to string: {e}")
                 return f"Error converting result to string: {e}"
+
+    async def create_log_ai_tool_cell(
+        self,
+        cell_tools: NotebookCellTools,
+        step: InvestigationStepModel,
+        tool_event: ToolSuccessEvent,
+        dependency_cell_ids: List[UUID],
+        session_id: str,
+    ) -> Tuple[Optional[UUID], Optional[CreateCellParams], Optional[str]]:
+        """Create a notebook cell displaying the result of a Log-AI MCP tool call."""
+
+        tool_name = tool_event.tool_name or "log_ai_tool"
+
+        # Truncate tool result for inline markdown preview
+        preview_str = str(tool_event.tool_result)
+        if len(preview_str) > 500:
+            preview_str = preview_str[:500] + " …"
+
+        cell_content = (
+            f"## Log-AI tool result: `{tool_name}`\n\n"
+            f"### Description\n{step.description}\n\n"
+            "<details><summary>Preview (truncated)</summary>\n\n"
+            f"```json\n{preview_str}\n```\n\n"
+            "</details>"
+        )
+
+        cell_metadata = {
+            "session_id": session_id,
+            "original_plan_step_id": step.step_id,
+            "external_tool_call_id": tool_event.tool_call_id,
+        }
+
+        serializable_result = self._serialize_tool_result(tool_event.tool_result, tool_name)
+
+        cell_params = CreateCellParams(
+            notebook_id=self.notebook_id,
+            cell_type=CellType.LOG_AI,
+            content=cell_content,
+            metadata=cell_metadata,
+            dependencies=dependency_cell_ids,
+            tool_call_id=uuid4(),
+            tool_name=tool_name,
+            tool_arguments=tool_event.tool_args or {},
+            result=CellResult(content=serializable_result, error=None, execution_time=0.0),
+            status=CellStatus.SUCCESS,
+        )
+
+        try:
+            creation_res = await cell_tools.create_cell(params=cell_params)
+            cell_id_str = creation_res.get("cell_id")
+            if cell_id_str:
+                return UUID(cell_id_str), cell_params, None
+            return None, cell_params, "Cell creation returned no cell_id"
+        except Exception as exc:
+            ai_logger.error("Failed to create Log-AI cell for step %s: %s", step.step_id, exc, exc_info=True)
+            return None, cell_params, str(exc)

@@ -3,7 +3,7 @@ Agent implementations for different step types.
 """
 
 import logging
-from typing import Any, Dict, AsyncGenerator, Union, Optional, List # Added List
+from typing import Any, Dict, AsyncGenerator, Union, Optional, List, TYPE_CHECKING # Added List and TYPE_CHECKING
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 
@@ -29,7 +29,11 @@ from backend.ai.prompts.investigation_prompts import MARKDOWN_GENERATOR_SYSTEM_P
 from backend.config import get_settings
 from backend.services.notebook_manager import NotebookManager # Added import
 from backend.ai.notebook_context_tools import create_notebook_context_tools # Added import
-from backend.ai.media_agent import MediaTimelineAgent  # Add import at top with others
+
+# Type-only import to satisfy static checkers for forward reference
+if TYPE_CHECKING:
+    from backend.ai.logai_agent import LogAIAgent
+    from backend.ai.media_agent import MediaTimelineAgent
 
 ai_logger = logging.getLogger("ai")
 
@@ -363,6 +367,9 @@ class MediaTimelineStepAgent(StepAgent):
 
         description = agent_input_data
 
+        # Local import to handle potential NameError if module-level import isn't effective.
+        from backend.ai.media_agent import MediaTimelineAgent
+
         # (Re)instantiate the MediaTimelineAgent for this execution so it has correct session_id
         self.timeline_agent = MediaTimelineAgent(
             notebook_id=self.notebook_id,
@@ -493,3 +500,70 @@ class ReportStepAgent(StepAgent):
             suggested_next_steps=[],
             tags=[]
         )
+
+
+class LogAIStepAgent(StepAgent):
+    """Agent for executing Log-AI (log analysis) steps via FastMCP server."""
+
+    def __init__(self, notebook_id: str, notebook_manager: Optional[NotebookManager] = None):
+        super().__init__(notebook_id)
+        self.log_ai_generator: Optional["LogAIAgent"] = None  # lazy
+        self.notebook_manager = notebook_manager
+
+    def get_agent_type(self) -> AgentType:
+        return AgentType.LOG_AI
+
+    async def execute(
+        self,
+        step: InvestigationStepModel,
+        agent_input_data: Union[str, PythonAgentInput],  # Expecting plain description string
+        session_id: str,
+        context: Dict[str, Any],
+        db: Optional[AsyncSession] = None,  # Unused for Log-AI
+    ) -> AsyncGenerator[Union[BaseEvent, Dict[str, Any]], None]:
+        """Stream events from the underlying LogAIAgent."""
+        from backend.ai.logai_agent import LogAIAgent  # Local import
+
+        if not isinstance(agent_input_data, str):
+            raise TypeError(
+                f"LogAIStepAgent expects description string, got {type(agent_input_data)}"
+            )
+
+        # Lazy init underlying agent
+        if self.log_ai_generator is None:
+            ai_logger.info("Lazily initialising LogAIAgent for log-ai steps.")
+            self.log_ai_generator = LogAIAgent(
+                notebook_id=self.notebook_id, notebook_manager=self.notebook_manager
+            )
+
+        user_description: str = agent_input_data
+        ai_logger.info(
+            f"Processing Log-AI step {step.step_id} (session {session_id}) …"
+        )
+
+        async for event in self.log_ai_generator.run_query(
+            user_query=user_description, session_id=session_id
+        ):
+            # Forward only recognised BaseEvent subclasses – Tool/Status/Fatal etc.
+            # Unknown objects (e.g. raw results) are passed as final_step_result dict.
+            from backend.ai.events import BaseEvent, FinalStatusEvent
+
+            if isinstance(event, (ToolSuccessEvent, ToolErrorEvent, StatusUpdateEvent, FatalErrorEvent)):
+                yield event
+            elif isinstance(event, FinalStatusEvent):
+                ai_logger.info(
+                    f"Log-AI query finished for step {step.step_id} with status: {event.status}"
+                )
+            elif isinstance(event, BaseEvent):
+                ai_logger.warning(
+                    f"Unexpected BaseEvent type {type(event)} from LogAIAgent: {event!r}"
+                )
+            else:
+                # Treat as final output placeholder – StepProcessor doesn't rely on it but
+                # we keep consistent with other agents and wrap in dict.
+                yield {"type": "final_step_result", "result": event}
+
+        # Emit processing complete event (for potential UI hooks)
+        from backend.ai.events import LogAIToolCellCreatedEvent  # not the best fit but placeholder
+        # StepProcessor does not reference a specific *step complete* event for Log-AI yet.
+        # So we don't yield anything special here.

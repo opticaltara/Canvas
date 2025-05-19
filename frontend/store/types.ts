@@ -21,6 +21,7 @@ export const CellTypeSchema = z.enum([
   "python",
   "media_timeline",
   "code_index_query", // Added new cell type
+  "log_ai", // Log analysis cell
 ])
 export type CellType = z.infer<typeof CellTypeSchema>
 

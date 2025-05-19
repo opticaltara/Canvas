@@ -3,6 +3,7 @@ Notebook API Endpoints
 """
 
 import logging
+import asyncio # Added for asyncio.wait_for
 from typing import Dict, List, Optional, Any
 from uuid import UUID, uuid4
 from datetime import datetime, timezone
@@ -70,6 +71,8 @@ class CellUpdate(BaseModel):
     content: Optional[str] = None
     metadata: Optional[Dict] = None
     settings: Optional[Dict] = None
+    tool_name: Optional[str] = None
+    tool_arguments: Optional[Dict[str, Any]] = None
 
 
 class CellReorder(BaseModel):
@@ -430,30 +433,44 @@ async def update_cell(
         # or as a base if update_cell_content isn't called.
         final_cell_state_model = await notebook_manager.get_cell(db, notebook_id, cell_id) 
 
-        if cell_data.content is not None:
-            route_logger.info(f"Updating content for cell {cell_id}")
-            # update_cell_content returns the updated Pydantic cell model. Use this.
-            final_cell_state_model = await notebook_manager.update_cell_content(db, notebook_id, cell_id, cell_data.content)
+        # Ensure cell exists, will raise 404 if not.
+        current_cell_state = await notebook_manager.get_cell(db, notebook_id, cell_id)
         
-        # If metadata or settings are also updated, the current final_cell_state_model might become stale
-        # if update_cell_fields doesn't also update it or return the newest state.
+        updates_for_repo: Dict[str, Any] = {}
+
+        if cell_data.content is not None:
+            if cell_data.content:  # Check for non-empty string
+                route_logger.info(f"Updating content for cell {cell_id} to: '{cell_data.content[:100]}...'") # Log new content (truncated for brevity)
+                updates_for_repo['content'] = cell_data.content
+            else:  # This means cell_data.content == ""
+                route_logger.info(f"Received empty string for content update for cell {cell_id}. Existing content will be preserved.")
+        # If cell_data.content is None, it means the client didn't intend to update content, so we do nothing.
+        
         if cell_data.metadata is not None:
-            route_logger.info(f"Updating metadata for cell {cell_id}")
-            # Assuming 'cell_metadata' is the field name in the DB model/repository for cell's metadata
-            await notebook_manager.update_cell_fields(db, notebook_id, cell_id, {"cell_metadata": cell_data.metadata})
-            # If content was NOT updated before this, final_cell_state_model is from the initial get_cell.
-            # We need to re-fetch if metadata is the only/last update modifying the cell.
-            if cell_data.content is None: # Re-fetch if content wasn't updated to set final_cell_state_model
-                 final_cell_state_model = await notebook_manager.get_cell(db, notebook_id, cell_id)
+            route_logger.info(f"Updating cell_metadata for cell {cell_id}")
+            updates_for_repo['cell_metadata'] = cell_data.metadata
 
         if cell_data.settings is not None:
             route_logger.info(f"Updating settings for cell {cell_id}")
-            await notebook_manager.update_cell_fields(db, notebook_id, cell_id, {"settings": cell_data.settings})
-            # Re-fetch if settings is the only/last update and content/metadata weren't.
-            if cell_data.content is None and cell_data.metadata is None: # Re-fetch if neither content nor metadata set final_cell_state_model
-                 final_cell_state_model = await notebook_manager.get_cell(db, notebook_id, cell_id)
+            updates_for_repo['settings'] = cell_data.settings
+
+        if cell_data.tool_name is not None:
+            route_logger.info(f"Updating tool_name for cell {cell_id}")
+            updates_for_repo['tool_name'] = cell_data.tool_name
         
-        route_logger.info(f"Successfully updated cell {cell_id} and returning fresh state.")
+        if cell_data.tool_arguments is not None:
+            route_logger.info(f"Updating tool_arguments for cell {cell_id}")
+            updates_for_repo['tool_arguments'] = cell_data.tool_arguments
+
+        if updates_for_repo:
+            await notebook_manager.update_cell_fields(db, notebook_id, cell_id, updates_for_repo)
+            # Re-fetch the cell state after updates to ensure the returned data is fresh
+            final_cell_state_model = await notebook_manager.get_cell(db, notebook_id, cell_id)
+        else:
+            # No actual updates were provided, return the current state
+            final_cell_state_model = current_cell_state
+        
+        route_logger.info(f"Successfully processed update for cell {cell_id} and returning fresh state.")
         return final_cell_state_model.model_dump()
     except KeyError:
         route_logger.error(f"Cell {cell_id} not found for update in notebook {notebook_id}")
@@ -602,10 +619,19 @@ async def execute_cell(
     Returns:
         Status message
     """
-    route_logger.info(f"Queueing cell {cell_id} for execution in notebook {notebook_id}")
+    route_logger.info(f"Received request to execute cell {cell_id} in notebook {notebook_id} with execution_data: {execution_data.model_dump_json(indent=2)}")
+    DB_OPERATION_TIMEOUT = 10 # seconds
     try:
+        # Fetch current cell state to log its type
+        route_logger.debug(f"Attempting to get current cell {cell_id} state.")
+        current_cell = await asyncio.wait_for(
+            notebook_manager.get_cell(db, notebook_id, cell_id),
+            timeout=DB_OPERATION_TIMEOUT
+        )
+        route_logger.info(f"Cell {cell_id} to be executed is of type: {current_cell.type}")
+
         if execution_data.content is not None or execution_data.tool_arguments is not None:
-            route_logger.info(f"Updating cell {cell_id} before execution.")
+            route_logger.info(f"Updating cell {cell_id} with provided execution_data before queueing.")
             updates_to_apply = {}
             if execution_data.content is not None:
                 updates_to_apply['content'] = execution_data.content
@@ -614,28 +640,43 @@ async def execute_cell(
             
             if updates_to_apply:
                 try:
-                    repository = NotebookRepository(db)
-                    await repository.update_cell(cell_id=str(cell_id), **updates_to_apply)
-                    route_logger.info(f"Successfully updated cell {cell_id} with new content/args.")
-                except AttributeError:
-                    route_logger.error(f"NotebookManager does not have method 'update_cell_fields'. Update required.")
+                    route_logger.debug(f"Attempting to update cell {cell_id} fields.")
+                    await asyncio.wait_for(
+                        notebook_manager.update_cell_fields(db, notebook_id, cell_id, updates_to_apply),
+                        timeout=DB_OPERATION_TIMEOUT
+                    )
+                    route_logger.info(f"Successfully updated cell {cell_id} with new content/args: {updates_to_apply}")
+                except asyncio.TimeoutError:
+                    route_logger.error(f"Timeout updating cell {cell_id} fields before execution.")
+                    raise HTTPException(status_code=504, detail="Database operation timed out while updating cell for execution.")
                 except Exception as update_err:
                     route_logger.error(f"Error updating cell {cell_id} before execution: {update_err}", exc_info=True)
                     raise HTTPException(status_code=500, detail="Failed to update cell before execution")
             else:
-                route_logger.debug(f"No content or argument updates provided for cell {cell_id}.")
+                route_logger.debug(f"No content or argument updates provided for cell {cell_id} in execution_data.")
 
-        _ = await notebook_manager.get_cell(db, notebook_id, cell_id)
+        # Re-fetch the cell to ensure we have the latest state after potential updates
+        route_logger.debug(f"Attempting to re-fetch cell {cell_id} after potential updates.")
+        updated_cell_for_execution = await asyncio.wait_for(
+            notebook_manager.get_cell(db, notebook_id, cell_id),
+            timeout=DB_OPERATION_TIMEOUT
+        )
+        route_logger.info(f"Cell {cell_id} (type: {updated_cell_for_execution.type}) current tool_name: '{updated_cell_for_execution.tool_name}', tool_arguments: {updated_cell_for_execution.tool_arguments}")
 
-        await notebook_manager.update_cell_status(db, notebook_id, cell_id, CellStatus.QUEUED)
-
-        route_logger.info(f"Successfully queued cell {cell_id} for execution")
-
+        route_logger.debug(f"Attempting to update cell {cell_id} status to QUEUED.")
+        await asyncio.wait_for(
+            notebook_manager.update_cell_status(db, notebook_id, cell_id, CellStatus.QUEUED),
+            timeout=DB_OPERATION_TIMEOUT
+        )
+        route_logger.info(f"Successfully queued cell {cell_id} (type: {updated_cell_for_execution.type}) for execution.")
         return {
             "message": "Cell queued for execution",
             "cell_id": str(cell_id),
             "status": CellStatus.QUEUED.value
         }
+    except asyncio.TimeoutError:
+        route_logger.error(f"Timeout during one of the DB operations for execute_cell {cell_id}.")
+        raise HTTPException(status_code=504, detail="Database operation timed out during cell execution request.")
     except KeyError as e:
         detail = str(e).strip("\' ")
         error_message = f"Resource not found: {detail}"

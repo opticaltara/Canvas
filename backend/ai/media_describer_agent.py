@@ -197,6 +197,7 @@ class MediaDescriberAgent:
             f"Original issue: {original_query}\n\n"
             "You are a debugging assistant analyzing visual evidence of software bugs. Your task is to extract "
             "all information from the provided media that could help identify code responsible for the bug.\n\n"
+            "You have to do a detailed RCA of the bug and provide a detailed timeline of the events that happened.\n\n"
             "## Analysis Instructions\n"
             "For each media item, create a structured description following these guidelines:\n\n"
             "### For Images:\n"

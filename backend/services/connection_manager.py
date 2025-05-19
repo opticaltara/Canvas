@@ -10,11 +10,12 @@ import os
 from typing import Dict, List, Optional, Tuple, Union, Any
 from uuid import uuid4
 import asyncio
+from asyncio import Lock  # For Log-AI tool list cache locking
 
 from pydantic import BaseModel, Field, ValidationError
 import aiofiles
 
-from mcp import ClientSession
+from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from backend.config import get_settings
@@ -22,6 +23,18 @@ from backend.db.database import get_db_session
 from backend.db.repositories import ConnectionRepository
 
 from backend.core.types import MCPToolInfo
+
+# Cache for expensive Log-AI tool discovery
+# --------------------------------------------------
+#   We keep the discovered tool list in-memory for the
+#   lifetime of the process so subsequent requests can be
+#   served instantly without spinning up the docker image
+#   again.  A very small async Lock is used to ensure only
+#   one coroutine performs the initial discovery.
+# --------------------------------------------------
+
+_logai_tools_cache: Optional[list['MCPToolInfo']] = None  # Populated lazily
+_logai_tools_cache_lock: Lock = Lock()
 
 # Import handler registry functions
 from backend.services.connection_handlers.registry import get_handler, get_all_handler_types
@@ -817,6 +830,113 @@ class ConnectionManager:
             ]
             logger.info(f"Returning {len(qdrant_tools)} predefined Qdrant tools for git_repo.", extra={'correlation_id': correlation_id})
             return qdrant_tools
+
+        # --- LogAI (FastMCP) virtual connection type --------------------------------------
+        if connection_type == "log_ai":
+            logger.info(
+                "Handling virtual 'log_ai' connection-type tool discovery via direct FastMCP stdio call.",
+                extra={'correlation_id': correlation_id}
+            )
+
+            # If we've already fetched the LogAI tool list once during the
+            # lifetime of this process just return the cached copy straight
+            # away – no need to spin up the Docker container again.
+            global _logai_tools_cache
+            global _logai_tools_cache_lock
+            if _logai_tools_cache is not None:
+                logger.debug(
+                    "Returning cached list of %d Log-AI tools.",
+                    len(_logai_tools_cache),
+                    extra={'correlation_id': correlation_id},
+                )
+                return _logai_tools_cache
+
+            # Ensure only one coroutine performs the expensive discovery the
+            # first time while others wait on the result.
+            async with _logai_tools_cache_lock:
+                # Another coroutine might have already populated the cache
+                # while we were waiting for the lock.
+                if _logai_tools_cache is not None:
+                    logger.debug(
+                        "Log-AI tools cache was populated by another task while waiting for lock.",
+                        extra={'correlation_id': correlation_id},
+                    )
+                    return _logai_tools_cache
+
+            try:
+                # Prepare Docker arguments
+                docker_args = [
+                    "run",
+                    "--rm",
+                    "-i",  # attach STDIN for stdio transport,
+                    "--volume=/var/run/docker.sock:/var/run/docker.sock",
+                ]
+                
+                # Add volume mount if SHERLOG_HOST_FS_ROOT is set
+                host_fs_root = os.environ.get("SHERLOG_HOST_FS_ROOT")
+                if host_fs_root:
+                    docker_args.append(f"-v")
+                    docker_args.append(f"{host_fs_root}:{host_fs_root}:ro")
+
+                docker_args.append("ghcr.io/navneet-mkr/logai-mcp:0.1.3")
+
+                # Run the Log-AI MCP via published Docker image instead of building it on the fly
+                server_params = StdioServerParameters(
+                    command="docker",
+                    args=docker_args,
+                    env=os.environ.copy(),
+                )
+
+                async with stdio_client(server_params) as (read, write):
+                    async with ClientSession(read, write) as session:
+                        logger.info(
+                            "Initializing MCP session for Log-AI list_tools…",
+                            extra={'correlation_id': correlation_id},
+                        )
+                        await asyncio.wait_for(session.initialize(), timeout=90.0)
+                        response = await asyncio.wait_for(session.list_tools(), timeout=30.0)
+
+                        parsed_tools: List[MCPToolInfo] = []
+                        for mcp_tool in getattr(response, "tools", []) or []:
+                            try:
+                                parsed_tools.append(
+                                    MCPToolInfo(
+                                        name=getattr(mcp_tool, "name", "unknown"),
+                                        description=getattr(mcp_tool, "description", None),
+                                        inputSchema=getattr(mcp_tool, "inputSchema", {}) or {},
+                                    )
+                                )
+                            except Exception as tool_parse_err:
+                                logger.error(
+                                    "Failed parsing tool from Log-AI list_tools response: %s",
+                                    tool_parse_err,
+                                    extra={'correlation_id': correlation_id},
+                                    exc_info=True,
+                                )
+                                continue
+
+                        logger.info(
+                            "Retrieved %d Log-AI tools via MCP list_tools.",
+                            len(parsed_tools),
+                            extra={'correlation_id': correlation_id},
+                        )
+
+                        # Populate the cache so the next call is instantaneous.
+                        _logai_tools_cache = parsed_tools
+
+                        return parsed_tools
+            except asyncio.TimeoutError:
+                raise ValueError("Timeout communicating with Log-AI MCP server while listing tools.")
+            except FileNotFoundError as e:
+                raise ValueError(f"Log-AI MCP server command not found: {e}")
+            except Exception as e:
+                logger.error(
+                    "Unexpected error during Log-AI MCP list_tools: %s",
+                    e,
+                    extra={'correlation_id': correlation_id},
+                    exc_info=True,
+                )
+                raise ValueError(f"Failed to communicate with Log-AI MCP server: {e}")
 
         # Existing logic for MCP-based connections:
         default_conn = await self.get_default_connection(connection_type)

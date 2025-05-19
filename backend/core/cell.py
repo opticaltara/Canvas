@@ -65,6 +65,8 @@ class CellType(str, Enum):
         METRIC: Cell representing a metric query
         AI_QUERY: Generic for other agent-driven cells
         MEDIA_TIMELINE: New cell type for media timeline outputs
+        CODE_INDEX_QUERY: For displaying code search results
+        LOG_AI: Log analysis FastMCP server
     """
     MARKDOWN = "markdown"
     GITHUB = "github"
@@ -78,6 +80,7 @@ class CellType(str, Enum):
     AI_QUERY = "ai_query" # Generic for other agent-driven cells
     MEDIA_TIMELINE = "media_timeline"  # New cell type for media timeline outputs
     CODE_INDEX_QUERY = "code_index_query" # For displaying code search results
+    LOG_AI = "log_ai"  # Log analysis FastMCP server
 
 
 class CellResult(BaseModel):
@@ -142,7 +145,7 @@ class Cell(BaseModel):
     
     def __init__(self, **data):
         super().__init__(**data)
-        cell_logger.info(
+        cell_logger.debug(
             "Cell initialized",
             extra={
                 'cell_id': str(self.id),
@@ -165,7 +168,7 @@ class Cell(BaseModel):
             self.status = CellStatus.STALE
             self.updated_at = datetime.now(timezone.utc)
             process_time = time.time() - start_time
-            cell_logger.info(
+            cell_logger.debug(
                 "Cell marked as stale",
                 extra={
                     'cell_id': str(self.id),
@@ -186,7 +189,7 @@ class Cell(BaseModel):
         self.updated_at = datetime.now(timezone.utc)
         self.mark_stale()
         process_time = time.time() - start_time
-        cell_logger.info(
+        cell_logger.debug(
             "Cell content updated",
             extra={
                 'cell_id': str(self.id),
@@ -216,7 +219,7 @@ class Cell(BaseModel):
         self.updated_at = datetime.now(timezone.utc)
         
         process_time = time.time() - start_time
-        cell_logger.info(
+        cell_logger.debug(
             "Cell result set",
             extra={
                 'cell_id': str(self.id),
@@ -248,7 +251,7 @@ class Cell(BaseModel):
         start_time = time.time()
         self.dependencies.add(cell_id)
         process_time = time.time() - start_time
-        cell_logger.info(
+        cell_logger.debug(
             "Added cell dependency",
             extra={
                 'cell_id': str(self.id),
@@ -269,7 +272,7 @@ class Cell(BaseModel):
         start_time = time.time()
         self.dependents.add(cell_id)
         process_time = time.time() - start_time
-        cell_logger.info(
+        cell_logger.debug(
             "Added cell dependent",
             extra={
                 'cell_id': str(self.id),
@@ -291,7 +294,7 @@ class Cell(BaseModel):
         if cell_id in self.dependencies:
             self.dependencies.remove(cell_id)
             process_time = time.time() - start_time
-            cell_logger.info(
+            cell_logger.debug(
                 "Removed cell dependency",
                 extra={
                     'cell_id': str(self.id),
@@ -324,7 +327,7 @@ class Cell(BaseModel):
         if cell_id in self.dependents:
             self.dependents.remove(cell_id)
             process_time = time.time() - start_time
-            cell_logger.info(
+            cell_logger.debug(
                 "Removed cell dependent",
                 extra={
                     'cell_id': str(self.id),
@@ -352,7 +355,7 @@ class Cell(BaseModel):
         num_dependencies = len(self.dependencies)
         self.dependencies.clear()
         process_time = time.time() - start_time
-        cell_logger.info(
+        cell_logger.debug(
             "Cleared all dependencies",
             extra={
                 'cell_id': str(self.id),
@@ -376,7 +379,7 @@ class MarkdownCell(Cell):
     
     def __init__(self, **data):
         super().__init__(**data)
-        cell_logger.info(
+        cell_logger.debug(
             "Markdown cell initialized",
             extra={
                 'cell_id': str(self.id),
@@ -402,7 +405,7 @@ class GitHubCell(Cell):
     
     def __init__(self, **data):
         super().__init__(**data)
-        cell_logger.info(
+        cell_logger.debug(
             "Github cell initialized",
             extra={
                 'cell_id': str(self.id),
@@ -421,7 +424,7 @@ class SummarizationCell(Cell):
 
     def __init__(self, **data):
         super().__init__(**data)
-        cell_logger.info(
+        cell_logger.debug(
             "Summarization cell initialized",
             extra={
                 'cell_id': str(self.id),
@@ -464,7 +467,7 @@ def create_cell(cell_type: CellType, content: str, **kwargs) -> Cell:
         cell = cell_class(**constructor_args)
         
         process_time = time.time() - start_time
-        cell_logger.info(
+        cell_logger.debug(
             "Cell created",
             extra={
                 'cell_id': str(cell.id),

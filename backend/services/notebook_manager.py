@@ -261,7 +261,7 @@ class NotebookManager:
         # Await async repo call
         updated_cell_data = await repository.update_cell(
             cell_id=str(cell_id),
-            updates={'content': content}
+            content=content # Pass as keyword argument directly
         )
         
         if not updated_cell_data:
@@ -319,7 +319,7 @@ class NotebookManager:
             # Await async repo call
             updated_cell_data = await repository.update_cell(
                 cell_id=str(cell_id),
-                updates={'status': status.value}
+                status=status.value # Pass as keyword argument directly
             )
             if not updated_cell_data:
                 logger.error(f"Cell {cell_id} not found for status update", extra=log_extra)
@@ -333,12 +333,12 @@ class NotebookManager:
             # *** Add to Execution Queue if status is QUEUED ***
             if status == CellStatus.QUEUED:
                 if self.execution_queue and self.cell_executor:
-                    logger.info(f"Adding cell {cell_id} to execution queue", extra=log_extra)
+                    logger.info(f"Attempting to add cell {cell_id} (type: {updated_cell_model.type}, tool: '{updated_cell_model.tool_name}') to execution queue.", extra=log_extra)
                     try:
                         await self.execution_queue.add_cell(notebook_id, cell_id, self.cell_executor)
-                        logger.info(f"Successfully added cell {cell_id} to execution queue", extra=log_extra)
+                        logger.info(f"Successfully added cell {cell_id} (type: {updated_cell_model.type}) to execution queue.", extra=log_extra)
                     except Exception as q_err:
-                         logger.error(f"Failed to add cell {cell_id} to execution queue: {q_err}", extra=log_extra, exc_info=True)
+                         logger.error(f"Failed to add cell {cell_id} (type: {updated_cell_model.type}) to execution queue: {q_err}", extra=log_extra, exc_info=True)
                          # Decide if we should revert status or just log the error
                          # For now, just log and continue with notification
                 else:
@@ -431,7 +431,7 @@ class NotebookManager:
             # Await async repo call
             updated_cell_data = await repository.update_cell(
                 cell_id=str(cell_id),
-                updates=updates # Pass the dictionary directly
+                **updates # Spread the dictionary
             )
             
             if not updated_cell_data:
@@ -476,23 +476,49 @@ class NotebookManager:
         logger.info(f"Updating fields for cell {cell_id}", extra=log_extra)
         
         if not updates:
-            logger.warning("update_cell_fields called with empty updates dictionary.", extra=log_extra)
-            return # Nothing to update
+            logger.warning("update_cell_fields called with empty updates dictionary. No action taken.", extra=log_extra)
+            # If we need to ensure notification even for no-op, we might fetch and proceed.
+            # For now, if updates dict is empty, it's a true no-op for fields.
+            return 
             
         try:
-            repository = NotebookRepository(db)
-            # Await async repo call
-            updated_cell_data = await repository.update_cell(
-                cell_id=str(cell_id),
-                updates=updates # Pass the provided updates directly
-            )
+            # Make a copy to modify, to avoid changing the input dict if it's used elsewhere
+            effective_updates = updates.copy()
+
+            # Check if 'tool_arguments' is being updated to an "empty" value.
+            # "Empty" could mean None or an empty dictionary.
+            # If so, prevent it from being passed to the repository to preserve existing args.
+            if 'tool_arguments' in effective_updates:
+                tool_args_update_value = effective_updates.get('tool_arguments')
+                if tool_args_update_value is None or tool_args_update_value == {}:
+                    logger.info(f"Received an empty update for 'tool_arguments' for cell {cell_id} (value: {tool_args_update_value}). "
+                                f"Preserving existing tool_arguments by not including this field in the DB update.", extra=log_extra)
+                    del effective_updates['tool_arguments']
             
-            if not updated_cell_data:
-                 logger.error(f"Cell {cell_id} not found when trying to update fields", extra=log_extra)
-                 raise KeyError(f"Cell {cell_id} not found")
+            repository = NotebookRepository(db) # Initialize repository
+
+            if not effective_updates:
+                # This means the original 'updates' might have only contained an empty 'tool_arguments'
+                # or was otherwise emptied by the logic above. No actual field update to DB.
+                logger.info(f"Effective updates for cell {cell_id} are empty after processing. "
+                            f"No database field update will be performed. Original updates: {updates}", extra=log_extra)
+                # Fetch the current cell state for notification purposes
+                updated_cell_data = await repository.get_cell(str(cell_id))
+                if not updated_cell_data:
+                    logger.error(f"Cell {cell_id} not found when trying to fetch for no-op field update.", extra=log_extra)
+                    raise KeyError(f"Cell {cell_id} not found")
+            else:
+                # Proceed with updating the non-empty effective_updates
+                updated_cell_data = await repository.update_cell(
+                    cell_id=str(cell_id),
+                    **effective_updates 
+                )
+                if not updated_cell_data:
+                    logger.error(f"Cell {cell_id} not found when trying to update fields with effective_updates: {effective_updates}", extra=log_extra)
+                    raise KeyError(f"Cell {cell_id} not found")
                  
             updated_cell_model = self._db_cell_to_model(updated_cell_data)
-            logger.info(f"Successfully updated fields for cell {cell_id}", extra=log_extra)
+            logger.info(f"Successfully processed field update for cell {cell_id}. Effective updates applied: {list(effective_updates.keys())}", extra=log_extra)
             
             # Notify clients about the change
             if self.notify_callback:
@@ -539,7 +565,7 @@ class NotebookManager:
                             # Await async repo call
                             await repository.update_cell(
                                 cell_id=str(dep_id),
-                                updates={'status': CellStatus.STALE.value}
+                                status=CellStatus.STALE.value # Pass as keyword argument
                             )
                             stale_ids.add(dep_id)
                             logger.debug(f"Marked dependent cell {dep_id} as stale", extra=log_extra)
@@ -737,14 +763,10 @@ class NotebookManager:
             except Exception as e_final:
                 logger.critical(f"Failed to even set error status for cell {cell_id} after re-run failure: {e_final}", extra=log_extra)
         finally:
-            # Ensure a final notification goes out if not handled by update_cell_fields or set_cell_result
-            # This might be redundant if the above calls always notify, but good for safety.
-            try:
-                final_cell_state = await self.get_cell(db, notebook_id, cell_id)
-                if self.notify_callback:
-                    await self.notify_callback(notebook_id, final_cell_state.model_dump(mode='json'))
-            except Exception:
-                pass # Avoid errors in finally block from masking original error
+            # The main try/except blocks (calling update_cell_fields or set_cell_result)
+            # already handle sending WebSocket notifications.
+            # A final notification here is redundant and can cause duplicate messages.
+            pass
 
 
     def _db_notebook_to_model(self, db_notebook) -> Notebook:

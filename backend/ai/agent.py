@@ -466,6 +466,7 @@ class AIAgent:
             StepType.PYTHON: AgentType.PYTHON,
             StepType.INVESTIGATION_REPORT: AgentType.INVESTIGATION_REPORT_GENERATOR,
             StepType.MEDIA_TIMELINE: AgentType.MEDIA_TIMELINE,
+            StepType.LOG_AI: AgentType.LOG_AI,
         }
         
         return agent_type_map.get(step_type, AgentType.UNKNOWN)

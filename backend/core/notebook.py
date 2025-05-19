@@ -42,7 +42,7 @@ class Notebook(BaseModel):
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        notebook_logger.info(
+        notebook_logger.debug(
             "Notebook initialized",
             extra={
                 'notebook_id': str(self.id),

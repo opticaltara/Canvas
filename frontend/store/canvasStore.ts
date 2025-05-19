@@ -211,18 +211,54 @@ export const useCanvasStore = create<NotebookState>()(
 
         // Handle cell update from WebSocket
         handleCellUpdate: (cellData) => {
-          // Utility function for shallow comparison (top-level keys only)
-          const shallowEqual = (objA: any, objB: any) => {
-            if (objA === objB) return true;
-            if (!objA || !objB) return false;
+          // Defensive check: Ensure the cell update is for the active notebook
+          if (cellData.notebook_id && cellData.notebook_id !== get().activeNotebookId) {
+            console.warn(
+              `[CanvasStore] Received cell_update for cell ${cellData.id} (event notebook_id: ${cellData.notebook_id}) ` +
+              `that does not match active notebook ${get().activeNotebookId}. Ignoring.`
+            );
+            return;
+          }
+          
+          // If the update indicates the cell is deleted, filter it out directly.
+          // Ensure cellData is properly typed, assuming it can have a 'deleted' property.
+          if ((cellData as any).deleted === true) { 
+            console.log(`🔧 Cell ${(cellData as any).id} marked as deleted via WebSocket, removing from store.`);
+            set((state) => ({
+              cells: state.cells.filter((cell) => cell.id !== (cellData as any).id),
+            }));
+            return; // Stop further processing for this cell
+          }
 
-            const keysA = Object.keys(objA);
-            const keysB = Object.keys(objB);
+          // Utility function for comparing cells, with special handling for tool_arguments
+          const areCellsEffectivelyEqual = (cellA: Cell, cellB: Cell): boolean => {
+            if (!cellA || !cellB) return false;
 
-            if (keysA.length !== keysB.length) return false;
+            const keysToIgnore: Array<keyof Cell> = ['created_at', 'updated_at'];
+
+            const keysA = (Object.keys(cellA) as Array<keyof Cell>).filter(k => !keysToIgnore.includes(k));
+            const keysB = (Object.keys(cellB) as Array<keyof Cell>).filter(k => !keysToIgnore.includes(k));
+
+            if (keysA.length !== keysB.length) {
+                console.log("🔧 [areCellsEffectivelyEqual] Length mismatch after filtering ignored keys. A:", keysA.length, "B:", keysB.length);
+                return false;
+            }
 
             for (const key of keysA) {
-              if (objA[key] !== objB[key]) {
+              if (key === 'tool_arguments') {
+                // Deep compare tool_arguments by stringifying them
+                if (JSON.stringify(cellA.tool_arguments || {}) !== JSON.stringify(cellB.tool_arguments || {})) {
+                  console.log(`🔧 [areCellsEffectivelyEqual] Difference in tool_arguments for cell ${cellA.id}`);
+                  return false;
+                }
+              } else if (key === 'metadata' || key === 'settings' || key === 'result') {
+                // Deep compare metadata, settings, and result objects
+                if (JSON.stringify(cellA[key] || {}) !== JSON.stringify(cellB[key] || {})) {
+                  console.log(`🔧 [areCellsEffectivelyEqual] Difference in ${key} for cell ${cellA.id}`);
+                  return false;
+                }
+              } else if (cellA[key] !== cellB[key]) {
+                console.log(`🔧 [areCellsEffectivelyEqual] Difference in primitive key '${key}' for cell ${cellA.id}: A='${cellA[key]}', B='${cellB[key]}'`);
                 return false;
               }
             }
@@ -241,11 +277,11 @@ export const useCanvasStore = create<NotebookState>()(
           )
 
           // Create a new cells array to ensure reference change
-          const updatedCells = [...currentCells]
-          const index = updatedCells.findIndex((c) => c.id === cellData.id)
+          const index = currentCells.findIndex((c) => c.id === cellData.id) // Find in a non-mutated array
           console.log("🔧 Found cell at index:", index)
 
           if (index >= 0) {
+            const updatedCells = [...currentCells]; // Create a new array for modification if cell found
             // Merge while ignoring undefined values from partial updates so that
             // we never overwrite an existing field with `undefined`.
             const mergedCell = {
@@ -256,24 +292,29 @@ export const useCanvasStore = create<NotebookState>()(
             };
 
             // Skip state update if nothing actually changed to prevent unnecessary re-renders
-            if (shallowEqual(updatedCells[index], mergedCell)) {
-              console.log("🔧 No changes detected for cell", cellData.id, "— skipping state update.");
+            if (areCellsEffectivelyEqual(updatedCells[index], mergedCell)) {
+              console.log("🔧 No effective changes detected for cell", cellData.id, "— skipping state update.");
               return;
             }
 
             console.log("🔧 Updating existing cell in store:", cellData.id)
             // Merge incoming data with existing cell data after change detection
             updatedCells[index] = mergedCell;
+            set({ cells: updatedCells }); // Set the modified array
           } else {
-            console.log("🔧 Adding new cell to store:", cellData.id, cellData.type)
-            updatedCells.push({ ...cellData }) // Just push the new cell data
+            // If cellData.deleted was not true (handled above) and the cell isn't found,
+            // then it's a new cell (or an update for a cell not yet in store).
+            console.log("🔧 Adding new cell to store (or cell not found for update):", cellData.id, cellData.type)
+            // updatedCells.push({ ...cellData }) // This was problematic if updatedCells was based on a filtered list
+            set((state) => ({ cells: [...state.cells, { ...cellData }] }));
           }
 
-          console.log("🔧 New cells array length:", updatedCells.length)
-          console.log("🔧 Is cells array reference changed:", updatedCells !== currentCells)
+          // These logs might be misleading if we returned early for deletion.
+          // Consider moving them or making them conditional.
+          // console.log("🔧 New cells array length:", get().cells.length) 
+          // console.log("🔧 Is cells array reference changed:", updatedCells !== currentCells) // 'updatedCells' might not be defined here if returned early
 
-          // Update the state with the new cells array ONCE
-          set({ cells: updatedCells })
+          // set({ cells: updatedCells }) // This was the original problematic line if cell was re-added.
         },
 
         // Handle cell execution started from WebSocket
