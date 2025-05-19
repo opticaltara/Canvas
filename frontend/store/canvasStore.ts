@@ -230,18 +230,35 @@ export const useCanvasStore = create<NotebookState>()(
             return; // Stop further processing for this cell
           }
 
-          // Utility function for shallow comparison (top-level keys only)
-          const shallowEqual = (objA: any, objB: any) => {
-            if (objA === objB) return true;
-            if (!objA || !objB) return false;
+          // Utility function for comparing cells, with special handling for tool_arguments
+          const areCellsEffectivelyEqual = (cellA: Cell, cellB: Cell): boolean => {
+            if (!cellA || !cellB) return false;
 
-            const keysA = Object.keys(objA);
-            const keysB = Object.keys(objB);
+            const keysToIgnore: Array<keyof Cell> = ['created_at', 'updated_at'];
 
-            if (keysA.length !== keysB.length) return false;
+            const keysA = (Object.keys(cellA) as Array<keyof Cell>).filter(k => !keysToIgnore.includes(k));
+            const keysB = (Object.keys(cellB) as Array<keyof Cell>).filter(k => !keysToIgnore.includes(k));
+
+            if (keysA.length !== keysB.length) {
+                console.log("🔧 [areCellsEffectivelyEqual] Length mismatch after filtering ignored keys. A:", keysA.length, "B:", keysB.length);
+                return false;
+            }
 
             for (const key of keysA) {
-              if (objA[key] !== objB[key]) {
+              if (key === 'tool_arguments') {
+                // Deep compare tool_arguments by stringifying them
+                if (JSON.stringify(cellA.tool_arguments || {}) !== JSON.stringify(cellB.tool_arguments || {})) {
+                  console.log(`🔧 [areCellsEffectivelyEqual] Difference in tool_arguments for cell ${cellA.id}`);
+                  return false;
+                }
+              } else if (key === 'metadata' || key === 'settings' || key === 'result') {
+                // Deep compare metadata, settings, and result objects
+                if (JSON.stringify(cellA[key] || {}) !== JSON.stringify(cellB[key] || {})) {
+                  console.log(`🔧 [areCellsEffectivelyEqual] Difference in ${key} for cell ${cellA.id}`);
+                  return false;
+                }
+              } else if (cellA[key] !== cellB[key]) {
+                console.log(`🔧 [areCellsEffectivelyEqual] Difference in primitive key '${key}' for cell ${cellA.id}: A='${cellA[key]}', B='${cellB[key]}'`);
                 return false;
               }
             }
@@ -275,8 +292,8 @@ export const useCanvasStore = create<NotebookState>()(
             };
 
             // Skip state update if nothing actually changed to prevent unnecessary re-renders
-            if (shallowEqual(updatedCells[index], mergedCell)) {
-              console.log("🔧 No changes detected for cell", cellData.id, "— skipping state update.");
+            if (areCellsEffectivelyEqual(updatedCells[index], mergedCell)) {
+              console.log("🔧 No effective changes detected for cell", cellData.id, "— skipping state update.");
               return;
             }
 

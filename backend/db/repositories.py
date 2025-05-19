@@ -514,16 +514,21 @@ class NotebookRepository:
             await self._update_notebook_timestamp(notebook_id)
             
             # Commit the changes to the database so they are visible to subsequent queries
-            # Expire the cell instance from the session before commit,
-            # so that subsequent accesses will reload it from the DB.
+            # Expire the cell instance from the session.
+            # The commit will be handled by the session context manager (e.g., get_db_session).
+            # So, subsequent accesses within the same session scope (if any after this method returns
+            # but before the context manager commits) might see cached state unless explicitly refreshed
+            # or if the session is configured to auto-refresh after flush.
+            # However, re-fetching via self.get_cell() after the main transaction commits is safer.
             if cell: # Ensure cell object exists before expiring
-                self.db.expire(cell)
+                self.db.expire(cell) 
             
-            await self.db.commit()
-            logger.info("Cell %s update transaction committed.", cell_id, extra={'correlation_id': 'N/A'})
+            # The commit will be handled by the context manager that provided the session.
+            # logger.info("Cell %s update transaction will be committed by session manager.", cell_id, extra={'correlation_id': 'N/A'})
             
-            # After commit, the 'cell' instance is expired. Accessing its attributes
-            # would normally cause a reload. To be certain, we can refresh it.
+            # After the calling code's session manager commits, 
+            # the 'cell' instance might be expired or reflect committed state.
+            # Re-fetching via self.get_cell() is the most reliable way to get the truly fresh state post-commit.
             # If 'cell' was None initially (should not happen due to prior get_cell), this would error.
             # The re-fetch via self.get_cell() is a safer way to get a fully fresh object.
             refreshed_cell = await self.get_cell(cell_id) # Re-fetch to ensure fresh state

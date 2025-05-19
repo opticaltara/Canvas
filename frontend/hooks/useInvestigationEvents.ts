@@ -847,9 +847,11 @@ export function useInvestigationEvents({
 
   // --- ADDED: Handler for Cell Update --- 
   const handleCellUpdate = useCallback(
-    (event: CellUpdateEvent) => {
-      const { id, ...updates } = event.data; // Extract ID and the rest are updates
-      console.log(`[handleCellUpdate] Updating cell ${id} with data:`, updates);
+    (event: CellUpdateEvent) => { // event here is the full WebSocketMessage, including potential ws_message_id
+      const { id, ...updates } = event.data; // Extract ID and the rest are updates from the 'data' payload
+      // Log the ws_message_id from the top-level event object
+      const wsMessageId = (event as any).ws_message_id || "N/A"; // Access safely
+      console.log(`[useInvestigationEvents local handleCellUpdate] WS_MSG_ID: ${wsMessageId} - Updating cell ${id} with data:`, updates);
       onUpdateCell(id, updates);
       // Optionally add a subtle toast or log
       // toast({ title: "Cell Updated", description: `Cell ${id} received updates.` });
@@ -952,10 +954,11 @@ export function useInvestigationEvents({
 
   // Process incoming WebSocket messages from the internal hook
   useEffect(() => {
-    if (!latestEvent) return;
+    if (!latestEvent) return; // latestEvent is the full WebSocketMessage
 
     try {
-        console.log("[useInvestigationEvents] Processing latest event:", latestEvent)
+        const wsMessageId = (latestEvent as any).ws_message_id || "N/A"; // Access safely
+        console.log(`[useInvestigationEvents useEffect] Processing latest event with WS_MSG_ID: ${wsMessageId} - Type: ${latestEvent.type}`);
         handleEvent(latestEvent); // latestEvent is already typed as InvestigationEvent | null
     } catch (error) {
         console.error("Error handling investigation event:", error);

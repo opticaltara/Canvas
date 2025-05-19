@@ -76,64 +76,61 @@ export default function CanvasPage() {
   const handleCreateCell = useCallback(
     (params: CellCreationParams) => {
       console.log(`🔍 handleCreateCell called. Step ID: ${params.step_id}, Cell ID: ${params.id}. Full params:`, params);
+      
+      setCells((prevCells) => {
+        const existingCellIndex = prevCells.findIndex((cell) => cell.metadata?.step_id === params.step_id);
+        if (existingCellIndex >= 0) {
+          console.log(`🔄 Updating existing cell linked to step ID: ${params.step_id} with definitive Cell ID: ${params.id}`);
+          const updatedCells = [...prevCells];
+          const existingCell = updatedCells[existingCellIndex];
+          const { id, step_id, metadata, ...restParams } = params;
+          updatedCells[existingCellIndex] = {
+            ...existingCell,
+            ...restParams,
+            id: params.id,
+            type: params.type as CellType,
+            metadata: {
+              ...existingCell.metadata,
+              ...(metadata || {}),
+              step_id: params.step_id,
+            },
+            updated_at: new Date().toISOString(),
+            isNew: false, 
+          };
+          return updatedCells;
+        } else {
+          console.log(`✨ Creating new cell for step ID: ${params.step_id} with definitive Cell ID: ${params.id}`);
+          const now = new Date().toISOString();
+          const { id, step_id, metadata, ...restParamsWithoutMeta } = params;
+          const newCell: DisplayCell = {
+            id: params.id,
+            ...restParamsWithoutMeta,
+            type: params.type as CellType,
+            notebook_id: notebookId, // notebookId is stable from useParams
+            created_at: now,
+            updated_at: now,
+            metadata: {
+              ...(metadata || {}),
+              step_id: params.step_id,
+            },
+            isNew: true,
+          };
+          return [...prevCells, newCell];
+        }
+      });
 
-      // Find existing cell using step_id from metadata
-      const existingCellIndex = cells.findIndex((cell) => cell.metadata?.step_id === params.step_id);
-
-      if (existingCellIndex >= 0) {
-        console.log(`🔄 Updating existing cell linked to step ID: ${params.step_id} with definitive Cell ID: ${params.id}`);
-        const updatedCells = [...cells];
-        const existingCell = updatedCells[existingCellIndex];
-        
-        // Update the existing cell, ensuring the ID is the correct UUID
-        const { id, step_id, metadata, ...restParams } = params;
-        updatedCells[existingCellIndex] = {
-          ...existingCell,
-          ...restParams, // Spread the rest of the params
-          id: params.id, // Explicitly set the correct UUID
-          type: params.type as CellType, // Cast type
-          metadata: { // Merge metadata, ensuring step_id is preserved/updated
-            ...existingCell.metadata,
-            ...(metadata || {}), // Safely spread params.metadata
-            step_id: params.step_id,
-          },
-          updated_at: new Date().toISOString(),
-          isNew: false, // Ensure it's not marked as new if just updated
-        };
-        setCells(updatedCells);
-      } else {
-        console.log(`✨ Creating new cell for step ID: ${params.step_id} with definitive Cell ID: ${params.id}`);
-        const now = new Date().toISOString();
-        
-        // Create new cell, ensuring ID is the correct UUID and step_id is in metadata
-        const { id, step_id, metadata, ...restParamsWithoutMeta } = params;
-        const newCell: DisplayCell = {
-          id: params.id, // Explicitly set the correct UUID
-          ...restParamsWithoutMeta, // Spread the rest of the params (excluding id, step_id, metadata)
-          type: params.type as CellType, // Cast type
-          notebook_id: notebookId,
-          created_at: now,
-          updated_at: now,
-          metadata: { // Initialize metadata with step_id
-            ...(metadata || {}), // Safely spread params.metadata
-            step_id: params.step_id,
-          },
-          isNew: true,
-        };
-
-        setCells((prevCells) => [...prevCells, newCell]);
-
-        // Animation timeout uses the correct UUID (params.id)
-        setTimeout(() => {
-          setCells((prevCells) =>
-            prevCells.map((cell) =>
-              cell.id === params.id ? { ...cell, isNew: false } : cell
-            )
-          );
-        }, 500);
-      }
+      // Animation timeout uses the correct UUID (params.id)
+      // This needs to be handled carefully if setCells is async or batched.
+      // For now, let's assume it's okay, but if animation is glitchy, this might need adjustment.
+      setTimeout(() => {
+        setCells((prevCells) =>
+          prevCells.map((cell) =>
+            cell.id === params.id ? { ...cell, isNew: false } : cell
+          )
+        );
+      }, 500);
     },
-    [cells, notebookId] 
+    [notebookId] // `notebookId` from `useParams` is stable for the page's lifetime.
   );
 
   const handleUpdateCell = useCallback((cellId: string, updates: Partial<CellCreationParams>) => {

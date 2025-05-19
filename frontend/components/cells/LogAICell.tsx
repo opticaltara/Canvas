@@ -15,6 +15,7 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import ResultTable from "@/components/ResultTable"; // Adjusted path
 
 import { useConnectionStore } from "@/app/store/connectionStore";
 
@@ -70,14 +71,18 @@ const LogAICell: React.FC<LogAICellProps> = ({ cell, onExecute, onUpdate, onDele
       setToolName(currentCellToolName);
     }
 
-    const newCellToolArgumentsString = JSON.stringify(cell.tool_arguments || DEFAULT_EMPTY_TOOL_ARGS);
+    const newCellToolArguments = cell.tool_arguments || DEFAULT_EMPTY_TOOL_ARGS;
+    const newCellToolArgumentsString = JSON.stringify(newCellToolArguments);
     const currentLocalToolArgsString = JSON.stringify(toolArgs);
 
     if (currentLocalToolArgsString !== newCellToolArgumentsString) {
-      setToolArgs(cell.tool_arguments || DEFAULT_EMPTY_TOOL_ARGS);
+      // Only update local state if the arguments have actually changed.
+      // This prevents re-triggering if the parent component re-renders with
+      // a new object reference for tool_arguments but the content is the same.
+      setToolArgs(newCellToolArguments);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cell.id, cell.tool_name, JSON.stringify(cell.tool_arguments || DEFAULT_EMPTY_TOOL_ARGS)]);
+  }, [cell.id, cell.tool_name, cell.tool_arguments]); // Depend on the object itself, comparison done inside.
 
   // Attempt to fetch tool definitions (may be undefined if none cached)
   const toolDefinitions = useConnectionStore((s) => s.toolDefinitions.log_ai);
@@ -106,16 +111,28 @@ const LogAICell: React.FC<LogAICellProps> = ({ cell, onExecute, onUpdate, onDele
   const handleExecute = () => {
     // Persist description (cell.content) & arguments to metadata then run
     // For execute, we want to send the latest state immediately, so no debounce here.
-    onUpdate(cell.id, cell.content ?? "", { toolName, toolArgs });
+    // Ensure we are sending the most up-to-date local toolName and toolArgs
+    const currentMetadata = {
+      ...cell.metadata, // Preserve existing metadata
+      toolName: toolName, // Use local state
+      toolArgs: toolArgs,   // Use local state
+    };
+    onUpdate(cell.id, cell.content ?? "", currentMetadata);
     onExecute(cell.id);
   };
 
   const handleArgChange = (arg: string, value: any) => {
     setToolArgs((prev) => {
-      const upd = { ...prev, [arg]: value };
+      const newArgs = { ...prev, [arg]: value };
       // Use debounced update for arg changes
-      debouncedOnUpdate(cell.id, cell.content ?? "", { toolName, toolArgs: upd });
-      return upd;
+      // Ensure we are sending the most up-to-date local toolName with the newArgs
+      const currentMetadata = {
+        ...cell.metadata, // Preserve existing metadata
+        toolName: toolName, // Use local state for toolName
+        toolArgs: newArgs,  // Use the newly updated args
+      };
+      debouncedOnUpdate(cell.id, cell.content ?? "", currentMetadata);
+      return newArgs;
     });
   };
 
@@ -249,95 +266,149 @@ const LogAICell: React.FC<LogAICellProps> = ({ cell, onExecute, onUpdate, onDele
   };
 
   /* --------------- Result Render --------------- */
-  const error = cell.result?.error;
-  const resultContent = cell.result?.content ?? cell.result ?? null;
+  const error = cell.result?.error; // Used for displaying general errors
+
+  const parseGenericTableString = (tableStr: string): Record<string, any>[] | null => {
+    try {
+      const lines = tableStr.trim().split('\n');
+      if (lines.length < 1) return null; // Must have at least a header line
+
+      // Filter out summary lines like "[6 rows x 4 columns]"
+      const contentLines = lines.filter(line => !line.trim().startsWith('[') && line.trim().endsWith(']') === false && line.trim() !== '');
+      if (contentLines.length < 1) return null;
+
+
+      const headerLine = contentLines[0];
+      // Heuristic for header splitting: split by 2 or more spaces.
+      // Headers might have leading/trailing spaces from the original format.
+      const headers = headerLine.split(/\s{2,}/).map(h => h.trim()).filter(h => h.length > 0);
+      if (headers.length === 0) return null;
+
+      const dataLines = contentLines.slice(1);
+      const rows: Record<string, any>[] = [];
+
+      dataLines.forEach(line => {
+        // Split row by multiple spaces.
+        const values = line.split(/\s{2,}/).map(v => v.trim());
+        
+        // Remove the initial index value if present (e.g., "0", "1 ", etc.)
+        // and if the number of values after removing index matches header count.
+        let finalValues = values;
+        if (values.length > 0 && /^\d+$/.test(values[0].trim()) && (values.length -1 === headers.length) ) {
+          finalValues = values.slice(1);
+        } else if (values.length !== headers.length) {
+          // If lengths don't match, this row might be malformed or not part of the table.
+          // For now, we'll skip it or one could try more complex parsing.
+          console.warn("Skipping row due to mismatch with header count:", line, "Headers:", headers, "Values:", values);
+          return; // Skip this line
+        }
+        
+        if (finalValues.length === headers.length) {
+          const rowObject: Record<string, any> = {};
+          headers.forEach((header, index) => {
+            rowObject[header] = finalValues[index] !== undefined ? finalValues[index] : "";
+          });
+          rows.push(rowObject);
+        }
+      });
+
+      if (rows.length === 0 && dataLines.length > 0) { // Parsed headers but no rows matched
+        return null;
+      }
+      return rows.length > 0 ? rows : null; // Return null if no data rows were successfully parsed
+
+    } catch (e) {
+      console.error("Error parsing generic table string:", e);
+      return null;
+    }
+  };
 
   const renderResultContent = () => {
-    if (resultContent === null || resultContent === undefined) return <p className="text-xs text-gray-500">No result.</p>;
+    const resultFromCell = cell.result; // This is the object like: { content: { meta: null, content: [...], isError: false }, error: null, ... }
 
-    // Specific handling for list_containers
-    if (toolName === "list_containers" && typeof resultContent === "string") {
+    if (!resultFromCell) {
+      return <p className="text-xs text-gray-500">No result data.</p>;
+    }
+
+    // The actual data payload is nested under resultFromCell.content
+    // resultFromCell.content = { meta: null, content: [...], isError: false }
+    const dataPayloadContainer = resultFromCell.content;
+
+    // Specific handling for get_container_logs
+    if (
+      toolName === "get_container_logs" &&
+      dataPayloadContainer &&
+      typeof dataPayloadContainer === 'object' &&
+      !Array.isArray(dataPayloadContainer) &&
+      dataPayloadContainer.content &&
+      Array.isArray(dataPayloadContainer.content) &&
+      dataPayloadContainer.content.length > 0 &&
+      dataPayloadContainer.content[0] &&
+      dataPayloadContainer.content[0].type === "text" &&
+      typeof dataPayloadContainer.content[0].text === "string"
+    ) {
+      let logString = dataPayloadContainer.content[0].text;
       try {
-        const lines = resultContent.trim().split('\n');
-        if (lines.length < 2) { // Header + at least one data row
-          throw new Error("Invalid table format for list_containers");
-        }
+        logString = JSON.parse(logString); // Unescape if it's a JSON-encoded string
+      } catch (e) {
+        // If not a JSON-encoded string, use as is
+        console.warn("Log text is not a JSON-encoded string, using as is for get_container_logs:", e);
+      }
+      return (
+        <pre className="text-xs whitespace-pre-wrap break-words font-mono bg-white p-1.5 border border-gray-200 rounded max-h-[400px] overflow-auto">
+          {logString}
+        </pre>
+      );
+    }
+    // Generic table parsing logic (for list_containers and other potential table outputs)
+    else if (
+      dataPayloadContainer &&
+      typeof dataPayloadContainer === 'object' &&
+      !Array.isArray(dataPayloadContainer) && // Ensure it's the container object
+      dataPayloadContainer.content &&         // Check for the inner 'content' array (dataPayloadContainer.content)
+      Array.isArray(dataPayloadContainer.content) &&
+      dataPayloadContainer.content.length > 0 &&
+      dataPayloadContainer.content[0] &&      // Check if the first element exists
+      dataPayloadContainer.content[0].type === "text" &&
+      typeof dataPayloadContainer.content[0].text === "string"
+    ) {
+      let tableString = dataPayloadContainer.content[0].text;
+      // The string itself might be quoted and contain escaped newlines.
+      // Attempt to parse it as JSON to unescape.
+      try {
+        tableString = JSON.parse(tableString);
+      } catch (e) {
+        // If JSON.parse fails, it means the string was not double-quoted JSON string.
+        // Proceed with tableString as is for parsing.
+        console.warn("Result text is not a JSON-encoded string, attempting to parse as raw table string:", e);
+      }
 
-        // Extract headers: "ID ... Status" -> ["ID", "...", "Status"]
-        // The "..." column is tricky. Pandas often uses it for truncated wide dataframes.
-        // We'll try to split by multiple spaces.
-        const headerLine = lines[0];
-        // Remove leading index like "0" from data lines if present
-        const dataLines = lines.slice(1).filter(line => !line.startsWith('[') && line.trim() !== ''); // Filter out summary line like "[6 rows x 4 columns]"
-
-        // Heuristic for header splitting: split by 2 or more spaces
-        const headers = headerLine.trim().split(/\s{2,}/);
-        // console.log("Parsed headers:", headers);
-
-
-        const rows = dataLines.map(line => {
-          // Attempt to parse rows based on header positions or split by multiple spaces
-          // This is a heuristic and might need refinement based on actual output variety
-          const values = line.trim().split(/\s{2,}/);
-          // console.log("Original line:", line, "Parsed values:", values);
-
-          // Remove the initial index value if present (e.g., "0 ", "1 ", etc.)
-          if (values.length > 0 && /^\d+$/.test(values[0])) {
-            return values.slice(1);
-          }
-          return values;
-        });
-        // console.log("Parsed rows:", rows);
-
-
-        if (headers.length === 0 || rows.length === 0) {
-           throw new Error("Could not parse table from list_containers output.");
-        }
-
+      const parsedTableData = parseGenericTableString(tableString);
+      if (parsedTableData && parsedTableData.length > 0) {
         return (
-          <div className="overflow-x-auto bg-white p-1.5 border border-gray-200 rounded max-h-[400px]">
-            <table className="min-w-full text-xs border-collapse">
-              <thead>
-                <tr className="bg-gray-50">
-                  {headers.map((header, index) => (
-                    <th key={index} className="p-1.5 border border-gray-300 text-left font-medium text-gray-700">
-                      {header.trim()}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row, rowIndex) => (
-                  <tr key={rowIndex} className="hover:bg-gray-100">
-                    {row.map((cellValue, cellIndex) => (
-                      <td key={cellIndex} className="p-1.5 border border-gray-300 text-gray-800">
-                        {cellValue.trim()}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+           <div className="overflow-x-auto bg-white p-1.5 border border-gray-200 rounded max-h-[400px]">
+            <ResultTable data={parsedTableData} />
+           </div>
         );
-      } catch (e: any) {
-        console.error("Error parsing list_containers output:", e);
-        return (
+      } else {
+        // If parsing failed or returned no data, show the (potentially unescaped) string
+         return (
           <div className="p-2 bg-yellow-50 text-yellow-700 border border-yellow-200 rounded text-xs">
-            <p>Could not display table: {e.message}</p>
-            <p className="mt-1">Raw output:</p>
+            <p>Could not parse table data from the result.</p>
+            <p className="mt-1">Processed text content:</p>
             <pre className="text-xs whitespace-pre-wrap break-words font-mono bg-white p-1.5 border border-gray-200 rounded max-h-[400px] overflow-auto mt-1">
-              {resultContent}
+              {tableString}
             </pre>
           </div>
         );
       }
     }
-
-    // Default rendering for other tools or non-string results
+    
+    // If the specific table structure is not matched, fall back to displaying the raw result.content or cell.result
+    // This will show the JSON structure if the table parsing path wasn't hit.
     return (
       <pre className="text-xs whitespace-pre-wrap break-words font-mono bg-white p-1.5 border border-gray-200 rounded max-h-[400px] overflow-auto">
-        {typeof resultContent === "string" ? resultContent : JSON.stringify(resultContent, null, 2)}
+        {JSON.stringify(dataPayloadContainer ?? resultFromCell, null, 2)}
       </pre>
     );
   };
@@ -361,8 +432,15 @@ const LogAICell: React.FC<LogAICellProps> = ({ cell, onExecute, onUpdate, onDele
                 onChange={(e) => {
                   const newTool = e.target.value;
                   setToolName(newTool);
-                  setToolArgs({});
-                  onUpdate(cell.id, cell.content ?? "", { toolName: newTool, toolArgs: {} });
+                  const newArgs = {}; // Reset args for new tool
+                  setToolArgs(newArgs);
+                  // Persist the new tool name and reset arguments
+                  const currentMetadata = {
+                    ...cell.metadata, // Preserve existing metadata
+                    toolName: newTool,
+                    toolArgs: newArgs,
+                  };
+                  onUpdate(cell.id, cell.content ?? "", currentMetadata);
                 }}
               >
                 {toolDefinitions.map((d) => (
@@ -421,37 +499,46 @@ const LogAICell: React.FC<LogAICellProps> = ({ cell, onExecute, onUpdate, onDele
           </CardContent>
         </Card>
 
-        {/* Execution State */}
-        {isExecuting && (
-          <div className="flex items-center text-xs text-rose-600">
-            <div className="animate-spin h-3 w-3 border-2 border-rose-600 rounded-full border-t-transparent mr-1.5"></div>
-            Executing…
-          </div>
-        )}
-
-        {/* Result */}
-        {cell.status !== "running" && cell.status !== "queued" && (
+        {/* Execution State and Result Combined */}
+        {/* Show card if executing OR if there is any result/error */}
+        {(isExecuting || (cell.result !== undefined && cell.result !== null)) && (
           <Card className={`border ${cardBorder}`}>
             <CardHeader className={`flex flex-row items-center justify-between p-2 ${resultBg}`}>
               <CardTitle className={`text-sm font-semibold ${headerText}`}>Execution Result</CardTitle>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setIsResultExpanded(!isResultExpanded)}
-                className="text-xs"
-              >
-                {isResultExpanded ? (
-                  <>
-                    <ChevronUpIcon className="h-4 w-4 mr-1" /> Hide
-                  </>
-                ) : (
-                  <>
-                    <ChevronDownIcon className="h-4 w-4 mr-1" /> Show
-                  </>
-                )}
-              </Button>
+              {/* Show toggle only if not executing and there's a result */}
+              {!isExecuting && cell.result !== undefined && cell.result !== null && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setIsResultExpanded(!isResultExpanded)}
+                  className="text-xs"
+                >
+                  {isResultExpanded ? (
+                    <>
+                      <ChevronUpIcon className="h-4 w-4 mr-1" /> Hide
+                    </>
+                  ) : (
+                    <>
+                      <ChevronDownIcon className="h-4 w-4 mr-1" /> Show
+                    </>
+                  )}
+                </Button>
+              )}
             </CardHeader>
-            {isResultExpanded && <CardContent className="p-2">{error ? <div className="p-2 bg-red-50 text-red-700 border border-red-200 rounded text-xs">{error}</div> : renderResultContent()}</CardContent>}
+            {/* Render CardContent if executing (to show progress) or if result is expanded */}
+            {(isExecuting || isResultExpanded) && (
+              <CardContent className="p-2">
+                {isExecuting ? (
+                  <div className="flex items-center text-xs text-rose-600 py-2">
+                    <div className="animate-spin h-3 w-3 border-2 border-rose-600 rounded-full border-t-transparent mr-1.5"></div>
+                    Executing…
+                  </div>
+                ) : (
+                  // This part is only reached if !isExecuting AND isResultExpanded
+                  error ? <div className="p-2 bg-red-50 text-red-700 border border-red-200 rounded text-xs">{error}</div> : renderResultContent()
+                )}
+              </CardContent>
+            )}
           </Card>
         )}
       </div>
@@ -459,4 +546,4 @@ const LogAICell: React.FC<LogAICellProps> = ({ cell, onExecute, onUpdate, onDele
   );
 };
 
-export default LogAICell; 
+export default LogAICell;
