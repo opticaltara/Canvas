@@ -69,6 +69,4 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Get cached settings instance"""
     settings = Settings()
-    print(f"OpenRouter API key: {settings.openrouter_api_key}")
-    print(f"AI model: {settings.ai_model}")
     return settings

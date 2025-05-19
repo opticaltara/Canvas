@@ -1,12 +1,14 @@
-# Sherlog Canvas
+# Sherlog Canvas (Alpha)
 
-Sherlog Canvas is a reactive notebook interface for software engineering investigation tasks, focused on debugging, log analysis, metric analysis, and database queries. It integrates advanced AI capabilities to assist with complex investigations.
+**Note**: Sherlog is still in development and there might be quite a few kinks and issues. We are actively working on fixing those. Whenever you find an problem, feel free to create an issue and we will try to resolve ASAP
+
+Sherlog Canvas is a reactive jupyter notebook like interface for software engineering investigation tasks, focused on debugging, log analysis, metric analysis, and database queries. It integrates advanced AI capabilities to assist with complex investigations.
 
 ## Features
 
 - **Reactive Notebook Interface**: Changes to cells automatically update dependent cells
 - **Multi-Agent AI System**: Creates investigation plans and generates cells based on user queries
-- **Multiple Data Source Integration**: Connect to SQL databases, Prometheus, Loki, Grafana, and S3
+- **Multiple Data Source Integration**: Connect to Log sources, github, filesystem, code repos, metric sources, docker etc via the power of MCP
 - **Specialized Cell Types**: SQL, log queries, metrics, Python code, and more
 - **Collaborative Investigation Environment**: AI and users work together to solve problems
 
@@ -17,10 +19,10 @@ Sherlog Canvas is a reactive notebook interface for software engineering investi
 | `markdown` | Rich-text documentation |
 | `python` | Execute Python code inside an isolated sandbox |
 | `github` | Interact with the GitHub API |
+| `logai`  | Log ai analysis tools 
 | `filesystem` | Read-only access to a host directory (needs `SHERLOG_HOST_FS_ROOT`) |
 | `summarization` | AI-generated summaries |
 | `investigation_report` | Render a structured investigation write-up |
-| `ai_query` | Generic AI agent cell |
 
 ## Architecture
 
@@ -42,19 +44,16 @@ Getting from clone to a fully working instance only requires two steps: create a
    cd sherlog-canvas
    ```
 
-2. **Create a `.env` file** (minimum required configuration)
+2. **Clone the `.env.example` file and rename to  `.env` file** (minimum required configuration)
 
    ```env
    # .env – minimal setup
-   SHERLOG_OPENROUTER_API_KEY=your_openrouter_api_key_here   # required for AI features
+   SHERLOG_OPENROUTER_API_KEY=your_openrouter_api_key_here   # required for the AI models (internally sherlog uses a host of different LLMs depending on the task so we use openrouter)
 
    # Optional – expose a read-only slice of your local filesystem to *filesystem* cells
    # SHERLOG_HOST_FS_ROOT=/Users/$(whoami)
 
-   # Optional – override the default AI model
-   # SHERLOG_AI_MODEL=anthropic/claude-3.7-sonnet
-
-   # The database defaults to SQLite at ./data/sherlog.db – nothing to change for basic use.
+   # The internal database defaults to SQLite at ./data/sherlog.db – nothing to change for basic use.
    ```
 
    Don't worry about memorising every knob – the [Configuration](#configuration) section lists them all with sensible defaults.
@@ -86,7 +85,7 @@ That's it – you now have a fully-functional, AI-powered investigative notebook
 
 ## Detailed Setup Guide
 
-This guide provides more comprehensive instructions for setting up Sherlog Canvas. You can choose between a Docker-based setup or a manual setup.
+This guide provides more comprehensive instructions for setting up Sherlog Canvas. You can choose between a Docker-based setup.
 
 ### Prerequisites
 
@@ -94,9 +93,6 @@ Before you begin, ensure you have the following installed:
 
 *   **Git**: For cloning the repository.
 *   **Docker and Docker Compose**: (Recommended for an easier setup) For running the application and its dependencies in containers.
-*   **Python 3.9+**: If you choose the manual setup for the backend.
-*   **Node.js 16+**: If you choose the manual setup for the frontend (not covered in this guide, assuming pre-built frontend or separate setup).
-*   **Go 1.18+**: If you plan to build or run Go-based MCP servers manually (e.g., `mcp-grafana`).
 
 ### Option 1: Docker-Based Setup (Recommended)
 
@@ -146,63 +142,6 @@ This is the easiest way to get Sherlog Canvas up and running. The `start.sh` scr
     docker-compose down
     ```
 
-### Option 2: Manual Backend Setup
-
-If you prefer to run the backend server manually without Docker:
-
-1.  **Clone the repository**:
-    ```bash
-    git clone https://github.com/yourusername/sherlog-canvas.git
-    cd sherlog-canvas
-    ```
-
-2.  **Set up a Python virtual environment**:
-    ```bash
-    python3 -m venv venv
-    source venv/bin/activate  # On Windows: venv\Scripts\activate
-    ```
-
-3.  **Install Python dependencies**:
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-4.  **Configure environment variables**:
-    You can set environment variables directly in your shell or create a `.env` file and use a library like `python-dotenv` (though the application loads `.env` by default if present). Essential variables include:
-    *   `SHERLOG_OPENROUTER_API_KEY`: Your OpenRouter API key.
-    *   `SHERLOG_DB_TYPE`: Set to `sqlite` (default) or `postgresql`.
-    *   If `SHERLOG_DB_TYPE=sqlite`, `SHERLOG_DB_FILE` specifies the path (default: `./data/sherlog.db`).
-    *   If `SHERLOG_DB_TYPE=postgresql`, ensure `DATABASE_URL` is set (e.g., `postgresql://user:pass@host:port/dbname`).
-    *   Refer to the [Configuration](#configuration) section for more variables.
-
-    Example for `.env` file (defaulting to SQLite):
-    ```env
-    SHERLOG_OPENROUTER_API_KEY=your_openrouter_api_key_here
-    SHERLOG_DB_TYPE=sqlite
-    SHERLOG_DB_FILE=./data/sherlog.db
-
-    # Example for PostgreSQL (if you choose to use it):
-    # SHERLOG_DB_TYPE=postgresql
-    # DATABASE_URL=postgresql://sherlog:sherlog@localhost:5432/sherlog
-    ```
-
-5.  **Run database migrations (if applicable)**:
-    If you are using PostgreSQL and setting up the database for the first time, or if there are schema changes, you might need to run migrations. (Assuming Alembic is used, though not explicitly stated in provided context - adapt if different).
-    ```bash
-    # Example if Alembic is set up in backend/db
-    # alembic upgrade head
-    ```
-    For SQLite, the database and tables are typically created automatically on first access if they don't exist, based on the SQLAlchemy models.
-
-6.  **Start the backend server**:
-    ```bash
-    python -m uvicorn backend.server:app --reload --host 0.0.0.0 --port 8000
-    ```
-    The backend will be accessible at `http://localhost:8000`.
-
-7.  **Manually Start MCP Servers**:
-    If you are not using the Docker setup, you will need to start any required MCP servers manually. Refer to the [MCP Servers](#mcp-servers) section for instructions on setting up servers like `mcp-grafana` or `pg-mcp`. Ensure they are configured and running so the backend can connect to them.
-
 ### Configuring Data Connections
 
 Once Sherlog Canvas is running, you can configure connections to your data sources:
@@ -212,12 +151,7 @@ Once Sherlog Canvas is running, you can configure connections to your data sourc
 3.  **Add a New Connection**:
     *   Click "Add Connection" or a similar button.
     *   Select the type of data source you want to connect to (e.g., Grafana, PostgreSQL, Prometheus, Loki, S3).
-4.  **Provide Connection Details**:
-    *   **Grafana**: URL of your Grafana instance and an API key with viewer or editor permissions.
-    *   **PostgreSQL**: A standard PostgreSQL connection string (e.g., `postgresql://username:password@host:port/database_name`).
-    *   **Prometheus**: URL of your Prometheus server.
-    *   **Loki**: URL of your Loki server.
-    *   **S3**: S3 endpoint URL, bucket name, access key ID, and secret access key.
+4.  **Provide Connection Details**
 5.  **Save Connection**:
     Sherlog Canvas will store these connection details (by default in `./data/connections.json` or as configured by `SHERLOG_CONNECTION_STORAGE_TYPE`). When a connection is added or used, Sherlog Canvas will typically ensure the relevant MCP server is running (if managed by Sherlog, e.g., via Docker) or attempt to connect to an existing one.
 
@@ -225,106 +159,16 @@ This setup allows the AI agents within Sherlog Canvas to query and interact with
 
 ## MCP Servers
 
-Sherlog Canvas uses Machine-Callable Package (MCP) servers for data source integration. These are standalone servers that expose standardized APIs for AI agents to interact with various data sources.
-
-### Supported MCP Servers
-
-| Data Source | MCP Implementation | Purpose                                 |
-|-------------|----------------------|-----------------------------------------|
-| Grafana     | mcp-grafana (Go)    | Query Grafana dashboards, metrics, logs |
-| PostgreSQL  | pg-mcp (Docker)     | Query PostgreSQL databases              |
-| Prometheus  | *(coming soon)*     | Query Prometheus metrics                |
-| Loki        | *(coming soon)*     | Query Loki logs                         |
-| S3          | *(coming soon)*     | Interact with S3 storage                |
+Sherlog Canvas uses MCP servers for data source integration.
 
 ### Setting Up Data Connections
 
 1. Start Sherlog Canvas with `./start.sh`
 2. Navigate to the "Data Connections" tab in the UI
 3. Click "Add Connection" and select the connection type
-4. Provide the connection details:
-   - **Grafana**: URL and API key
-   - **PostgreSQL**: Connection string (e.g., `postgresql://user:pass@localhost/dbname`)
-   - **Prometheus**: URL and optional authentication
-   - **Loki**: URL and optional authentication
-   - **S3**: Endpoint, bucket, access key, and secret key
+4. Provide the connection details
 
-Sherlog Canvas will:
-1. Store your connection details securely
-2. Start the appropriate MCP server for each connection
-3. Automatically connect your AI agents to these data sources
 
-### Manual MCP Server Setup
-
-You can also install and run MCP servers manually:
-
-#### Grafana MCP Server (Go-based)
-
-```bash
-# Install mcp-grafana using Go
-GOBIN="$HOME/go/bin" go install github.com/grafana/mcp-grafana/cmd/mcp-grafana@latest
-
-# Start Grafana MCP server
-export GRAFANA_URL=https://your-grafana-url
-export GRAFANA_API_KEY=your-api-key
-mcp-grafana --port 9100
-```
-
-#### PostgreSQL MCP Server (Docker-based)
-
-```bash
-# Clone the repository
-git clone https://github.com/stuzero/pg-mcp.git
-cd pg-mcp
-
-# Start PostgreSQL MCP server with Docker Compose
-export PG_CONNECTION_STRING=postgresql://user:pass@localhost/dbname
-docker-compose up -d
-```
-The server will be available at http://localhost:9201 by default.
-
-## Manual Setup
-
-If you prefer to start components individually:
-
-### Prerequisites
-- Python 3.9+
-- Node.js 16+
-- Go 1.18+ (for mcp-grafana)
-- Git (for cloning repositories)
-- Docker and Docker Compose (for pg-mcp)
-- Access to data sources (PostgreSQL, Grafana, etc.)
-
-### Backend Setup
-
-```bash
-# Create a virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Start the backend server
-python -m uvicorn backend.server:app --reload --host 0.0.0.0 --port 8000
-```
-
-## Usage Examples
-
-### Investigating Service Errors
-
-1. Start with an AI query: "Investigate the increase in 500 errors in the payment service"
-2. The AI will generate:
-   - A PromQL query to analyze error rates
-   - A Loki query to find error logs
-   - An SQL query to check database state
-   - Python code to correlate results
-
-### User Session Analysis
-
-1. Ask the AI: "Analyze user sessions that ended in abandoned carts"
-2. Follow the investigation flow or modify any cell
-3. Add your own cells for custom analysis
 
 ## Core Concepts
 
@@ -375,7 +219,6 @@ Configuration is managed through environment variables with the `SHERLOG_` prefi
 | `SHERLOG_CORS_ORIGINS` | CORS origins (comma-separated) | `*` |
 | `SHERLOG_AUTH_ENABLED` | Enable authentication | `false` |
 | `SHERLOG_OPENROUTER_API_KEY` | OpenRouter API key (enables AI features) | *(none)* |
-| `SHERLOG_AI_MODEL` | LLM model identifier passed to OpenRouter | `anthropic/claude-3.7-sonnet` |
 | `SHERLOG_HOST_FS_ROOT` | Host path to mount read-only for `filesystem` cells | *(unset)* |
 | `SHERLOG_LOGFIRE_TOKEN` | LogFire token for logging | |
 | `SHERLOG_ENVIRONMENT` | Environment (development, production) | `development` |
@@ -391,30 +234,3 @@ Configuration is managed through environment variables with the `SHERLOG_` prefi
 | `SHERLOG_PYTHON_CELL_TIMEOUT` | Timeout for Python cell execution (seconds) | `30` |
 | `SHERLOG_PYTHON_CELL_MAX_MEMORY` | Max memory for Python cell execution (MB) | `1024` |
 | `SHERLOG_DEFAULT_QUERY_TIMEOUT` | Default timeout for database queries (seconds) | `30` |
-
-## Project Structure
-
-```
-sherlog-canvas/
-├── backend/                 # Backend Python code
-│   ├── ai/                  # AI agent system
-│   ├── core/                # Core notebook functionality
-│   │   ├── executors/       # Cell executors for different cell types
-│   ├── mcp/                 # MCP server integration
-│   ├── services/            # Backend services
-│   ├── routes/              # API routes
-│   ├── config.py            # Configuration
-│   └── server.py            # FastAPI server
-├── docker-compose.yml       # Docker Compose configuration
-├── Dockerfile.backend       # Backend Docker image
-└── requirements.txt         # Python dependencies
-```
-
-## Extending Sherlog Canvas
-
-- Fork or create an MCP server that exposes a REST/JSON interface – see [`mcp-grafana`](https://github.com/grafana/mcp-grafana) for inspiration.
-- Drop a small **connection handler** into `backend/services/connection_handlers/` that translates notebook cell requests into HTTP calls against your server.
-- Register the handler with `register_handler()` so the backend can discover it.
-- Re-build and start the containers – the frontend will automatically list any new connection types exposed by the backend.
-
-Sherlog's plugin-friendly architecture lets you adapt the notebook to your organisation's unique data sources without touching the core codebase.
